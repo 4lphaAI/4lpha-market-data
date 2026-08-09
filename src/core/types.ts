@@ -27,7 +27,12 @@ export interface JobSpec {
   jitterMs?: number;
   /** Maximum wall-clock time a single run may take before it is failed. */
   timeoutMs: number;
-  run: () => Promise<void>;
+  /**
+   * The job body. The signal is aborted when the run exceeds `timeoutMs`;
+   * pass it to fetch/db calls so a timed-out run actually stops instead of
+   * lingering as a zombie while the next run starts.
+   */
+  run: (signal: AbortSignal) => Promise<void>;
 }
 
 /** Rolling health of a registered job. */

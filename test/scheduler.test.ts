@@ -182,6 +182,35 @@ describe("scheduler timeouts", () => {
 
     await store.close();
   });
+
+  it("aborts the run's signal on timeout so cooperative runs can stop", async () => {
+    const store = new MemoryStore();
+    const scheduler = createScheduler(store);
+    let aborts = 0;
+
+    scheduler.register({
+      name: "cooperative",
+      intervalMs: 200,
+      timeoutMs: 15,
+      run: (signal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            aborts += 1;
+            reject(signal.reason instanceof Error ? signal.reason : new Error("aborted"));
+          });
+        }),
+    });
+
+    scheduler.start();
+    await sleep(60);
+    await scheduler.stop();
+
+    assert.ok(aborts >= 1, `expected the signal to be aborted, got ${aborts}`);
+    const health = healthOf(scheduler.healthSnapshot(), "cooperative");
+    assert.match(health.lastError ?? "", /timed out/);
+
+    await store.close();
+  });
 });
 
 describe("scheduler overlap protection", () => {

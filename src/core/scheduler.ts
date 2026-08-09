@@ -64,16 +64,21 @@ export function createScheduler(store: SnapshotStore, options: SchedulerOptions 
   }
 
   async function runWithTimeout(spec: JobSpec): Promise<void> {
+    const controller = new AbortController();
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_resolve, reject) => {
       timer = setTimeout(() => {
-        reject(new JobTimeoutError(spec.timeoutMs));
+        const reason = new JobTimeoutError(spec.timeoutMs);
+        // Aborting gives cooperative runs (fetch, pg) a way to actually stop;
+        // the race below still fails the run even if the body ignores the signal.
+        controller.abort(reason);
+        reject(reason);
       }, spec.timeoutMs);
     });
     try {
       // `Promise.race` attaches a rejection handler to the job promise, so a
       // late failure after a timeout cannot become an unhandled rejection.
-      await Promise.race([spec.run(), timeout]);
+      await Promise.race([spec.run(controller.signal), timeout]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
