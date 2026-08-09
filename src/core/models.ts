@@ -150,3 +150,130 @@ export function mergeTokenSnapshot(
   merged.updatedFields = updated;
   return merged;
 }
+
+/**
+ * Verdict of a token security scan.
+ *
+ * `unavailable` is a first-class result, not an error: a scanner that has never
+ * seen the token, or that is down, says "I don't know" and the caller decides
+ * what to do with that. It is deliberately the *weakest* level, so it can never
+ * mask a real verdict from another scanner.
+ */
+export type RiskLevel = "ok" | "warn" | "danger" | "unavailable";
+
+/** Severity ordering used when several scanners disagree. Higher is worse. */
+const RISK_RANK: Record<RiskLevel, number> = {
+  unavailable: 0,
+  ok: 1,
+  warn: 2,
+  danger: 3,
+};
+
+/**
+ * Conservative combination of two verdicts: the worse one wins, and a scanner
+ * with no opinion never drags a real verdict down to `unavailable`.
+ */
+export function worstRiskLevel(a: RiskLevel, b: RiskLevel): RiskLevel {
+  return RISK_RANK[a] >= RISK_RANK[b] ? a : b;
+}
+
+/** Normalized security scan for one token, from one scanner or several merged. */
+export interface TokenSecuritySummary {
+  riskLevel: RiskLevel;
+  /** Stable snake_case flag names, deduplicated and sorted. */
+  flags: string[];
+  /** Epoch milliseconds at which the scan was performed. */
+  scannedAt: number;
+  /** Scanner that produced it, e.g. `onchainos` or `onchainos+gmgn`. */
+  source: string;
+}
+
+/** Holder distribution for one token. Every field is nullable and independent. */
+export interface HolderStats {
+  /** Total holder count. */
+  holders: number | null;
+  /** Share of supply held by the top 10 holders, as a percentage 0..100. */
+  top10Pct: number | null;
+  /** Number of "smart money" wallets currently holding. */
+  smartMoneyCount: number | null;
+  /** Epoch milliseconds at which the stats were captured. */
+  asOf: number;
+  source: string;
+}
+
+/** An empty, nothing-known holder read. */
+export function emptyHolderStats(source: string, asOf: number): HolderStats {
+  return { holders: null, top10Pct: null, smartMoneyCount: null, asOf, source };
+}
+
+/**
+ * Field-wise merge of two holder reads: a `null` never overwrites a known value,
+ * so a smart-money-only read can be layered onto a count-only read.
+ */
+export function mergeHolderStats(base: HolderStats, incoming: HolderStats): HolderStats {
+  return {
+    holders: incoming.holders ?? base.holders,
+    top10Pct: incoming.top10Pct ?? base.top10Pct,
+    smartMoneyCount: incoming.smartMoneyCount ?? base.smartMoneyCount,
+    asOf: Math.max(base.asOf, incoming.asOf),
+    source: base.source === incoming.source ? base.source : `${base.source}+${incoming.source}`,
+  };
+}
+
+/**
+ * State of one PancakeSwap V3 pool.
+ *
+ * The first six fields come from the pool contract and are always present. The
+ * three USD-denominated ones come from PancakeSwap's aggregation API and stay
+ * `null` when only the on-chain path ran — they are never derived from a guess.
+ */
+export interface PoolStats {
+  /** Pool contract address, lowercased. */
+  pool: string;
+  /** token0 contract address, lowercased. */
+  token0: string;
+  /** token1 contract address, lowercased. */
+  token1: string;
+  token0Symbol: string | null;
+  token1Symbol: string | null;
+  /** Fee tier in hundredths of a basis point, e.g. `2500` for 0.25%. */
+  fee: number;
+  /** In-range liquidity, as a decimal string because it exceeds `Number`. */
+  liquidity: string;
+  /** Q64.96 price, as a decimal string for the same reason. */
+  sqrtPriceX96: string;
+  tick: number;
+  tvlUsd: number | null;
+  volume24hUsd: number | null;
+  /** Fee APR: 24h fees over TVL, annualized. `null` without USD data. */
+  aprPct: number | null;
+  /** Epoch milliseconds at which the pool was read. */
+  asOf: number;
+  source: string;
+}
+
+/** Health banding of a Venus borrow position. */
+export type VenusTier = "HEALTHY" | "WARNING" | "DANGER" | "LIQUIDATABLE";
+
+/** One market an owner is active in, valued in USD. */
+export interface VenusAssetPosition {
+  /** vToken symbol, e.g. `vUSDT`. */
+  symbol: string;
+  supplyUsd: number;
+  borrowUsd: number;
+}
+
+/** An owner's whole Venus Core Pool position. */
+export interface VenusHealth {
+  /** Owner address, lowercased. */
+  owner: string;
+  /** Collateral-weighted collateral over borrows. `null` when nothing is borrowed. */
+  healthFactor: number | null;
+  tier: VenusTier;
+  /** Collateral value already multiplied by each market's collateral factor. */
+  collateralValueUsd: number;
+  borrowValueUsd: number;
+  assets: VenusAssetPosition[];
+  /** Epoch milliseconds at which the chain was read. */
+  asOf: number;
+}

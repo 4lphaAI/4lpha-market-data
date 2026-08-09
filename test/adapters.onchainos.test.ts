@@ -5,8 +5,10 @@ import {
   createSignature,
   fetchOnchainosKlines,
   fetchOnchainosPrice,
+  fetchOnchainosTokenScan,
   hasOnchainosCredentials,
   normalizeKlines,
+  normalizeTokenScan,
 } from "../src/adapters/onchainos.js";
 import { AdapterError, MissingCredentialsError } from "../src/adapters/http.js";
 import { fakeFetch, jsonResponse, textResponse, throwingFetch } from "./helpers.js";
@@ -233,5 +235,95 @@ describe("fetchOnchainosPrice", () => {
     const snapshot = await fetchOnchainosPrice({ address: ADDRESS, fetchFn: fake.fetch });
     assert.equal(snapshot.priceUsd, null);
     assert.equal(snapshot.holders, null);
+  });
+});
+
+/** A clean scan row, trimmed to the fields the normalizer actually reads. */
+const CLEAN_SCAN = {
+  chainId: "56",
+  isChainSupported: true,
+  isHoneypot: false,
+  isNotOpenSource: false,
+  isMintable: false,
+  riskLevel: "LOW",
+  tokenAddress: LOWER,
+};
+
+describe("fetchOnchainosTokenScan", () => {
+  it("posts a single-token batch to the token-scan endpoint", async () => {
+    setCredentials();
+    const fake = fakeFetch(() => jsonResponse({ code: "0", data: [CLEAN_SCAN] }));
+    const summary = await fetchOnchainosTokenScan({ address: ADDRESS, fetchFn: fake.fetch });
+
+    const call = fake.calls[0];
+    assert.ok(call !== undefined);
+    assert.equal(call.method, "POST");
+    assert.equal(new URL(call.url).pathname, "/api/v6/security/token-scan");
+    assert.deepEqual(JSON.parse(call.body ?? "null"), {
+      source: "onchain_os_cli",
+      tokenList: [{ chainId: "56", contractAddress: LOWER }],
+    });
+    assert.equal(summary.riskLevel, "ok");
+    assert.equal(summary.source, "onchainos");
+  });
+
+  it("propagates a rate limit as a typed error", async () => {
+    setCredentials();
+    const fake = fakeFetch(() => jsonResponse({}, 429));
+    await assert.rejects(
+      () => fetchOnchainosTokenScan({ address: ADDRESS, fetchFn: fake.fetch }),
+      /rate limited/u,
+    );
+  });
+});
+
+describe("normalizeTokenScan", () => {
+  it("maps every risk level onto the service vocabulary", () => {
+    const cases: Array<[string, string]> = [
+      ["LOW", "ok"],
+      ["MEDIUM", "warn"],
+      ["HIGH", "danger"],
+      ["CRITICAL", "danger"],
+      ["low", "ok"],
+    ];
+    for (const [upstream, expected] of cases) {
+      assert.equal(normalizeTokenScan([{ ...CLEAN_SCAN, riskLevel: upstream }]).riskLevel, expected);
+    }
+  });
+
+  it("reads an unrecognized or missing risk level as unavailable, not as ok", () => {
+    assert.equal(normalizeTokenScan([{ ...CLEAN_SCAN, riskLevel: null }]).riskLevel, "unavailable");
+    assert.equal(normalizeTokenScan([{ ...CLEAN_SCAN, riskLevel: "WAT" }]).riskLevel, "unavailable");
+  });
+
+  it("reads an empty batch as unavailable", () => {
+    assert.equal(normalizeTokenScan([]).riskLevel, "unavailable");
+    assert.equal(normalizeTokenScan(null).riskLevel, "unavailable");
+  });
+
+  it("reads an unsupported chain as unavailable regardless of risk level", () => {
+    const summary = normalizeTokenScan([{ ...CLEAN_SCAN, isChainSupported: false }]);
+    assert.equal(summary.riskLevel, "unavailable");
+    assert.deepEqual(summary.flags, []);
+  });
+
+  it("collects only the booleans that are explicitly true, sorted", () => {
+    const summary = normalizeTokenScan([
+      {
+        ...CLEAN_SCAN,
+        riskLevel: "HIGH",
+        isHoneypot: true,
+        isMintable: true,
+        isNotOpenSource: "true",
+        isWash: 1,
+      },
+    ]);
+    assert.equal(summary.riskLevel, "danger");
+    // Truthy-but-not-`true` values are ignored: the upstream sends real booleans.
+    assert.deepEqual(summary.flags, ["honeypot", "mintable"]);
+  });
+
+  it("accepts a bare object as well as the batch array", () => {
+    assert.equal(normalizeTokenScan(CLEAN_SCAN).riskLevel, "ok");
   });
 });

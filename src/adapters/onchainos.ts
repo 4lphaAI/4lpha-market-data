@@ -13,7 +13,7 @@
  */
 
 import { createHmac } from "node:crypto";
-import type { Candle, TokenSnapshot } from "../core/models.js";
+import type { Candle, RiskLevel, TokenSecuritySummary, TokenSnapshot } from "../core/models.js";
 import {
   AdapterError,
   MissingCredentialsError,
@@ -239,4 +239,97 @@ export function normalizePriceInfo(address: string, data: unknown): TokenSnapsho
     priceChange24hPct: parseNum(row["priceChange24H"]),
     updatedFields: [],
   };
+}
+
+export interface OnchainosTokenScanParams {
+  address: string;
+  signal?: AbortSignal | undefined;
+  fetchFn?: FetchFn;
+}
+
+/**
+ * Runs the OKX token-scan risk check, the primary security source.
+ *
+ * The endpoint takes a batch but is only ever asked about one token here, so the
+ * caller's failure model stays per-token rather than per-batch.
+ */
+export async function fetchOnchainosTokenScan(
+  params: OnchainosTokenScanParams,
+): Promise<TokenSecuritySummary> {
+  const address = params.address.toLowerCase();
+  const data = await signedRequest({
+    method: "POST",
+    path: "/api/v6/security/token-scan",
+    body: {
+      source: "onchain_os_cli",
+      tokenList: [{ chainId: BSC_CHAIN_INDEX, contractAddress: address }],
+    },
+    fetchFn: params.fetchFn ?? globalThis.fetch,
+    signal: params.signal,
+  });
+  return normalizeTokenScan(data);
+}
+
+/**
+ * Each boolean in the scan payload maps to one stable flag name. Kept as a
+ * table so a new upstream signal is one line, and so the flag vocabulary the
+ * API exposes is visible in one place.
+ */
+const SCAN_FLAGS: Array<[string, string]> = [
+  ["isHoneypot", "honeypot"],
+  ["isRubbishAirdrop", "rubbish_airdrop"],
+  ["isAirdropScam", "airdrop_scam"],
+  ["isLowLiquidity", "low_liquidity"],
+  ["isDumping", "dumping"],
+  ["isLiquidityRemoval", "liquidity_removal"],
+  ["isPump", "pump"],
+  ["isWash", "wash_trading"],
+  ["isFakeLiquidity", "fake_liquidity"],
+  ["isWash2", "wash_trading_vendor"],
+  ["isFundLinkage", "fund_linkage"],
+  ["isVeryLowLpBurn", "very_low_lp_burn"],
+  ["isVeryHighLpHolderProp", "lp_holder_concentration"],
+  ["isHasBlockingHis", "blocking_history"],
+  ["isOverIssued", "over_issued"],
+  ["isCounterfeit", "counterfeit"],
+  ["isNotOpenSource", "not_open_source"],
+  ["isMintable", "mintable"],
+  ["isHasFrozenAuth", "freeze_authority"],
+  ["isNotRenounced", "not_renounced"],
+  ["isHasAssetEditAuth", "asset_edit_authority"],
+];
+
+/**
+ * Exported for tests: maps the scan payload onto a {@link TokenSecuritySummary}.
+ *
+ * An empty batch, an unsupported chain or an unrecognized risk level all yield
+ * `unavailable` — the scanner declining to answer is never read as approval.
+ */
+export function normalizeTokenScan(data: unknown): TokenSecuritySummary {
+  const scannedAt = Date.now();
+  const first = asArray(data)[0];
+  const row = isRecord(first) ? first : isRecord(data) ? data : null;
+  if (row === null || row["isChainSupported"] === false) {
+    return { riskLevel: "unavailable", flags: [], scannedAt, source: SOURCE };
+  }
+
+  const flags = SCAN_FLAGS.filter(([key]) => row[key] === true)
+    .map(([, flag]) => flag)
+    .sort();
+
+  return { riskLevel: toRiskLevel(row["riskLevel"]), flags, scannedAt, source: SOURCE };
+}
+
+function toRiskLevel(value: unknown): RiskLevel {
+  switch (parseStr(value)?.toUpperCase()) {
+    case "LOW":
+      return "ok";
+    case "MEDIUM":
+      return "warn";
+    case "HIGH":
+    case "CRITICAL":
+      return "danger";
+    default:
+      return "unavailable";
+  }
 }

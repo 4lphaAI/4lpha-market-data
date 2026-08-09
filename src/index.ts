@@ -6,6 +6,8 @@ import { createServer } from "./server.js";
 import { binancePricesJob } from "./jobs/binancePrices.js";
 import { binanceUniverseJob } from "./jobs/binanceUniverse.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
+import { pancakePoolsJob } from "./jobs/pancakePools.js";
+import { venusHealthHotJob, venusHealthJob } from "./jobs/venusHealth.js";
 
 loadDotEnv();
 
@@ -42,6 +44,10 @@ scheduler.register({
 scheduler.register(fourmemeRankingJob(store));
 scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
+scheduler.register(pancakePoolsJob(store));
+// Both Venus jobs no-op until an operator writes `tracked:venus-owners`.
+scheduler.register(venusHealthJob(store));
+scheduler.register(venusHealthHotJob(store));
 
 scheduler.start();
 
