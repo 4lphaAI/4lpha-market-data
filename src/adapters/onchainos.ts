@@ -1,0 +1,242 @@
+/**
+ * OnchainOS (OKX Web3 DEX) adapter — the preferred kline and price source.
+ *
+ * Requests are HMAC-signed. The prehash string is
+ * `timestamp + METHOD + requestPath + body`, where `requestPath` includes the
+ * query string exactly as sent, so the query is built once and reused for both
+ * the signature and the URL.
+ *
+ * Credentials come from `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE` and
+ * the optional `OKX_PROJECT_ID`. When any required one is missing the adapter
+ * throws {@link MissingCredentialsError}, which callers read as "source
+ * unavailable" rather than as a failure.
+ */
+
+import { createHmac } from "node:crypto";
+import type { Candle, TokenSnapshot } from "../core/models.js";
+import {
+  AdapterError,
+  MissingCredentialsError,
+  asArray,
+  isRecord,
+  parseNum,
+  parseStr,
+  requestSignal,
+  sanitizeMessage,
+  sortCandles,
+  toEpochMs,
+  type FetchFn,
+} from "./http.js";
+
+const SOURCE = "onchainos";
+const BASE_URL = "https://web3.okx.com";
+const BSC_CHAIN_INDEX = "56";
+const MAX_KLINE_LIMIT = 299;
+
+interface Credentials {
+  apiKey: string;
+  secretKey: string;
+  passphrase: string;
+  projectId: string | null;
+}
+
+/** True when every required OKX credential is present in the environment. */
+export function hasOnchainosCredentials(): boolean {
+  return readCredentials() !== null;
+}
+
+function readCredentials(): Credentials | null {
+  const apiKey = process.env["OKX_API_KEY"]?.trim();
+  const secretKey = process.env["OKX_SECRET_KEY"]?.trim();
+  const passphrase = process.env["OKX_PASSPHRASE"]?.trim();
+  const projectId = process.env["OKX_PROJECT_ID"]?.trim();
+  if (!apiKey || !secretKey || !passphrase) return null;
+  return {
+    apiKey,
+    secretKey,
+    passphrase,
+    projectId: projectId !== undefined && projectId !== "" ? projectId : null,
+  };
+}
+
+/** Exported for tests: the base64 HMAC-SHA256 signature of one request. */
+export function createSignature(input: {
+  timestamp: string;
+  method: "GET" | "POST";
+  requestPath: string;
+  body: string;
+  secretKey: string;
+}): string {
+  const prehash = `${input.timestamp}${input.method}${input.requestPath}${input.body}`;
+  return createHmac("sha256", input.secretKey).update(prehash).digest("base64");
+}
+
+async function signedRequest(input: {
+  method: "GET" | "POST";
+  path: string;
+  query?: Array<[string, string]>;
+  body?: unknown;
+  fetchFn: FetchFn;
+  signal: AbortSignal | undefined;
+}): Promise<unknown> {
+  const credentials = readCredentials();
+  if (credentials === null) throw new MissingCredentialsError(SOURCE);
+
+  const search = new URLSearchParams(input.query ?? []).toString();
+  const requestPath = search === "" ? input.path : `${input.path}?${search}`;
+  const bodyText = input.method === "POST" && input.body !== undefined ? JSON.stringify(input.body) : "";
+  const timestamp = new Date().toISOString();
+
+  const headers: Record<string, string> = {
+    accept: "application/json",
+    "content-type": "application/json",
+    "user-agent": "Mozilla/5.0",
+    "OK-ACCESS-KEY": credentials.apiKey,
+    "OK-ACCESS-PASSPHRASE": credentials.passphrase,
+    "OK-ACCESS-TIMESTAMP": timestamp,
+    "OK-ACCESS-SIGN": createSignature({
+      timestamp,
+      method: input.method,
+      requestPath,
+      body: bodyText,
+      secretKey: credentials.secretKey,
+    }),
+  };
+  if (credentials.projectId !== null) headers["OK-ACCESS-PROJECT"] = credentials.projectId;
+
+  let response: Response;
+  try {
+    response = await input.fetchFn(`${BASE_URL}${requestPath}`, {
+      method: input.method,
+      headers,
+      signal: requestSignal(input.signal),
+      ...(bodyText === "" ? {} : { body: bodyText }),
+    });
+  } catch (error) {
+    throw new AdapterError(SOURCE, sanitizeMessage(error));
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    throw new AdapterError(SOURCE, "authentication rejected", response.status);
+  }
+  if (response.status === 429) {
+    throw new AdapterError(SOURCE, "rate limited", 429);
+  }
+  if (!response.ok) {
+    throw new AdapterError(SOURCE, `upstream responded ${response.status}`, response.status);
+  }
+
+  let payload: unknown;
+  try {
+    payload = (await response.json()) as unknown;
+  } catch {
+    throw new AdapterError(SOURCE, "invalid JSON in response", response.status);
+  }
+
+  if (!isRecord(payload)) throw new AdapterError(SOURCE, "unexpected response shape");
+  const code = payload["code"];
+  if (String(code) !== "0") {
+    const message = parseStr(payload["msg"]) ?? `unsuccessful code ${String(code)}`;
+    throw new AdapterError(SOURCE, sanitizeMessage(message));
+  }
+  return payload["data"];
+}
+
+export interface OnchainosKlineParams {
+  address: string;
+  /** Provider-native bar notation, e.g. `1m`, `15m`, `1H`, `1D`. */
+  bar: string;
+  limit?: number;
+  signal?: AbortSignal | undefined;
+  fetchFn?: FetchFn;
+}
+
+/** Fetches historical candles for a BSC token. */
+export async function fetchOnchainosKlines(params: OnchainosKlineParams): Promise<Candle[]> {
+  const address = params.address.toLowerCase();
+  const limit = Math.max(1, Math.min(Math.trunc(params.limit ?? 100), MAX_KLINE_LIMIT));
+  const data = await signedRequest({
+    method: "GET",
+    path: "/api/v6/dex/market/historical-candles",
+    query: [
+      ["bar", params.bar],
+      ["chainIndex", BSC_CHAIN_INDEX],
+      ["limit", String(limit)],
+      ["tokenContractAddress", address],
+    ],
+    fetchFn: params.fetchFn ?? globalThis.fetch,
+    signal: params.signal,
+  });
+  return normalizeKlines(data);
+}
+
+/**
+ * Exported for tests. Candles arrive either as positional arrays
+ * `[ts, o, h, l, c, vol, volUsd, confirm]` or as objects with those same keys.
+ */
+export function normalizeKlines(data: unknown): Candle[] {
+  const candles: Candle[] = [];
+
+  for (const raw of asArray(data)) {
+    if (Array.isArray(raw)) {
+      const timestamp = toEpochMs(raw[0]);
+      if (timestamp === null) continue;
+      candles.push({
+        timestamp,
+        open: parseNum(raw[1]) ?? 0,
+        high: parseNum(raw[2]) ?? 0,
+        low: parseNum(raw[3]) ?? 0,
+        close: parseNum(raw[4]) ?? 0,
+        volume: parseNum(raw[5]) ?? 0,
+      });
+      continue;
+    }
+    if (!isRecord(raw)) continue;
+    const timestamp = toEpochMs(raw["ts"]);
+    if (timestamp === null) continue;
+    candles.push({
+      timestamp,
+      open: parseNum(raw["o"]) ?? 0,
+      high: parseNum(raw["h"]) ?? 0,
+      low: parseNum(raw["l"]) ?? 0,
+      close: parseNum(raw["c"]) ?? 0,
+      volume: parseNum(raw["vol"]) ?? 0,
+    });
+  }
+
+  return sortCandles(candles);
+}
+
+export interface OnchainosPriceParams {
+  address: string;
+  signal?: AbortSignal | undefined;
+  fetchFn?: FetchFn;
+}
+
+/** Fetches price/market state for a BSC token via the batch price-info endpoint. */
+export async function fetchOnchainosPrice(params: OnchainosPriceParams): Promise<TokenSnapshot> {
+  const address = params.address.toLowerCase();
+  const data = await signedRequest({
+    method: "POST",
+    path: "/api/v6/dex/market/price-info",
+    body: [{ chainIndex: BSC_CHAIN_INDEX, tokenContractAddress: address }],
+    fetchFn: params.fetchFn ?? globalThis.fetch,
+    signal: params.signal,
+  });
+  return normalizePriceInfo(address, data);
+}
+
+/** Exported for tests: normalizes the single-element price-info array. */
+export function normalizePriceInfo(address: string, data: unknown): TokenSnapshot {
+  const first = asArray(data)[0];
+  const row = isRecord(first) ? first : isRecord(data) ? data : {};
+  return {
+    address: address.toLowerCase(),
+    priceUsd: parseNum(row["price"]),
+    marketCapUsd: parseNum(row["marketCap"]),
+    volume24hUsd: parseNum(row["volume24H"]),
+    holders: parseNum(row["holders"]),
+    priceChange24hPct: parseNum(row["priceChange24H"]),
+    updatedFields: [],
+  };
+}

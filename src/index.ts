@@ -1,7 +1,13 @@
 import { serve } from "@hono/node-server";
+import { loadDotEnv } from "./config/env.js";
 import { createScheduler } from "./core/scheduler.js";
 import { createStore } from "./core/store.js";
 import { createServer } from "./server.js";
+import { binancePricesJob } from "./jobs/binancePrices.js";
+import { binanceUniverseJob } from "./jobs/binanceUniverse.js";
+import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
+
+loadDotEnv();
 
 const DEFAULT_PORT = 8080;
 
@@ -30,6 +36,12 @@ scheduler.register({
     );
   },
 });
+
+// Market-data producers. Each is fully isolated by the scheduler: a failing
+// upstream degrades its own lane and nothing else.
+scheduler.register(fourmemeRankingJob(store));
+scheduler.register(binanceUniverseJob(store));
+scheduler.register(binancePricesJob(store));
 
 scheduler.start();
 
