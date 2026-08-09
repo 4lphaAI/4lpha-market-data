@@ -46,6 +46,15 @@ function isLane(value: string): value is Lane {
 /** Named in the 404 hint so an operator knows exactly which key to write. */
 const TRACKED_VENUS_OWNERS_HINT = "tracked:venus-owners";
 
+/** Most tokens one batch read may request. */
+const MAX_BATCH_TOKENS = 50;
+
+/**
+ * Snapshot keys surfaced in `/status`. These are the always-on feeds; per-token
+ * and per-pool keys are demand-driven and would make the list unbounded.
+ */
+const STATUS_SNAPSHOT_KEYS = ["heartbeat", "universe:meme", "universe:coins", "pools:index"];
+
 /**
  * Finds the lane a token was discovered in. Unknown tokens are treated as
  * `meme`: it carries the shortest TTL, so an unclassified token is re-scanned
@@ -73,14 +82,23 @@ export function createServer(deps: ServerDeps): Hono {
     }),
   );
 
-  app.get("/status", (c) =>
-    c.json({
+  app.get("/status", async (c) => {
+    const snapshots = await Promise.all(
+      STATUS_SNAPSHOT_KEYS.map(async (key) => {
+        const record = await deps.store.get<unknown>(key);
+        if (record === null) return { key, missing: true as const };
+        return { key, asOf: record.asOf, source: record.source, staleness: record.staleness };
+      }),
+    );
+
+    return c.json({
       data: {
         jobs: deps.scheduler.healthSnapshot(),
+        snapshots,
         startedAt,
       },
-    }),
-  );
+    });
+  });
 
   app.get("/universe", async (c) => {
     const laneParam = c.req.query("lane");
@@ -103,6 +121,64 @@ export function createServer(deps: ServerDeps): Hono {
         total: entries.length,
         ...(laneParam === undefined ? {} : { lane: laneParam }),
         lanes: universe.lanes,
+      },
+    });
+  });
+
+  app.get("/tokens", async (c) => {
+    const raw = c.req.query("addresses");
+    if (raw === undefined || raw.trim() === "") {
+      return c.json(
+        { error: { code: "missing_addresses", message: "pass ?addresses=0x..,0x.." } },
+        400,
+      );
+    }
+
+    const requested = raw.split(",").map((value) => value.trim()).filter((value) => value !== "");
+    if (requested.length > MAX_BATCH_TOKENS) {
+      return c.json(
+        {
+          error: {
+            code: "too_many_addresses",
+            message: `at most ${MAX_BATCH_TOKENS} addresses per request`,
+          },
+        },
+        400,
+      );
+    }
+
+    const invalid: string[] = [];
+    const addresses: string[] = [];
+    for (const value of requested) {
+      const normalized = normalizeAddress(value);
+      if (normalized === null) invalid.push(value);
+      else addresses.push(normalized);
+    }
+    const unique = [...new Set(addresses)];
+
+    const records = await Promise.all(
+      unique.map(async (address) => ({
+        address,
+        record: await deps.store.get<TokenSnapshot>(tokenKey(address)),
+      })),
+    );
+    const found = records.filter(
+      (entry): entry is { address: string; record: NonNullable<typeof entry.record> } =>
+        entry.record !== null,
+    );
+
+    return c.json({
+      data: found.map((entry) => ({
+        ...entry.record.data,
+        asOf: entry.record.asOf,
+        source: entry.record.source,
+        staleness: entry.record.staleness,
+      })),
+      meta: {
+        requested: requested.length,
+        found: found.length,
+        missing: unique.length - found.length,
+        ...(invalid.length === 0 ? {} : { invalid }),
       },
     });
   });
