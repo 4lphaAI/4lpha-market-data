@@ -47,6 +47,17 @@ function isLane(value: string): value is Lane {
 /** Named in the 404 hint so an operator knows exactly which key to write. */
 const TRACKED_VENUS_OWNERS_HINT = "tracked:venus-owners";
 
+/**
+ * Fixed probe targets for `/diag/latency` — a hardcoded list, never derived
+ * from request input, so the route cannot be steered at arbitrary hosts.
+ */
+const DIAG_TARGETS = [
+  { name: "quicknode-x402-bsc-mainnet-402", url: "https://x402.quicknode.com/bsc-mainnet" },
+  { name: "public-bnbchain", url: "https://bsc-dataseed.bnbchain.org" },
+  { name: "public-publicnode", url: "https://bsc-rpc.publicnode.com" },
+  { name: "public-defibit", url: "https://bsc-dataseed1.defibit.io" },
+] as const;
+
 /** Most tokens one batch read may request. */
 const MAX_BATCH_TOKENS = 50;
 
@@ -350,6 +361,39 @@ export function createServer(deps: ServerDeps): Hono {
       data: record.data,
       meta: { asOf: record.asOf, source: record.source, staleness: record.staleness },
     });
+  });
+
+  app.get("/diag/latency", async (c) => {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] });
+    const results = [];
+    for (const target of DIAG_TARGETS) {
+      const times: number[] = [];
+      let status = 0;
+      for (let i = 0; i < 3; i += 1) {
+        const t0 = Date.now();
+        try {
+          const res = await fetch(target.url, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body,
+            signal: AbortSignal.timeout(8_000),
+          });
+          await res.arrayBuffer();
+          status = res.status;
+          times.push(Date.now() - t0);
+        } catch {
+          times.push(-1);
+        }
+      }
+      const ok = times.filter((t) => t >= 0);
+      results.push({
+        name: target.name,
+        status,
+        runsMs: times,
+        avgMs: ok.length > 0 ? Math.round(ok.reduce((a, b) => a + b, 0) / ok.length) : null,
+      });
+    }
+    return c.json({ data: results });
   });
 
   app.get("/snapshots/:key", async (c) => {
