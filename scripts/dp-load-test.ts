@@ -70,8 +70,10 @@ async function fireOne(results: Map<string, RouteResult>): Promise<void> {
 
   const startedAt = performance.now();
   try {
+    const token = process.env["DP_AUTH_TOKEN"]?.trim();
     const response = await fetch(`${baseUrl}${route}`, {
       signal: AbortSignal.timeout(10_000),
+      ...(token === undefined || token === "" ? {} : { headers: { "x-dp-token": token } }),
     });
     // Drain so keep-alive sockets are reusable and timings include the body.
     await response.arrayBuffer();

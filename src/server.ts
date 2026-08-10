@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Scheduler } from "./core/scheduler.js";
 import type { SnapshotStore } from "./core/store.js";
@@ -69,9 +70,31 @@ async function lookupLane(store: SnapshotStore, address: string): Promise<Lane> 
  * Builds the HTTP app. Pure: it never binds a port, so tests can drive it with
  * `app.request(...)`. Every response uses the `{ data, error?, meta? }` envelope.
  */
+/**
+ * Constant-time token comparison. Both sides are hashed first so the buffers
+ * given to `timingSafeEqual` always have equal length, which it requires.
+ */
+function tokenMatches(provided: string, expected: string): boolean {
+  const a = createHash("sha256").update(provided).digest();
+  const b = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(a, b);
+}
+
 export function createServer(deps: ServerDeps): Hono {
   const startedAt = Date.now();
   const app = new Hono();
+
+  // With DP_AUTH_TOKEN set, every route except the platform healthcheck
+  // requires the x-dp-token header. Read per request so tests can flip it.
+  app.use("*", async (c, next) => {
+    const expected = process.env["DP_AUTH_TOKEN"]?.trim() ?? "";
+    if (expected === "" || c.req.path === "/health") return next();
+    const provided = c.req.header("x-dp-token") ?? "";
+    if (!tokenMatches(provided, expected)) {
+      return c.json({ error: { code: "unauthorized" } }, 401);
+    }
+    return next();
+  });
 
   app.get("/health", (c) =>
     c.json({
