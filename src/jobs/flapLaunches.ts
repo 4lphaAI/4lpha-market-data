@@ -99,6 +99,12 @@ export async function runFlapLaunches(
   const readStatesFn = options.readStates ?? readFlapMarketStates;
   const scan = await scanFn(signal);
 
+  // A partial scan is normal enough not to fail the run, but silent enough to
+  // hide a lane that has quietly stopped growing, so it is said out loud.
+  if (scan.missedChunks > 0) {
+    console.warn(`[${SOURCE}] ${scan.missedChunks} log chunk(s) unserved; window is partial`);
+  }
+
   const rows = new Map<string, FlapLaneRow>();
   for (const row of await readStoredRows(store)) rows.set(row.address, row);
   for (const launch of scan.launches) rows.set(launch.address, rowFromLaunch(launch, rows));

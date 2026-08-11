@@ -40,6 +40,21 @@ const PUBLIC_RPC_URLS = [
   "https://bsc-rpc.publicnode.com",
 ];
 
+/**
+ * The subset of public endpoints that will serve `eth_getLogs` at all.
+ *
+ * Measured 2026-08-11: `bsc-dataseed*` and `defibit` refuse every range outright
+ * with `LimitExceededRpcError`, so for a log read they are two guaranteed failed
+ * round trips before the third endpoint gets a turn — which is exactly what
+ * turned one production cycle of the Flap scan into 22 seconds. `publicnode`
+ * serves recent ranges (but not historical ones); `drpc` serves both and then
+ * rate-limits. Ordered by that.
+ *
+ * `eth_call` is unaffected and still uses the full list — dataseed is the
+ * fastest endpoint there.
+ */
+const PUBLIC_LOG_RPC_URLS = ["https://bsc-rpc.publicnode.com", "https://bsc.drpc.org"];
+
 const RPC_ENV_KEYS = ["BSC_RPC_URL", "BSC_RPC_URL1", "BSC_RPC_URL2", "BSC_RPC_URL3"];
 
 /**
@@ -48,10 +63,22 @@ const RPC_ENV_KEYS = ["BSC_RPC_URL", "BSC_RPC_URL1", "BSC_RPC_URL2", "BSC_RPC_UR
  * without a restart.
  */
 export function readRpcUrls(): string[] {
-  const configured = RPC_ENV_KEYS.map((key) => process.env[key]?.trim()).filter(
+  return [...new Set([...readConfiguredRpcUrls(), ...PUBLIC_RPC_URLS])];
+}
+
+/**
+ * Endpoint list for `eth_getLogs`, configured first and log-capable public ones
+ * after. A configured endpoint still leads: an operator who pays for an archive
+ * node should have it tried before any public fallback.
+ */
+export function readLogRpcUrls(): string[] {
+  return [...new Set([...readConfiguredRpcUrls(), ...PUBLIC_LOG_RPC_URLS])];
+}
+
+function readConfiguredRpcUrls(): string[] {
+  return RPC_ENV_KEYS.map((key) => process.env[key]?.trim()).filter(
     (value): value is string => value !== undefined && value !== "",
   );
-  return [...new Set([...configured, ...PUBLIC_RPC_URLS])];
 }
 
 /**

@@ -28,7 +28,12 @@
  */
 
 import { decodeEventLog, keccak256, numberToHex, toHex, type Abi } from "viem";
-import { isContractLevelFailure, type BscClient, withBscClient } from "../chain/rpc.js";
+import {
+  isContractLevelFailure,
+  readLogRpcUrls,
+  type BscClient,
+  withBscClient,
+} from "../chain/rpc.js";
 import { AdapterError, isEvmAddress, sanitizeMessage } from "./http.js";
 
 const SOURCE = "flap";
@@ -164,6 +169,10 @@ export async function fetchFlapLaunches(
   const blocks = BigInt(options.blocks ?? 150);
   const signal = options.signal;
   const clientOptions = signal === undefined ? {} : { signal };
+  // Log reads get their own endpoint order: the default list leads with two
+  // endpoints that refuse eth_getLogs outright, which costs two failed round
+  // trips per chunk before one that answers gets a turn.
+  const logOptions = { ...clientOptions, rpcUrls: readLogRpcUrls() };
 
   const head = await withBscClient((client) => client.getBlockNumber(), clientOptions);
   const from = head > blocks ? head - blocks + 1n : 0n;
@@ -195,7 +204,7 @@ export async function fetchFlapLaunches(
               },
             ],
           }),
-        clientOptions,
+        logOptions,
       );
       for (const launch of decodeLaunches(logs)) byAddress.set(launch.address, launch);
     } catch {
