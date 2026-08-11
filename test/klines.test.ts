@@ -11,7 +11,6 @@ const originalEnv = {
   OKX_API_KEY: process.env["OKX_API_KEY"],
   OKX_SECRET_KEY: process.env["OKX_SECRET_KEY"],
   OKX_PASSPHRASE: process.env["OKX_PASSPHRASE"],
-  BIRDEYE_API_KEY: process.env["BIRDEYE_API_KEY"],
 };
 
 /** Manually advanced clock so freshness transitions are deterministic. */
@@ -28,14 +27,12 @@ function fakeClock(start = 1_700_000_000_000) {
 interface Behaviour {
   onchainos?: "ok" | "fail" | "empty";
   sintral?: "ok" | "fail" | "empty";
-  birdeye?: "ok" | "fail" | "empty";
 }
 
 interface Observed {
   hosts: string[];
   onchainosBar: string | null;
   sintralInterval: string | null;
-  birdeyeType: string | null;
 }
 
 /** Installs a global fetch that routes by host, so the real chain order is exercised. */
@@ -44,7 +41,6 @@ function installFetch(behaviour: Behaviour): Observed {
     hosts: [],
     onchainosBar: null,
     sintralInterval: null,
-    birdeyeType: null,
   };
 
   globalThis.fetch = (async (input: string | URL | Request) => {
@@ -66,12 +62,6 @@ function installFetch(behaviour: Behaviour): Observed {
         data: [["2", "3", "1", "2.5", "20", 1_700_000_060_000]],
       });
     }
-    if (url.host === "public-api.birdeye.so") {
-      observed.birdeyeType = url.searchParams.get("type");
-      return respond(behaviour.birdeye ?? "fail", {
-        data: { items: [{ unixTime: 1_700_000_120, o: 3, h: 4, l: 2, c: 3.5, v: 30 }] },
-      });
-    }
     throw new Error(`unexpected host ${url.host}`);
   }) as typeof globalThis.fetch;
 
@@ -90,7 +80,6 @@ beforeEach(() => {
   process.env["OKX_API_KEY"] = "unit-test-key";
   process.env["OKX_SECRET_KEY"] = "unit-test-secret";
   process.env["OKX_PASSPHRASE"] = "unit-test-passphrase";
-  process.env["BIRDEYE_API_KEY"] = "unit-test-birdeye";
 });
 
 afterEach(() => {
@@ -139,7 +128,7 @@ describe("getKlines", () => {
 
   it("prefers OnchainOS and writes the result back to the store", async () => {
     const store = new MemoryStore();
-    const observed = installFetch({ onchainos: "ok", sintral: "ok", birdeye: "ok" });
+    const observed = installFetch({ onchainos: "ok", sintral: "ok" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "15m", limit: 5 });
 
@@ -157,7 +146,7 @@ describe("getKlines", () => {
 
   it("falls through to Sintral when OnchainOS fails", async () => {
     const store = new MemoryStore();
-    const observed = installFetch({ onchainos: "fail", sintral: "ok", birdeye: "ok" });
+    const observed = installFetch({ onchainos: "fail", sintral: "ok" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "1h", limit: 5 });
 
@@ -169,31 +158,25 @@ describe("getKlines", () => {
     await store.close();
   });
 
-  it("falls through to Birdeye when the first two fail", async () => {
+  it("stops at the end of the chain rather than dialling a third host", async () => {
     const store = new MemoryStore();
-    const observed = installFetch({ onchainos: "fail", sintral: "fail", birdeye: "ok" });
+    const observed = installFetch({ onchainos: "fail", sintral: "fail" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "1d", limit: 5 });
 
-    assert.ok(result !== null);
-    assert.equal(result.source, "birdeye");
-    assert.equal(observed.birdeyeType, "1D");
-    assert.deepEqual(observed.hosts, [
-      "web3.okx.com",
-      "dquery.sintral.io",
-      "public-api.birdeye.so",
-    ]);
+    assert.equal(result, null);
+    assert.deepEqual(observed.hosts, ["web3.okx.com", "dquery.sintral.io"]);
     await store.close();
   });
 
   it("treats an empty candle list as no data and keeps walking the chain", async () => {
     const store = new MemoryStore();
-    const observed = installFetch({ onchainos: "empty", sintral: "empty", birdeye: "ok" });
+    const observed = installFetch({ onchainos: "empty", sintral: "ok" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "5m", limit: 5 });
 
-    assert.equal(result?.source, "birdeye");
-    assert.equal(observed.hosts.length, 3);
+    assert.equal(result?.source, "sintral");
+    assert.equal(observed.hosts.length, 2);
     await store.close();
   });
 
@@ -221,7 +204,7 @@ describe("getKlines", () => {
       deadAfterMs: 3_600_000,
     });
     clock.advance(600_000);
-    installFetch({ onchainos: "fail", sintral: "fail", birdeye: "fail" });
+    installFetch({ onchainos: "fail", sintral: "fail" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "1m", limit: 10 });
 
@@ -234,7 +217,7 @@ describe("getKlines", () => {
 
   it("returns null when every source fails and nothing is cached", async () => {
     const store = new MemoryStore();
-    installFetch({ onchainos: "fail", sintral: "fail", birdeye: "fail" });
+    installFetch({ onchainos: "fail", sintral: "fail" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "1m", limit: 10 });
 

@@ -17,9 +17,9 @@ PancakeSwap V3 pool stats, and Venus health factors read straight from BSC.
  │ binance  │──▶│ binance-universe     │   │  timeout,    │             │
  │          │──▶│ binance-prices       │   │  jitter,     │◀ health ────┤
  │ onchainos│   │ pancake-pools        │   │  no-overlap  │             │
- │ birdeye  │   │ venus-health(+hot)   │   └──────┬───────┘             ▼
- │ gmgn     │   └──────────────────────┘                        ┌──────────────┐
- │ pancake  │   query/klines.ts    ───── read-through ─────────▶│ SnapshotStore│
+ │ gmgn     │   │ venus-health(+hot)   │   └──────┬───────┘             ▼
+ │ pancake  │   └──────────────────────┘                        ┌──────────────┐
+ │          │   query/klines.ts    ───── read-through ─────────▶│ SnapshotStore│
  │ venus    │   query/security.ts  ───── read-through ─────────▶│  Memory | PG │
  └────┬─────┘                                                   └──────────────┘
       │        chain/rpc.ts ── BSC endpoint rotation ──┐
@@ -63,15 +63,14 @@ PancakeSwap V3 pool stats, and Venus health factors read straight from BSC.
 | `fourmeme` | none | meme lane universe + market snapshots |
 | `binanceWeb3` | none | coins lane universe, live quotes, Sintral klines |
 | `onchainos` | `OKX_*` | preferred klines and price-info, primary token-scan |
-| `birdeye` | `BIRDEYE_API_KEY` | OHLCV fallback of last resort |
 | `gmgn` | `GMGN_API_KEY` | secondary security scan, holder distribution |
 | `pancake` | none | V3 pool state; explorer API, on-chain fallback |
 | `venus` | none (`BSC_RPC_URL*`) | Core Pool health factors |
 
 Kline reads (`src/query/klines.ts`) check the store first and only on a miss walk
-**OnchainOS → Sintral → Birdeye**, writing the first success back (fresh 5 min,
+**OnchainOS → Sintral**, writing the first success back (fresh 5 min,
 dead 60 min). If every source fails, a stale stored record is returned rather than
-nothing, and `meta.staleness` says so. Interval translation between the three
+nothing, and `meta.staleness` says so. Interval translation between the two
 providers' notations lives in that one file.
 
 ## Security tiering
@@ -212,7 +211,6 @@ rather than failing when one is absent.
 - `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE`, `OKX_PROJECT_ID` — OnchainOS.
   Without them the kline chain simply starts at Sintral and `/security` loses its
   primary scanner.
-- `BIRDEYE_API_KEY` — enables the final kline fallback.
 - `GMGN_API_KEY` — enables the secondary security scanner and holder enrichment.
 - `BSC_RPC_URL`, `BSC_RPC_URL1..3` — BSC JSON-RPC, tried in that order and then
   falling back to keyless public endpoints. Public endpoints rate-limit and cap

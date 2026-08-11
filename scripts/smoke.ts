@@ -22,7 +22,6 @@ import {
   fetchOnchainosTokenScan,
   hasOnchainosCredentials,
 } from "../src/adapters/onchainos.js";
-import { fetchBirdeyeKlines, hasBirdeyeApiKey } from "../src/adapters/birdeye.js";
 import {
   fetchGmgnSmartMoney,
   fetchGmgnTokenHolders,
@@ -126,21 +125,6 @@ if (hasOnchainosCredentials()) {
 } else {
   skip("onchainos klines 15m", "OKX_* not configured");
   skip("onchainos price-info", "OKX_* not configured");
-}
-
-if (hasBirdeyeApiKey()) {
-  await check("birdeye ohlcv 15m", async () => {
-    const to = Math.floor(Date.now() / 1000);
-    const candles = await fetchBirdeyeKlines({
-      address: PROBE_ADDRESS,
-      type: "15m",
-      from: to - 900 * 21,
-      to,
-    });
-    return `${candles.length} candles`;
-  });
-} else {
-  skip("birdeye ohlcv 15m", "BIRDEYE_API_KEY not configured");
 }
 
 await check("kline read-through chain", async () => {

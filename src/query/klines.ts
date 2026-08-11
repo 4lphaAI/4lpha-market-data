@@ -2,7 +2,7 @@
  * Read-through kline query layer.
  *
  * A read is served from the store when it is fresh. On a miss it walks the
- * source chain OnchainOS -> Sintral (Binance Web3) -> Birdeye, writes the first
+ * source chain OnchainOS -> Sintral (Binance Web3), writes the first
  * success back, and returns it. If every source fails, a previously stored but
  * stale record is returned rather than nothing — a late chart beats no chart —
  * and the caller can see that from `staleness`.
@@ -14,32 +14,28 @@ import type { Staleness } from "../core/types.js";
 import { MissingCredentialsError, isEvmAddress } from "../adapters/http.js";
 import { fetchOnchainosKlines } from "../adapters/onchainos.js";
 import { fetchSintralKlines } from "../adapters/binanceWeb3.js";
-import { fetchBirdeyeKlines } from "../adapters/birdeye.js";
 
 /** Canonical interval notation used by this service's API. */
 export type KlineInterval = "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
 
 interface IntervalMapping {
-  seconds: number;
   /** OKX/OnchainOS bar notation. */
   onchainos: string;
   /** Sintral kline-service notation. */
   sintral: string;
-  /** Birdeye OHLCV `type` notation. */
-  birdeye: string;
 }
 
 /**
- * The three upstreams each spell intervals differently; this is the single
+ * The two upstreams each spell intervals differently; this is the single
  * place that translation happens.
  */
 const INTERVALS: Record<KlineInterval, IntervalMapping> = {
-  "1m": { seconds: 60, onchainos: "1m", sintral: "1min", birdeye: "1m" },
-  "5m": { seconds: 300, onchainos: "5m", sintral: "5min", birdeye: "5m" },
-  "15m": { seconds: 900, onchainos: "15m", sintral: "15min", birdeye: "15m" },
-  "1h": { seconds: 3_600, onchainos: "1H", sintral: "1h", birdeye: "1H" },
-  "4h": { seconds: 14_400, onchainos: "4H", sintral: "4h", birdeye: "4H" },
-  "1d": { seconds: 86_400, onchainos: "1D", sintral: "1day", birdeye: "1D" },
+  "1m": { onchainos: "1m", sintral: "1min" },
+  "5m": { onchainos: "5m", sintral: "5min" },
+  "15m": { onchainos: "15m", sintral: "15min" },
+  "1h": { onchainos: "1H", sintral: "1h" },
+  "4h": { onchainos: "4H", sintral: "4h" },
+  "1d": { onchainos: "1D", sintral: "1day" },
 };
 
 /**
@@ -116,9 +112,6 @@ export async function getKlines(
   }
 
   const mapping = INTERVALS[params.interval];
-  const toSec = Math.floor(Date.now() / 1000);
-  // One extra bar of head-room so the window cannot clip the newest candle.
-  const fromSec = Math.max(0, toSec - mapping.seconds * (limit + 1));
 
   const sources: Source[] = [
     {
@@ -138,17 +131,6 @@ export async function getKlines(
           address,
           interval: mapping.sintral,
           limit,
-          signal: params.signal,
-        }),
-    },
-    {
-      name: "birdeye",
-      fetch: () =>
-        fetchBirdeyeKlines({
-          address,
-          type: mapping.birdeye,
-          from: fromSec,
-          to: toSec,
           signal: params.signal,
         }),
     },
