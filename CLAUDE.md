@@ -14,14 +14,50 @@ Node 22, TypeScript strict ESM, Hono HTTP, `pg` with an in-memory fallback when 
 
 - `src/core/` — `DataRecord<T>` with `staleness: fresh|stale|dead` (computed at read time, never stored); `SnapshotStore` (Memory + Postgres); job `scheduler` (each job on its own interval + jitter + AbortSignal timeout; a timed-out run is aborted; failures isolated per-job, never crash the process; health persisted).
 - `src/adapters/` — fourmeme, onchainos (OKX HMAC-signed), binanceWeb3 (Binance Alpha token list ~660 + Sintral kline), gmgn, pancake (public explorer API), venus (on-chain via BSC RPC).
-- `src/query/` — kline read-through chain and tiered security scan.
+- `src/query/` — kline read-through chain, tiered security scan, and the eligibility gate.
 - `src/server.ts` — Hono app (pure `createServer(deps)`, no listen).
 
 ## Conventions
 
 - `{ data, error?, meta? }` envelope everywhere; parameterized SQL only; sanitize upstream errors; secrets never logged.
 - Every route except `/health` requires header `x-dp-token` (constant-time compare; env `DP_AUTH_TOKEN`). Consumers call over HTTP **server-side only**, never the browser.
-- Endpoints: `/status` (job health + snapshot freshness — the "Data status" surface for judges), `/universe?lane=meme|coins|bstocks`, `/tokens/:addr` + batch `/tokens?addresses=`, `/klines/:addr`, `/security/:addr`, `/pools`, `/venus/:owner`, `/diag/latency`. `npm run loadtest` — hit 300 rps, 0 errors, p95 ~37ms.
+- Endpoints: `/status` (job health + snapshot freshness — the "Data status" surface for judges), `/universe?lane=meme|coins|bstocks`, `/tokens/:addr` + batch `/tokens?addresses=`, `/klines/:addr`, `/security/:addr`, `/eligibility/:addr` + batch `/eligibility?addresses=`, `/pools`, `/venus/:owner`, `/diag/latency`. `npm run loadtest` — hit 300 rps, 0 errors, p95 ~37ms.
+
+## Eligibility gate (`src/query/eligibility.ts`)
+
+The one read path that is **fail-closed**: klines and security fall back to a stale record, this one denies. An RPC outage, an unloadable allowlist, or a stale cache entry all answer "not eligible" — a wrong `false` refuses a trade, a wrong `true` sends capital at an unvetted contract. Never throws, so a caller cannot catch a failure into an allow.
+
+Three rules, unioned. `data/eligible-tokens.json` covers the 222 enumerable tokens. Launchpad tokens launch continuously and can never be enumerated, so each launchpad gets a factory rule:
+
+- **Four.Meme**: TokenManagerHelper3 `0xF251F83e40a78868FcfA3FA4599Dad6494E46034` → `getTokenInfo(token)`, eligible iff `version == 2`. The same call returns `liquidityAdded`, the graduation flag and therefore the routing answer (`fourmeme-bonding` vs `pancake-v2`). Ported from `D:\4alpha`'s live trade path, which drives real orders through the same helper.
+- **Flap** (BSC only): Portal `0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0` → `getTokenV8Safe(token)`, eligible iff `status` is Tradable (1) or DEX (4). `status` is the graduation flag (`flap-bonding` vs `pancake-v2`).
+
+Both reads are issued in the same tick inside one `withBscClient` callback, so viem's multicall batching folds them into a single `eth_call` — the second launchpad costs a struct in the response, not a round trip. Measured 113–172ms warm per uncached verdict.
+
+Measured on chain, not assumed (2026-08-11):
+
+- The helper **does not revert** for a token it has never heard of — an EOA and a plain BEP-20 both return a zero-filled struct. So `version == 0` is the ordinary negative answer; the revert branch is the rarer transport-shaped version of it.
+- Graduated tokens **stay** in the helper: TUT (`0xcaae2a2f…99f3`) reads `version 2, liquidityAdded true`. Graduation does not evict, so the rule holds across a token's whole life.
+- 87 of 88 live meme-lane tokens pass the factory rule. The exception was in Four.Meme's own ranking API but zero-filled in the helper — denied, correctly, since the execution plane has no trade path for it.
+- `launchTime` is genuinely `0` for many fresh launches. Do not treat `0` as a decode error.
+
+`D:\4alpha`'s `shouldUseDexTradeRoute` wraps the same read in `catch { return false }`, reading an outage as "not graduated". Same call, opposite default — safe when the question is *which venue*, unsafe when it is *whether at all*. Do not copy that swallow back.
+
+### Flap, measured on chain (2026-08-11)
+
+Flap is an EVM launch protocol (bonding curve → DEX, like Four.Meme) that also supports **tax tokens**; it is on BSC, Monad, xLayer, Robinhood and Toshimart, but only BSC is wired in here. There is no separate lens contract — the `IPortalLens` views live on the Portal proxy itself. `getTokenV8`/`getTokenV8Safe` exist on BNB mainnet/testnet only; other chains cap out at `getTokenV7`. `getTokenV8Safe` is preferred: it returns the four enum fields as `uint8`, so a new enum variant widens a number instead of failing to decode.
+
+- **The negative is a revert, the opposite of Four.Meme.** The Portal answers `TokenNotFound(address)` — selector `0xde6137d1` — for anything it did not launch; a plain BEP-20, a Four.Meme token and an EOA all take that branch. So for Four.Meme `version == 0` is the ordinary negative and a revert is rare; for Flap the revert *is* the ordinary negative. Getting it backwards turns every non-Flap token into a failed read, and this gate denies on failed reads — Four.Meme would go down with it. Verified through viem's Multicall3 batching, where the revert still walks to `ContractFunctionRevertedError`.
+- **Graduated tokens stay in the lens** — status flips to DEX (4), `progress` pins at 1e18, `pool` fills in. The rule holds across a token's whole life, same as TUT proved for Four.Meme.
+- **After graduation the lens stops pricing**: `price` and `reserve` both read 0, and `pool` is the only price source it hands back. It is a routing/eligibility oracle, not a price oracle.
+- **Graduation lands on PancakeSwap V2**, not V3: all 8 graduated tokens sampled carried a `pool` on factory `0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73`, despite the lens also reporting `lpFeeProfile` (a V3 concept) and the docs defaulting `migratorType` to `V3_MIGRATOR`.
+- **Non-native quotes are routine, not an edge case.** Several graduated tokens are quoted in bStocks — SPYB, QQQB, BABAB — rather than BNB. The lens also returns `nativeToQuoteSwapEnabled`, which is the direct answer to "can this be bought with BNB". The gate reports the quote and does not deny on it, matching how Four.Meme's `quote` is treated.
+- **Volume is real.** Measured over blocks 115342469–115343069 (600 blocks, 270s wall, 0.450s/block): 3,637 Portal logs, **132 `TokenCreated` launches** and 209 distinct tokens touched — order of **~40k launches/day**. Two 50-block chunks failed mid-scan, so those are slight undercounts. `TokenCreated` topic0 is `0x504e7f36…9603` = `TokenCreated(uint256,address,uint256,address,string,string,string)` (ts, creator, nonce, token, name, symbol, meta).
+- **Near enough everything is a tax token, but not quite.** Of 208 live tokens: `TOKEN_TAXED_V3` 152, `TOKEN_TAXED` 54, `TOKEN_V2_PERMIT` 2 — so 206/208 carry a tax and the non-tax path does occur. Buy and sell rates differ on 23 of them (e.g. 300/400 bps), so slippage has to be sized per direction. The docs' *Inspect A Token* page lists the enum only to 5; the authoritative list is on *Token Version Specification*, which goes to 7.
+- **A third of tokens are quoted in something other than BNB** (64/208), and `nativeToQuoteSwapEnabled` was true for **exactly those 64** — every non-native-quote token in the sample lets the Portal swap BNB into the quote. So a non-native quote is a routing detail, not a blocker.
+- Public `bsc-dataseed*` refuses `eth_getLogs` outright and `publicnode` refuses historical ranges; `bsc.drpc.org` served both. Only matters for indexing work — the gate itself is `eth_call` only.
+
+Flap docs are wired in as an MCP server (`flap`, user scope → `https://docs.flap.sh/flap/~gitbook/mcp`): search/fetch over the docs only, no market-data endpoints.
 
 ## Deployment
 

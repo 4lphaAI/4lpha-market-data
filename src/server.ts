@@ -6,6 +6,7 @@ import type { Lane, TokenSnapshot, VenusHealth } from "./core/models.js";
 import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
 import { getSecurity } from "./query/security.js";
+import { isEligible, isEligibleBatch } from "./query/eligibility.js";
 import { buildUniverse } from "./universe.js";
 import { tokenKey } from "./jobs/tokenStore.js";
 import { readStoredPools } from "./jobs/pancakePools.js";
@@ -29,6 +30,7 @@ const SNAPSHOT_KEY_PREFIXES = [
   "token:",
   "klines:",
   "security:",
+  "eligibility:",
   "pool:",
   "pools:",
   "venus:",
@@ -309,6 +311,54 @@ export function createServer(deps: ServerDeps): Hono {
         asOf: result.asOf,
         staleness: result.staleness,
       },
+    });
+  });
+
+  // Eligibility is a gate, not a lookup: a token missing from every feed can
+  // still be eligible by a launchpad rule (Four.Meme or Flap), so this never 404s.
+  app.get("/eligibility", async (c) => {
+    const raw = c.req.query("addresses");
+    if (raw === undefined || raw.trim() === "") {
+      return c.json(
+        { error: { code: "missing_addresses", message: "pass ?addresses=0x..,0x.." } },
+        400,
+      );
+    }
+
+    const requested = raw.split(",").map((value) => value.trim()).filter((value) => value !== "");
+    if (requested.length > MAX_BATCH_TOKENS) {
+      return c.json(
+        {
+          error: {
+            code: "too_many_addresses",
+            message: `at most ${MAX_BATCH_TOKENS} addresses per request`,
+          },
+        },
+        400,
+      );
+    }
+
+    // Unlike /tokens, malformed input is not filtered out — it comes back as an
+    // explicit ineligible verdict rather than vanishing, because a caller that
+    // cannot find an address in the response must not read that as an allow.
+    // Duplicates still collapse, so results are keyed by `address`, not position.
+    const unique = [...new Set(requested.map((value) => value.toLowerCase()))];
+    const results = await isEligibleBatch(deps.store, unique);
+
+    return c.json({
+      data: results,
+      meta: {
+        requested: requested.length,
+        eligible: results.filter((result) => result.eligible).length,
+      },
+    });
+  });
+
+  app.get("/eligibility/:address", async (c) => {
+    const result = await isEligible(deps.store, { address: c.req.param("address") });
+    return c.json({
+      data: result,
+      meta: { address: result.address, checkedAt: result.checkedAt, cached: result.cached },
     });
   });
 

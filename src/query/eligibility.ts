@@ -1,0 +1,680 @@
+/**
+ * Token eligibility — the gate the execution plane asks before trading or LPing.
+ *
+ * Eligibility is a union of three rules that answer in completely different ways:
+ *
+ *   1. `data/eligible-tokens.json` — a frozen 222-token allowlist (BNB/WBNB/BTCB/
+ *      USDT, the bStocks, and CMC top-200 with a BSC deployment). Enumerable
+ *      because it changes only by an explicit regeneration.
+ *   2. The Four.Meme factory rule — meme tokens launch continuously, so they can
+ *      never be enumerated by a snapshot. A token is Four.Meme-launched iff
+ *      TokenManagerHelper3 `getTokenInfo` reports `version == 2` for it.
+ *   3. The Flap Portal rule — the same problem on a second launchpad. A token is
+ *      Flap-launched iff the Portal lens `getTokenV8Safe` answers at all, and
+ *      tradable iff the status it reports is Tradable (curve) or DEX (graduated).
+ *
+ * Rules 2 and 3 are also the routing answer. Four.Meme's `liquidityAdded` and
+ * Flap's `status` are both graduation flags, so the same call that proves
+ * eligibility says whether the trade belongs on a bonding curve or on
+ * PancakeSwap V2.
+ *
+ * The two launchpad reads are shaped alike but answer a negative in opposite
+ * ways, and both behaviours are measured rather than assumed (2026-08-11):
+ * Four.Meme's helper zero-fills for a token it never heard of, while Flap's
+ * Portal reverts with `TokenNotFound(address)` (selector `0xde6137d1`). So for
+ * Four.Meme `version == 0` is the ordinary negative and a revert is the rare
+ * transport-shaped one; for Flap the revert *is* the ordinary negative. Getting
+ * that backwards would classify every non-Flap token as a failed read, and this
+ * gate turns a failed read into a denial — every Four.Meme token would go with
+ * it.
+ *
+ * **Fail-closed, deliberately.** Every other read path here degrades toward
+ * serving something — `query/klines.ts` and `query/security.ts` both fall back
+ * to a stale record rather than nothing. This one must not. An unreadable chain
+ * or an unloadable allowlist means "not eligible", never "probably fine": the
+ * consequence of a wrong `false` is a refused trade, and of a wrong `true` is
+ * capital sent at an unvetted contract. Concretely that means a stale cache
+ * entry is re-checked rather than served, and an RPC outage denies.
+ *
+ * This is where the port from `D:\4alpha` deviates from its source:
+ * `shouldUseDexTradeRoute` there wraps the same read in `catch { return false }`,
+ * which silently reads an RPC outage as "not graduated" and routes to the
+ * bonding curve. Same call, opposite default — that swallow is safe when the
+ * question is *which venue* and unsafe when it is *whether at all*.
+ */
+
+import { readFileSync } from "node:fs";
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  type Abi,
+} from "viem";
+import { type BscClient, withBscClient } from "../chain/rpc.js";
+import { isEvmAddress, sanitizeMessage } from "../adapters/http.js";
+import type { SnapshotStore } from "../core/store.js";
+
+const SOURCE = "eligibility";
+
+/**
+ * Four.Meme TokenManagerHelper3 on BSC — the read-only helper that fronts both
+ * TokenManager versions. Taken from the live `D:\4alpha` trade path
+ * (`lib/fourmeme/dex.ts`), which routes real orders through it.
+ */
+export const FOURMEME_HELPER = "0xF251F83e40a78868FcfA3FA4599Dad6494E46034" as const;
+
+/** Four.Meme TokenManager2 — the bonding-curve venue, and the `version == 2` this gate requires. */
+export const FOURMEME_TOKEN_MANAGER2 = "0x5c952063c7fc8610FFDB798152D69F0B9550762b" as const;
+
+/** PancakeSwap V2 router — where a graduated Four.Meme token trades instead. */
+export const PANCAKE_V2_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E" as const;
+
+/**
+ * The only TokenManager version this gate accepts. V1 tokens exist on chain but
+ * the execution plane has no V1 trade path, so treating them as eligible would
+ * promise an order it cannot place.
+ */
+const SUPPORTED_TOKEN_MANAGER_VERSION = 2;
+
+/**
+ * `getTokenInfo` returns a 12-field tuple. Only four fields are read, but the
+ * whole shape is declared because viem decodes positionally — a short ABI would
+ * silently misalign every field after the first omission.
+ */
+const helperAbi = [
+  {
+    name: "getTokenInfo",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "token", type: "address" }],
+    outputs: [
+      { name: "version", type: "uint256" },
+      { name: "tokenManager", type: "address" },
+      { name: "quote", type: "address" },
+      { name: "lastPrice", type: "uint256" },
+      { name: "tradingFeeRate", type: "uint256" },
+      { name: "minTradingFee", type: "uint256" },
+      { name: "launchTime", type: "uint256" },
+      { name: "offers", type: "uint256" },
+      { name: "maxOffers", type: "uint256" },
+      { name: "funds", type: "uint256" },
+      { name: "maxFunds", type: "uint256" },
+      { name: "liquidityAdded", type: "bool" },
+    ],
+  },
+] as const satisfies Abi;
+
+/**
+ * Flap's Portal on BSC (v5.14.16). There is no separate lens contract: the
+ * `IPortalLens` view functions live on the Portal proxy itself.
+ */
+export const FLAP_PORTAL = "0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0" as const;
+
+/**
+ * `TokenStatus` values this gate acts on. The enum also carries `InDuel` (2) and
+ * `Killed` (3), both documented as obsolete, and `Staged` (5) for a token whose
+ * address is determined but which has not been deployed yet — none of the three
+ * is tradable, so all three are refused.
+ */
+const FLAP_STATUS_TRADABLE = 1;
+const FLAP_STATUS_DEX = 4;
+
+/**
+ * `getTokenV8Safe` rather than `getTokenV8`: it returns the four enum-typed
+ * fields as `uint8`, so a future Flap release that adds an enum variant widens
+ * a number here instead of failing to decode. Only available on BNB mainnet and
+ * testnet, which is all this plane reads.
+ *
+ * Declared as the full 18-field tuple for the same reason the Four.Meme ABI is
+ * declared whole — viem decodes positionally.
+ */
+const flapPortalAbi = [
+  {
+    name: "getTokenV8Safe",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "token", type: "address" }],
+    outputs: [
+      {
+        type: "tuple",
+        components: [
+          { name: "status", type: "uint8" },
+          { name: "reserve", type: "uint256" },
+          { name: "circulatingSupply", type: "uint256" },
+          { name: "price", type: "uint256" },
+          { name: "tokenVersion", type: "uint8" },
+          { name: "r", type: "uint256" },
+          { name: "h", type: "uint256" },
+          { name: "k", type: "uint256" },
+          { name: "dexSupplyThresh", type: "uint256" },
+          { name: "quoteTokenAddress", type: "address" },
+          { name: "nativeToQuoteSwapEnabled", type: "bool" },
+          { name: "extensionID", type: "bytes32" },
+          { name: "buyTaxRate", type: "uint256" },
+          { name: "sellTaxRate", type: "uint256" },
+          { name: "pool", type: "address" },
+          { name: "progress", type: "uint256" },
+          { name: "lpFeeProfile", type: "uint8" },
+          { name: "dexId", type: "uint8" },
+        ],
+      },
+    ],
+  },
+] as const satisfies Abi;
+
+/** Which rule admitted the token. */
+export type EligibilitySource = "allowlist" | "fourmeme" | "flap";
+
+/**
+ * Where a trade in this token has to be routed.
+ *
+ * Both launchpads graduate onto the same `pancake-v2` venue. For Flap that is
+ * measured, not inferred from the docs: all eight graduated tokens sampled on
+ * 2026-08-11 carried a `pool` on the PancakeSwap V2 factory
+ * (`0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73`), even though the lens also
+ * reports a `lpFeeProfile`, which is a V3 concept.
+ */
+export type EligibilityVenue = "fourmeme-bonding" | "flap-bonding" | "pancake-v2";
+
+/**
+ * Why the gate answered as it did. Stable strings — the execution plane
+ * branches on these, and a judge reads them off `/eligibility/:address`.
+ */
+export type EligibilityReason =
+  /** Listed in the frozen snapshot. */
+  | "allowlist"
+  /** `getTokenInfo` reported a supported Four.Meme TokenManager version. */
+  | "fourmeme_factory"
+  /** The Flap Portal lens answered with a tradable status. */
+  | "flap_portal"
+  /** Not an EVM address. */
+  | "invalid_address"
+  /** Not in the snapshot, and neither launchpad claims it. */
+  | "not_listed"
+  /** Four.Meme-launched, but on a TokenManager version with no trade path. */
+  | "unsupported_token_manager"
+  /** Flap-launched, but staged, killed, or otherwise not currently tradable. */
+  | "unsupported_flap_status"
+  /** The chain could not be read. Fail-closed: unknown is not eligible. */
+  | "chain_unavailable"
+  /** The allowlist file could not be loaded. Fail-closed: nothing is eligible. */
+  | "allowlist_unavailable";
+
+/** The Four.Meme facts behind an eligible meme token, and its routing venue. */
+export interface FourMemeState {
+  version: number;
+  tokenManager: string;
+  /** Curve quote token. Non-native quotes need acquiring before a buy. */
+  quote: string;
+  /** Epoch seconds. The execution plane's anti-snipe delay keys off this. */
+  launchTime: number;
+  /** True once the curve has graduated and liquidity moved to PancakeSwap. */
+  liquidityAdded: boolean;
+}
+
+/**
+ * The Flap facts behind a Portal answer, eligible or not.
+ *
+ * Numeric fields are kept as `number`/`string` rather than `bigint` because this
+ * whole record is JSON — it goes out over `/eligibility/:address` and into the
+ * snapshot store, and `JSON.stringify` throws on a bigint. `progress` is a
+ * uint256 scaled to 1e18, which overflows a safe integer, so it stays a decimal
+ * string; the tax rates are basis points and the enums are small.
+ */
+export interface FlapState {
+  /** `TokenStatus`: 1 Tradable (on the curve), 4 DEX (graduated). */
+  status: number;
+  /** `TokenVersion`: 4 TOKEN_TAXED, 6 TOKEN_TAXED_V3, 7 TOKEN_V3_PERMIT (non-tax). */
+  tokenVersion: number;
+  /**
+   * Curve quote token; the zero address means native BNB. Non-native quotes are
+   * routine on Flap, not an edge case — of the graduated tokens sampled, several
+   * were quoted in bStocks (SPYB, QQQB, BABAB) rather than BNB.
+   */
+  quote: string;
+  /** True when the Portal will swap native BNB into the quote token for a buy. */
+  nativeToQuoteSwapEnabled: boolean;
+  /**
+   * The PancakeSwap V2 pair, once graduated; the zero address while on the curve.
+   * After graduation the lens stops pricing the token — `price` and `reserve`
+   * both read 0 — so this pool is the only price source it hands back.
+   */
+  pool: string;
+  /** Progress toward graduation, 0 to 1e18, as a decimal string. */
+  progress: string;
+  /** Buy tax in basis points; 0 for a non-tax token. */
+  buyTaxBps: number;
+  /** Sell tax in basis points. Asymmetric on TOKEN_TAXED_V3. */
+  sellTaxBps: number;
+}
+
+export interface EligibilityResult {
+  address: string;
+  eligible: boolean;
+  reason: EligibilityReason;
+  /** Null whenever `eligible` is false. */
+  source: EligibilitySource | null;
+  /** Set only for launchpad tokens; allowlisted tokens route by venue discovery. */
+  venue: EligibilityVenue | null;
+  /** Set only for Four.Meme tokens, eligible or not, when the helper answered. */
+  fourmeme: FourMemeState | null;
+  /** Set only for Flap tokens, eligible or not, when the Portal answered. */
+  flap: FlapState | null;
+  /** Epoch ms of the observation being served — not necessarily now. */
+  checkedAt: number;
+  /** True when this answer came from cache rather than a fresh chain read. */
+  cached: boolean;
+}
+
+/**
+ * Cache windows.
+ *
+ * A positive answer is short-lived because `liquidityAdded` flips at graduation
+ * and the venue rides along with it — `D:\4alpha` caches the same read for 10s
+ * for exactly this reason. 30s here is the looser bound the plane can afford
+ * because it re-reads before every order anyway.
+ *
+ * A negative answer is cached at all only to stop unknown addresses from turning
+ * into RPC load, and briefly, because an address that is not a contract today
+ * can be a Four.Meme launch a minute from now.
+ *
+ * `deadAfterMs` equals `freshForMs` in both directions: past the window the
+ * entry is not merely suspect, it is unusable. Nothing here ever serves stale.
+ */
+export const ELIGIBILITY_TTL = {
+  eligible: { freshForMs: 30_000, deadAfterMs: 30_000 },
+  ineligible: { freshForMs: 60_000, deadAfterMs: 60_000 },
+} as const;
+
+/** Store key for one token's eligibility verdict. */
+export function eligibilityKey(address: string): string {
+  return `eligibility:${address.toLowerCase()}`;
+}
+
+/** How the snapshot spells native BNB, which has no contract address. */
+const NATIVE_SENTINEL = "native";
+
+/** One entry of the frozen snapshot, narrowed to what the gate needs. */
+interface AllowlistEntry {
+  address: string;
+  symbol: string;
+}
+
+let allowlistCache: ReadonlyMap<string, AllowlistEntry> | null = null;
+let allowlistError: string | null = null;
+
+/**
+ * Loads and indexes `data/eligible-tokens.json`, once per process.
+ *
+ * Returns null rather than throwing when the file is missing or malformed, so
+ * the caller denies instead of 500-ing — but the failure is logged at load, not
+ * per request, because a missing allowlist is an operator problem that would
+ * otherwise scroll past in a flood of denials.
+ *
+ * Resolved relative to this module so it works identically from `src/` under
+ * tsx and from `dist/` after a build: both are one directory below the root.
+ */
+export function loadAllowlist(): ReadonlyMap<string, AllowlistEntry> | null {
+  if (allowlistCache !== null) return allowlistCache;
+  if (allowlistError !== null) return null;
+
+  try {
+    const url = new URL("../../data/eligible-tokens.json", import.meta.url);
+    const parsed: unknown = JSON.parse(readFileSync(url, "utf8"));
+    const tokens = (parsed as { tokens?: unknown })?.tokens;
+    if (!Array.isArray(tokens)) throw new Error("snapshot has no tokens array");
+
+    const index = new Map<string, AllowlistEntry>();
+    for (const entry of tokens) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const record = entry as Record<string, unknown>;
+      const address = typeof record["address"] === "string" ? record["address"].toLowerCase() : null;
+      // The snapshot carries BNB as the sentinel `"native"` rather than an
+      // address. Dropped on purpose, so the index is 221 of the snapshot's 222:
+      // native BNB is the quote currency, never a token this gate is asked
+      // about. Callers trading it pass WBNB, which is listed on its own.
+      if (address === NATIVE_SENTINEL) continue;
+      if (address === null || !isEvmAddress(address)) continue;
+      index.set(address, {
+        address,
+        symbol: typeof record["symbol"] === "string" ? record["symbol"] : "",
+      });
+    }
+    if (index.size === 0) throw new Error("snapshot has no usable entries");
+
+    allowlistCache = index;
+    return allowlistCache;
+  } catch (error) {
+    allowlistError = sanitizeMessage(error);
+    console.error(`[${SOURCE}] allowlist load failed, denying every token: ${allowlistError}`);
+    return null;
+  }
+}
+
+/** Test seam: drops the memoized allowlist so the next load re-reads the file. */
+export function resetAllowlistCache(): void {
+  allowlistCache = null;
+  allowlistError = null;
+}
+
+/** What one launchpad read can conclude. */
+export type ChainOutcome<TState> =
+  /** The contract answered. */
+  | { kind: "answered"; state: TState }
+  /** It reverted or the address holds no contract — definitively not this launchpad's. */
+  | { kind: "absent" }
+  /** No endpoint could be read. Says nothing about the token. */
+  | { kind: "unavailable" };
+
+export type HelperOutcome = ChainOutcome<FourMemeState>;
+export type FlapOutcome = ChainOutcome<FlapState>;
+
+/**
+ * Both launchpad reads for one token.
+ *
+ * Kept as a pair rather than two independent calls because they are resolved
+ * against the same endpoint at the same block — {@link withBscClient} replays
+ * the whole callback on failure precisely so a read set is never half-answered
+ * by two chains at two heights.
+ */
+export interface ChainOutcomes {
+  fourmeme: HelperOutcome;
+  flap: FlapOutcome;
+}
+
+/**
+ * A revert is an answer; a dead endpoint is not.
+ *
+ * viem wraps both in `ContractFunctionExecutionError`, so the discriminator has
+ * to walk the cause chain for the two specifically-contractual failures: an
+ * explicit revert, and `0x` returned by a call to an address holding no code.
+ * Anything else — timeout, 429, malformed JSON-RPC — is transport, and must
+ * reach {@link withBscClient} so it rotates to the next endpoint.
+ */
+function isContractLevelFailure(error: unknown): boolean {
+  if (!(error instanceof BaseError)) return false;
+  return (
+    error.walk((cause) => cause instanceof ContractFunctionRevertedError) !== null ||
+    error.walk((cause) => cause instanceof ContractFunctionZeroDataError) !== null
+  );
+}
+
+/** Reads Four.Meme state for one token, folding a revert into a definite "absent". */
+async function readFourMemeOn(client: BscClient, address: string): Promise<HelperOutcome> {
+  try {
+    const info = await client.readContract({
+      address: FOURMEME_HELPER,
+      abi: helperAbi,
+      functionName: "getTokenInfo",
+      args: [address as `0x${string}`],
+    });
+    return {
+      kind: "answered",
+      state: {
+        version: Number(info[0]),
+        tokenManager: info[1].toLowerCase(),
+        quote: info[2].toLowerCase(),
+        launchTime: Number(info[6]),
+        liquidityAdded: info[11],
+      },
+    };
+  } catch (error) {
+    // Returned, not rethrown: a revert is the same answer on every endpoint, so
+    // rotating through the rest would only burn the caller's deadline.
+    if (isContractLevelFailure(error)) return { kind: "absent" };
+    throw error;
+  }
+}
+
+/**
+ * Reads Flap Portal state for one token.
+ *
+ * Unlike the Four.Meme helper, the ordinary negative here *is* the revert: the
+ * Portal answers `TokenNotFound(address)` for anything it did not launch, which
+ * this folds into "absent" the same way. A plain BEP-20, a Four.Meme token and
+ * an EOA all take that branch.
+ */
+async function readFlapOn(client: BscClient, address: string): Promise<FlapOutcome> {
+  try {
+    const state = await client.readContract({
+      address: FLAP_PORTAL,
+      abi: flapPortalAbi,
+      functionName: "getTokenV8Safe",
+      args: [address as `0x${string}`],
+    });
+    return {
+      kind: "answered",
+      state: {
+        status: state.status,
+        tokenVersion: state.tokenVersion,
+        quote: state.quoteTokenAddress.toLowerCase(),
+        nativeToQuoteSwapEnabled: state.nativeToQuoteSwapEnabled,
+        pool: state.pool.toLowerCase(),
+        progress: state.progress.toString(),
+        buyTaxBps: Number(state.buyTaxRate),
+        sellTaxBps: Number(state.sellTaxRate),
+      },
+    };
+  } catch (error) {
+    if (isContractLevelFailure(error)) return { kind: "absent" };
+    throw error;
+  }
+}
+
+/**
+ * Asks both launchpads about one token.
+ *
+ * The two reads are issued in the same tick so viem's multicall batching folds
+ * them into a single `eth_call`; adding a second launchpad therefore costs a
+ * struct in the response, not a second round trip. If either read fails at the
+ * transport level the pair is replayed on the next endpoint, and only when every
+ * endpoint is exhausted does the gate see "unavailable" — which it denies on.
+ */
+async function readChainState(
+  address: string,
+  signal: AbortSignal | undefined,
+): Promise<ChainOutcomes> {
+  const read = async (client: BscClient): Promise<ChainOutcomes> => {
+    const [fourmeme, flap] = await Promise.all([
+      readFourMemeOn(client, address),
+      readFlapOn(client, address),
+    ]);
+    return { fourmeme, flap };
+  };
+
+  try {
+    return await withBscClient(read, signal === undefined ? {} : { signal });
+  } catch (error) {
+    console.warn(`[${SOURCE}] chain read failed for ${address}: ${sanitizeMessage(error)}`);
+    return { fourmeme: { kind: "unavailable" }, flap: { kind: "unavailable" } };
+  }
+}
+
+/**
+ * Decides eligibility from an allowlist hit and a chain read, without touching
+ * either. Exported so the whole decision table is testable offline.
+ */
+export function decideEligibility(
+  address: string,
+  allowlisted: boolean,
+  outcomes: ChainOutcomes | null,
+): Omit<EligibilityResult, "checkedAt" | "cached"> {
+  const base = { address, source: null, venue: null, fourmeme: null, flap: null } as const;
+
+  if (!isEvmAddress(address)) {
+    return { ...base, eligible: false, reason: "invalid_address" };
+  }
+  if (allowlisted) {
+    return { ...base, eligible: true, reason: "allowlist", source: "allowlist" };
+  }
+  if (outcomes === null) {
+    return { ...base, eligible: false, reason: "allowlist_unavailable" };
+  }
+
+  const { fourmeme, flap } = outcomes;
+
+  // Positives first, so one launchpad still answers while the other's read is
+  // failing. A token belongs to at most one of them, so the order between these
+  // two only settles a case that cannot occur.
+  if (fourmeme.kind === "answered" && fourmeme.state.version === SUPPORTED_TOKEN_MANAGER_VERSION) {
+    return {
+      ...base,
+      eligible: true,
+      reason: "fourmeme_factory",
+      source: "fourmeme",
+      venue: fourmeme.state.liquidityAdded ? "pancake-v2" : "fourmeme-bonding",
+      fourmeme: fourmeme.state,
+    };
+  }
+  if (flap.kind === "answered" && isFlapTradable(flap.state.status)) {
+    return {
+      ...base,
+      eligible: true,
+      reason: "flap_portal",
+      source: "flap",
+      venue: flap.state.status === FLAP_STATUS_DEX ? "pancake-v2" : "flap-bonding",
+      flap: flap.state,
+    };
+  }
+
+  // Before any negative: a launchpad that could not be read might have been the
+  // one that would have admitted this token, so an outage on either side denies
+  // with `chain_unavailable` rather than the flat `not_listed` it looks like.
+  // That reason is also the one the gate refuses to cache.
+  if (fourmeme.kind === "unavailable" || flap.kind === "unavailable") {
+    return { ...base, eligible: false, reason: "chain_unavailable" };
+  }
+
+  // Measured against the live helper: it does not revert for a token it has
+  // never heard of — an EOA and a plain BEP-20 both come back as a zero-filled
+  // struct. So version 0 is the ordinary "not a Four.Meme token" answer, and the
+  // "absent" branch is only the rarer transport-shaped version of it.
+  if (fourmeme.kind === "answered" && fourmeme.state.version !== 0) {
+    return {
+      ...base,
+      eligible: false,
+      reason: "unsupported_token_manager",
+      // Still reported, so an operator can see why it was refused.
+      fourmeme: fourmeme.state,
+    };
+  }
+  if (flap.kind === "answered") {
+    return { ...base, eligible: false, reason: "unsupported_flap_status", flap: flap.state };
+  }
+
+  return { ...base, eligible: false, reason: "not_listed" };
+}
+
+/** Tradable on the curve, or graduated onto a pool. Everything else is refused. */
+function isFlapTradable(status: number): boolean {
+  return status === FLAP_STATUS_TRADABLE || status === FLAP_STATUS_DEX;
+}
+
+export interface IsEligibleParams {
+  address: string;
+  signal?: AbortSignal | undefined;
+  /**
+   * Overrides the chain read. Injected the same way adapters take `fetchFn`, so
+   * the fail-closed paths — outage denies, stale is never served — can be tested
+   * without a chain.
+   */
+  readState?: ((address: string, signal: AbortSignal | undefined) => Promise<ChainOutcomes>) | undefined;
+}
+
+/**
+ * Answers whether one token may be traded, and where.
+ *
+ * Never throws: every failure path resolves to `eligible: false` with a reason
+ * naming what went wrong, because a gate that throws is a gate a caller can
+ * accidentally catch into an allow.
+ */
+export async function isEligible(
+  store: SnapshotStore,
+  params: IsEligibleParams,
+): Promise<EligibilityResult> {
+  const address = params.address.toLowerCase();
+  const now = Date.now();
+
+  if (!isEvmAddress(address)) {
+    return { ...decideEligibility(address, false, null), checkedAt: now, cached: false };
+  }
+
+  const allowlist = loadAllowlist();
+
+  // Checked before the cache: a snapshot hit is a local map lookup, and it must
+  // keep answering even while the chain is unreachable.
+  if (allowlist !== null && allowlist.has(address)) {
+    return { ...decideEligibility(address, true, null), checkedAt: now, cached: false };
+  }
+
+  // Fresh only. A stale verdict is discarded rather than served — see the
+  // fail-closed note at the top of this file.
+  const cached = await store.get<EligibilityResult>(eligibilityKey(address));
+  if (cached !== null && cached.staleness === "fresh" && isEligibilityResult(cached.data)) {
+    return { ...cached.data, checkedAt: cached.asOf, cached: true };
+  }
+
+  const read = params.readState ?? readChainState;
+  const outcomes = allowlist === null ? null : await read(address, params.signal);
+  const decided = decideEligibility(address, false, outcomes);
+  const result: EligibilityResult = { ...decided, checkedAt: Date.now(), cached: false };
+
+  // Only a definite observation is cached. `chain_unavailable` and
+  // `allowlist_unavailable` are statements about this service, not the token,
+  // and caching them would keep denying after the outage cleared.
+  if (result.reason !== "chain_unavailable" && result.reason !== "allowlist_unavailable") {
+    const ttl = result.eligible ? ELIGIBILITY_TTL.eligible : ELIGIBILITY_TTL.ineligible;
+    await store.put(eligibilityKey(address), result, { source: SOURCE, ...ttl });
+  }
+
+  return result;
+}
+
+/**
+ * How many tokens of one batch may be on the chain at once.
+ *
+ * Allowlist and cache hits cost nothing, so this bounds only the worst case: a
+ * batch of entirely unknown addresses. Unbounded `Promise.all` over a 50-address
+ * batch would put 50 simultaneous `eth_call`s on a keyless public endpoint,
+ * which rate-limits — and under this gate a rate-limit reads as a denial.
+ */
+const BATCH_CONCURRENCY = 8;
+
+/**
+ * Resolves a batch, preserving input order.
+ *
+ * Order matters to the caller: the execution plane zips the verdicts back
+ * against the addresses it asked about.
+ */
+export async function isEligibleBatch(
+  store: SnapshotStore,
+  addresses: string[],
+  options: Omit<IsEligibleParams, "address"> = {},
+): Promise<EligibilityResult[]> {
+  const results: EligibilityResult[] = new Array<EligibilityResult>(addresses.length);
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      const address = addresses[index];
+      if (address === undefined) return;
+      results[index] = await isEligible(store, { ...options, address });
+    }
+  };
+
+  const workers = Math.min(BATCH_CONCURRENCY, addresses.length);
+  await Promise.all(Array.from({ length: workers }, worker));
+  return results;
+}
+
+/**
+ * Stored verdicts are re-validated on read: the store outlives code versions, so
+ * a shape written by an older build must not be trusted into an allow.
+ */
+function isEligibilityResult(value: unknown): value is EligibilityResult {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record["eligible"] === "boolean" && typeof record["reason"] === "string";
+}
