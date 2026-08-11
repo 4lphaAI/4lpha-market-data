@@ -19,6 +19,7 @@ import {
   MissingCredentialsError,
   asArray,
   isRecord,
+  normalizeAddress,
   parseNum,
   parseStr,
   requestSignal,
@@ -230,8 +231,12 @@ export async function fetchOnchainosPrice(params: OnchainosPriceParams): Promise
 export function normalizePriceInfo(address: string, data: unknown): TokenSnapshot {
   const first = asArray(data)[0];
   const row = isRecord(first) ? first : isRecord(data) ? data : {};
+  return { ...snapshotFromPriceRow(row), address: address.toLowerCase() };
+}
+
+function snapshotFromPriceRow(row: Record<string, unknown>): TokenSnapshot {
   return {
-    address: address.toLowerCase(),
+    address: normalizeAddress(row["tokenContractAddress"]) ?? "",
     priceUsd: parseNum(row["price"]),
     marketCapUsd: parseNum(row["marketCap"]),
     volume24hUsd: parseNum(row["volume24H"]),
@@ -239,6 +244,57 @@ export function normalizePriceInfo(address: string, data: unknown): TokenSnapsho
     priceChange24hPct: parseNum(row["priceChange24H"]),
     updatedFields: [],
   };
+}
+
+/** How many tokens one `price-info` call accepts. */
+const MAX_PRICE_BATCH = 100;
+
+export interface OnchainosPricesParams {
+  addresses: readonly string[];
+  signal?: AbortSignal | undefined;
+  fetchFn?: FetchFn;
+}
+
+/**
+ * Fetches price state for many tokens at once, keyed by address.
+ *
+ * The endpoint silently drops tokens it has never indexed — a batch of four
+ * addresses came back with two rows — so results are matched by the response's
+ * own `tokenContractAddress` and never by position. A token missing from the
+ * map is one OKX has no data for, which for a launchpad token usually means it
+ * has not graduated to a DEX pool yet.
+ */
+export async function fetchOnchainosPrices(
+  params: OnchainosPricesParams,
+): Promise<Map<string, TokenSnapshot>> {
+  const addresses = [...new Set(params.addresses.map((value) => value.toLowerCase()))];
+  const snapshots = new Map<string, TokenSnapshot>();
+
+  for (let index = 0; index < addresses.length; index += MAX_PRICE_BATCH) {
+    const chunk = addresses.slice(index, index + MAX_PRICE_BATCH);
+    const data = await signedRequest({
+      method: "POST",
+      path: "/api/v6/dex/market/price-info",
+      body: chunk.map((address) => ({ chainIndex: BSC_CHAIN_INDEX, tokenContractAddress: address })),
+      fetchFn: params.fetchFn ?? globalThis.fetch,
+      signal: params.signal,
+    });
+    for (const [address, snapshot] of normalizePriceInfoRows(data)) snapshots.set(address, snapshot);
+  }
+
+  return snapshots;
+}
+
+/** Exported for tests: indexes a multi-row price-info payload by its own address field. */
+export function normalizePriceInfoRows(data: unknown): Map<string, TokenSnapshot> {
+  const snapshots = new Map<string, TokenSnapshot>();
+  for (const raw of asArray(data)) {
+    if (!isRecord(raw)) continue;
+    const snapshot = snapshotFromPriceRow(raw);
+    if (snapshot.address === "") continue;
+    snapshots.set(snapshot.address, snapshot);
+  }
+  return snapshots;
 }
 
 export interface OnchainosTokenScanParams {

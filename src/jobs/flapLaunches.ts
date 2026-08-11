@@ -14,9 +14,11 @@
  * cycle merges into the previously stored set rather than replacing it.
  */
 
+import type { TokenSnapshot } from "../core/models.js";
 import type { SnapshotStore } from "../core/store.js";
 import type { JobSpec } from "../core/types.js";
 import {
+  FLAP_STATUS_DEX,
   fetchFlapLaunches,
   isFlapTradable,
   readFlapMarketStates,
@@ -25,12 +27,19 @@ import {
   type FlapMarketState,
 } from "../adapters/flap.js";
 import { sanitizeMessage } from "../adapters/http.js";
+import { fetchOnchainosPrices } from "../adapters/onchainos.js";
 import { FLAP_UNIVERSE_KEY } from "../universe.js";
-import { TOKEN_DEAD_AFTER_MS, TOKEN_FRESH_FOR_MS } from "./tokenStore.js";
+import { TOKEN_DEAD_AFTER_MS, TOKEN_FRESH_FOR_MS, mergeTokenIntoStore } from "./tokenStore.js";
 
 export const FLAP_LAUNCHES_JOB = "flap-launches";
 
 const SOURCE = "flap";
+
+/**
+ * Provenance for the enriched snapshot. Named after where the numbers came from,
+ * not the job that asked, so `updatedFields` provenance stays truthful.
+ */
+const SOURCE_ENRICH = "onchainos";
 
 /**
  * Blocks scanned per cycle. At the ~0.45s block time measured on BSC this is a
@@ -73,6 +82,8 @@ export interface FlapLaunchesResult {
   pruned: number;
   /** True when the lens could not be read, so nothing was pruned this cycle. */
   prunedSkipped: boolean;
+  /** Graduated rows that OnchainOS had price data for, merged into the token store. */
+  enriched: number;
   /** Log chunks no endpoint served. */
   missedChunks: number;
 }
@@ -86,6 +97,9 @@ export interface RunFlapLaunchesOptions {
   scan?: ((signal: AbortSignal) => Promise<FlapLaunchScan>) | undefined;
   readStates?:
     | ((addresses: string[], signal: AbortSignal) => Promise<Map<string, FlapMarketState>>)
+    | undefined;
+  readPrices?:
+    | ((addresses: string[], signal: AbortSignal) => Promise<Map<string, TokenSnapshot>>)
     | undefined;
 }
 
@@ -141,13 +155,63 @@ export async function runFlapLaunches(
     deadAfterMs: TOKEN_DEAD_AFTER_MS,
   });
 
+  const enriched = await enrichGraduated(store, entries, signal, options.readPrices);
+
   return {
     entries: entries.length,
     discovered: scan.launches.length,
     pruned,
     prunedSkipped,
+    enriched,
     missedChunks: scan.missedChunks,
   };
+}
+
+/**
+ * Fills in price, market cap, volume, holders and 24h change for the graduated
+ * part of the lane, from OnchainOS.
+ *
+ * Only the graduated rows are asked about, and that is measured rather than an
+ * optimisation guess: OKX indexes a token once it has a DEX pool and not before.
+ * A Flap token minutes old on its bonding curve comes back as an empty result,
+ * so asking about the whole lane would spend most of the batch on tokens that
+ * cannot answer. The lens is no help here either — after graduation it stops
+ * pricing, reporting `price` and `reserve` as 0 and handing back only the pool.
+ *
+ * Never throws. Enrichment is a bonus on top of a lane that is already
+ * published; missing credentials or an OKX outage must not fail a cycle whose
+ * actual job — discovery — already succeeded.
+ */
+async function enrichGraduated(
+  store: SnapshotStore,
+  entries: FlapLaneRow[],
+  signal: AbortSignal,
+  readPrices: RunFlapLaunchesOptions["readPrices"],
+): Promise<number> {
+  const graduated = entries.filter((entry) => entry.status === FLAP_STATUS_DEX);
+  if (graduated.length === 0) return 0;
+
+  try {
+    const fetchPrices =
+      readPrices ??
+      ((addresses: string[], s: AbortSignal) => fetchOnchainosPrices({ addresses, signal: s }));
+    const snapshots = await fetchPrices(
+      graduated.map((entry) => entry.address),
+      signal,
+    );
+
+    let merged = 0;
+    for (const snapshot of snapshots.values()) {
+      await mergeTokenIntoStore(store, SOURCE_ENRICH, snapshot);
+      merged += 1;
+    }
+    return merged;
+  } catch (error) {
+    // MissingCredentialsError included: an unconfigured OKX key means "source
+    // unavailable", which is the same non-event as the source being down.
+    console.warn(`[${SOURCE}] price enrichment skipped: ${sanitizeMessage(error)}`);
+    return 0;
+  }
 }
 
 /**

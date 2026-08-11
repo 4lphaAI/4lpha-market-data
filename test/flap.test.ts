@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { emptyTokenSnapshot } from "../src/core/models.js";
 import { MemoryStore } from "../src/core/store.js";
+import { MissingCredentialsError } from "../src/adapters/http.js";
+import { normalizePriceInfoRows } from "../src/adapters/onchainos.js";
+import { readTokenSnapshot } from "../src/jobs/tokenStore.js";
 import {
   TOKEN_CREATED_TOPIC,
   decodeLaunches,
@@ -244,6 +248,106 @@ describe("runFlapLaunches", () => {
     assert.equal(result.pruned, 0);
     assert.equal(result.prunedSkipped, true);
     await store.close();
+  });
+});
+
+describe("runFlapLaunches price enrichment", () => {
+  const CURVE = "0x0a".padEnd(42, "0");
+  const GRADUATED = "0x0b".padEnd(42, "0");
+
+  async function twoTokens(): Promise<FlapLaunchScan> {
+    return scan({
+      launches: [
+        { address: CURVE, symbol: "CURVE", name: "On Curve", creator: "0x0", meta: "", launchedAt: 1 },
+        { address: GRADUATED, symbol: "GRAD", name: "Graduated", creator: "0x0", meta: "", launchedAt: 2 },
+      ],
+    });
+  }
+
+  const states = async (addresses: string[]): Promise<Map<string, FlapMarketState>> =>
+    new Map(addresses.map((a) => [a, state({ status: a === GRADUATED ? 4 : 1 })]));
+
+  it("asks OnchainOS only about the graduated rows", async () => {
+    const store = new MemoryStore();
+    let asked: string[] = [];
+    const result = await runFlapLaunches(store, AbortSignal.timeout(5_000), {
+      scan: twoTokens,
+      readStates: states,
+      readPrices: async (addresses) => {
+        asked = addresses;
+        return new Map([[GRADUATED, { ...emptyTokenSnapshot(GRADUATED), priceUsd: 0.0000106, holders: 132 }]]);
+      },
+    });
+
+    // Measured: OKX has no data for a token still on its bonding curve, so
+    // including it would spend the batch on a guaranteed empty answer.
+    assert.deepEqual(asked, [GRADUATED]);
+    assert.equal(result.enriched, 1);
+
+    const snapshot = await readTokenSnapshot(store, GRADUATED);
+    assert.equal(snapshot?.priceUsd, 0.0000106);
+    assert.equal(snapshot?.holders, 132);
+    assert.equal(await readTokenSnapshot(store, CURVE), null);
+    await store.close();
+  });
+
+  it("tolerates OnchainOS dropping a token it has never indexed", async () => {
+    const store = new MemoryStore();
+    const result = await runFlapLaunches(store, AbortSignal.timeout(5_000), {
+      scan: twoTokens,
+      readStates: states,
+      // A batch of n addresses can come back with fewer rows; the adapter keys
+      // by the response's own address, so a missing one is simply not merged.
+      readPrices: async () => new Map(),
+      });
+
+    assert.equal(result.enriched, 0);
+    assert.equal(result.entries, 2);
+    await store.close();
+  });
+
+  it("still publishes the lane when OnchainOS is unavailable", async () => {
+    const store = new MemoryStore();
+    const result = await runFlapLaunches(store, AbortSignal.timeout(5_000), {
+      scan: twoTokens,
+      readStates: states,
+      readPrices: async () => {
+        throw new MissingCredentialsError("onchainos");
+      },
+    });
+
+    // Enrichment is a bonus on top of a lane that is already written; discovery
+    // succeeded, so the cycle succeeded.
+    assert.equal(result.enriched, 0);
+    assert.equal(result.entries, 2);
+    const stored = await store.get<FlapLaneRow[]>(FLAP_UNIVERSE_KEY);
+    assert.equal(stored?.data.length, 2);
+    await store.close();
+  });
+});
+
+describe("normalizePriceInfoRows", () => {
+  it("keys rows by the response's own address, not by request position", () => {
+    // Shaped from a real price-info reply: four addresses were sent and two
+    // rows came back, so position would have mismatched every field.
+    const rows = normalizePriceInfoRows([
+      {
+        chainIndex: "56",
+        tokenContractAddress: "0xC2C0FAEEB0BC7C9A7780377F3F5DFBA927777777",
+        price: "0.00001064296056918005560453984851431194",
+        marketCap: "10642.960569180055604539",
+        volume24H: "35910.361110981507589034",
+        holders: "132",
+        priceChange24H: "32.01",
+      },
+      { chainIndex: "56", price: "1", marketCap: "2" },
+    ]);
+
+    assert.equal(rows.size, 1);
+    const row = rows.get("0xc2c0faeeb0bc7c9a7780377f3f5dfba927777777");
+    assert.equal(row?.holders, 132);
+    assert.equal(row?.priceChange24hPct, 32.01);
+    assert.equal(row?.marketCapUsd, 10642.960569180055604539);
   });
 });
 
