@@ -1,0 +1,2875 @@
+{
+  "meta": {
+    "snapshotAt": "2026-08-11T15:19:53.615Z",
+    "description": "Static eligible-token allowlist for trade/LP gating. Four.Meme-launched tokens are eligible by factory rule, not enumerated here. Deliberately frozen; regenerate only by explicit decision.",
+    "counts": {
+      "eligible": 222,
+      "needsReview": 3,
+      "bySource": {
+        "static": 4,
+        "bstocks": 25,
+        "cmc-149": 0,
+        "cmc-top200-bsc": 197
+      }
+    },
+    "needsReview": [
+      {
+        "symbol": "GRAM",
+        "source": "cmc-top200-bsc",
+        "reason": "on-chain symbol() = \"TONCOIN\" does not match; address 0x76a797a59ba2c17726896976b7b3747bfd1d220f"
+      },
+      {
+        "symbol": "LUNC",
+        "source": "cmc-top200-bsc",
+        "reason": "on-chain symbol() = \"LUNA\" does not match; address 0x156ab3346823b651294766e23e6cf87254d68962"
+      },
+      {
+        "symbol": "GOMINING",
+        "source": "cmc-top200-bsc",
+        "reason": "on-chain symbol() = \"GMT\" does not match; address 0x7ddc52c4de30e94be3a6a0a2b259b2850f421989"
+      }
+    ]
+  },
+  "tokens": [
+    {
+      "address": "0x58b4591a3fd16041f28686098431b1374c3bb789",
+      "symbol": "BTC",
+      "name": "Bitcoin",
+      "cmcId": 1,
+      "cmcRank": 1,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BTC.ℏ[bsc]",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x4db5a66e937a9f4473fa95b1caf1d1e1d62e29ea",
+      "symbol": "ETH",
+      "name": "Ethereum",
+      "cmcId": 1027,
+      "cmcRank": 2,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "WETH",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d",
+      "symbol": "USDC",
+      "name": "USDC",
+      "cmcId": 3408,
+      "cmcRank": 5,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "USDC",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x1d2f0da169ceb9fc7b3144628db156f3f6c60dbe",
+      "symbol": "XRP",
+      "name": "XRP",
+      "cmcId": 52,
+      "cmcRank": 6,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "XRP",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x570a5d26f7765ecb712c0924e4de545b89fd43df",
+      "symbol": "SOL",
+      "name": "Solana",
+      "cmcId": 5426,
+      "cmcRank": 7,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "SOL",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xce7de646e7208a4ef112cb6ed5038fa6cc6b12e3",
+      "symbol": "TRX",
+      "name": "TRON",
+      "cmcId": 1958,
+      "cmcRank": 8,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "TRX",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xba2ae424d960c26247dd6c32edc70b295c744c43",
+      "symbol": "DOGE",
+      "name": "Dogecoin",
+      "cmcId": 74,
+      "cmcRank": 10,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "DOGE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x1ba42e5193dfa8b03d15dd1b86a3113bbbef8eeb",
+      "symbol": "ZEC",
+      "name": "Zcash",
+      "cmcId": 1437,
+      "cmcRank": 12,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ZEC",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x3ee2200efb3400fabb9aacf31297cbdd1d435d47",
+      "symbol": "ADA",
+      "name": "Cardano",
+      "cmcId": 2010,
+      "cmcRank": 14,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ADA",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xf8a0bf9cf54bb92f17374d9e9a321e6a111a51bd",
+      "symbol": "LINK",
+      "name": "Chainlink",
+      "cmcId": 1975,
+      "cmcRank": 15,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "LINK",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x1af3f329e8be154074d8769d1ffa4ee058b1dbc3",
+      "symbol": "DAI",
+      "name": "Dai",
+      "cmcId": 4943,
+      "cmcRank": 17,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "DAI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8ff795a6f4d97e7887c79bea79aba5cc76444adf",
+      "symbol": "BCH",
+      "name": "Bitcoin Cash",
+      "cmcId": 1831,
+      "cmcRank": 18,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BCH",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8d0d000ee44948fc98c9b98a4fa4921476f08b0d",
+      "symbol": "USD1",
+      "name": "World Liberty Financial USD",
+      "cmcId": 36148,
+      "cmcRank": 19,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "USD1",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5d3a1ff2b6bab83b63cd9ad0787074081a52ef34",
+      "symbol": "USDe",
+      "name": "Ethena USDe",
+      "cmcId": 29470,
+      "cmcRank": 20,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "USDe",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x4338665cbb7b2485a8855a139b75d5e34ab0db94",
+      "symbol": "LTC",
+      "name": "Litecoin",
+      "cmcId": 2,
+      "cmcRank": 23,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "LTC",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xbf5140a22578168fd562dccf235e5d43a02ce9b1",
+      "symbol": "UNI",
+      "name": "Uniswap",
+      "cmcId": 7083,
+      "cmcRank": 31,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "UNI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x1fa4a73a3f0133f0025378af00236f3abdee5d63",
+      "symbol": "NEAR",
+      "name": "NEAR Protocol",
+      "cmcId": 6535,
+      "cmcRank": 34,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "NEAR",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x47474747477b199288bf72a1d702f7fe0fb1deea",
+      "symbol": "WLFI",
+      "name": "World Liberty Financial",
+      "cmcId": 33251,
+      "cmcRank": 37,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "WLFI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x000ae314e2a2172a039b26378814c252734f556a",
+      "symbol": "ASTER",
+      "name": "Aster",
+      "cmcId": 36341,
+      "cmcRank": 38,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "ASTER",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x45e51bc23d592eb2dba86da3985299f7895d66ba",
+      "symbol": "USDD",
+      "name": "USDD",
+      "cmcId": 19891,
+      "cmcRank": 41,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "USDD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x22b1458e780f8fa71e2f84502cee8b5a3cc731fa",
+      "symbol": "M",
+      "name": "MemeCore",
+      "cmcId": 35491,
+      "cmcRank": 42,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "M",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xfb6115445bff7b52feb98650c87f44907e58f802",
+      "symbol": "AAVE",
+      "name": "Aave",
+      "cmcId": 7278,
+      "cmcRank": 44,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "AAVE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x7083609fce4d1d8dc0c979aab8c869ea2c873402",
+      "symbol": "DOT",
+      "name": "Polkadot",
+      "cmcId": 6636,
+      "cmcRank": 45,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "DOT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xce24439f2d9c6a2289f741120fe202248b666666",
+      "symbol": "U",
+      "name": "United Stables",
+      "cmcId": 39120,
+      "cmcRank": 48,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "U",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x25d887ce7a35172c62febfd67a1856f20faebb00",
+      "symbol": "PEPE",
+      "name": "Pepe",
+      "cmcId": 24478,
+      "cmcRank": 50,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "PEPE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x011ebe7d75e2c9d1e0bd0be0bef5c36f0a90075f",
+      "symbol": "STABLE",
+      "name": "Stable",
+      "cmcId": 38892,
+      "cmcRank": 60,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "STABLE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0eb3a705fc54725037cc9e008bdede697f62f335",
+      "symbol": "ATOM",
+      "name": "Cosmos",
+      "cmcId": 3794,
+      "cmcRank": 62,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ATOM",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xb59490ab09a0f526cc7305822ac65f2ab12f9723",
+      "symbol": "LIT",
+      "name": "Lighter",
+      "cmcId": 39125,
+      "cmcRank": 67,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "LIT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0231f91e02debd20345ae8ab7d71a41f8e140ce7",
+      "symbol": "JUP",
+      "name": "Jupiter",
+      "cmcId": 29210,
+      "cmcRank": 68,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "bwJUP",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0d8ce2a99bb6e3b7db580ed848240e4a0f9ae153",
+      "symbol": "FIL",
+      "name": "Filecoin",
+      "cmcId": 2280,
+      "cmcRank": 69,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "FIL",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x924fa68a0fc644485b8df8abfa0a41c2e7744444",
+      "symbol": "币安人生",
+      "name": "币安人生",
+      "cmcId": 38590,
+      "cmcRank": 74,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "币安人生",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x40af3827f39d0eacbf4a168f8d4ee67c121d11c9",
+      "symbol": "TUSD",
+      "name": "TrueUSD",
+      "cmcId": 2563,
+      "cmcRank": 75,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "TUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82",
+      "symbol": "CAKE",
+      "name": "PancakeSwap",
+      "cmcId": 7186,
+      "cmcRank": 77,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "Cake",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xa2b726b1145a4773f68593cf171187d8ebe4d495",
+      "symbol": "INJ",
+      "name": "Injective",
+      "cmcId": 7226,
+      "cmcRank": 80,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "INJ",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6418c0dd099a9fda397c766304cdd918233e8847",
+      "symbol": "PENGU",
+      "name": "Pudgy Penguins",
+      "cmcId": 34466,
+      "cmcRank": 83,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "PENGU",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x4ea98c1999575aaadfb38237dd015c5e773f75a2",
+      "symbol": "TRUMP",
+      "name": "OFFICIAL TRUMP",
+      "cmcId": 35336,
+      "cmcRank": 86,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "TRUMP",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xc5f0f7b66764f6ec8c8dff7ba683102295e16409",
+      "symbol": "FDUSD",
+      "name": "First Digital USD",
+      "cmcId": 26081,
+      "cmcRank": 90,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "FDUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xcf3232b85b43bca90e51d38cc06cc8bb8c8a3e36",
+      "symbol": "BEAT",
+      "name": "Audiera",
+      "cmcId": 38837,
+      "cmcRank": 92,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "Beat",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6985884c4392d348587b19cb9eaaf157f13271cd",
+      "symbol": "ZRO",
+      "name": "LayerZero",
+      "cmcId": 26997,
+      "cmcRank": 93,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ZRO",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xfe930c2d63aed9b82fc4dbc801920dd2c1a3224f",
+      "symbol": "NIGHT",
+      "name": "Midnight",
+      "cmcId": 39064,
+      "cmcRank": 94,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "NIGHT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x031b41e504677879370e9dbcf937283a8691fa7f",
+      "symbol": "FET",
+      "name": "Artificial Superintelligence Alliance",
+      "cmcId": 3773,
+      "cmcRank": 96,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "FET",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x20ee7b720f4e4c4ffcb00c4065cdae55271aecca",
+      "symbol": "NFT",
+      "name": "AINFT",
+      "cmcId": 9816,
+      "cmcRank": 101,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "NFT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8b194370825e37b33373e74a41009161808c1488",
+      "symbol": "VELVET",
+      "name": "Velvet",
+      "cmcId": 37298,
+      "cmcRank": 104,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "VELVET",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x352cb5e19b12fc216548a2677bd0fce83bae434b",
+      "symbol": "BTT",
+      "name": "BitTorrent [New]",
+      "cmcId": 16086,
+      "cmcRank": 105,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BTT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xa1c1a7341a1713f174d59926e49e4a1228924100",
+      "symbol": "MON",
+      "name": "Monad",
+      "cmcId": 30495,
+      "cmcRank": 106,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "MON",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xb3ed0a426155b79b898849803e3b36552f7ed507",
+      "symbol": "PENDLE",
+      "name": "Pendle",
+      "cmcId": 9481,
+      "cmcRank": 109,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "PENDLE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xdf5ba79f0fd70c6609666d5ed603710609a530ab",
+      "symbol": "CFX",
+      "name": "Conflux",
+      "cmcId": 7334,
+      "cmcRank": 112,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "CFX",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x16939ef78684453bfdfb47825f8a5f714f12623a",
+      "symbol": "XTZ",
+      "name": "Tezos",
+      "cmcId": 2011,
+      "cmcRank": 113,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "XTZ",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xf84dd1ac34c0043d109f6600f98302cdd3e5a6eb",
+      "symbol": "XPL",
+      "name": "Plasma",
+      "cmcId": 36645,
+      "cmcRank": 114,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "XPL",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xa697e272a73744b343528c3bc4702f2565b2f422",
+      "symbol": "BONK",
+      "name": "Bonk",
+      "cmcId": 23095,
+      "cmcRank": 116,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "Bonk",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0e63b9c287e32a05e6b9ab8ee8df88a2760225a9",
+      "symbol": "PIEVERSE",
+      "name": "Pieverse",
+      "cmcId": 38849,
+      "cmcRank": 117,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "PIEVERSE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xfb5b838b6cfeedc2873ab27866079ac55363d37e",
+      "symbol": "FLOKI",
+      "name": "FLOKI",
+      "cmcId": 10804,
+      "cmcRank": 118,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "FLOKI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xac23b90a79504865d52b49b327328411a23d4db2",
+      "symbol": "FF",
+      "name": "Falcon Finance",
+      "cmcId": 38482,
+      "cmcRank": 118,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "FF",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x904567252d8f48555b7447c67dca23f0372e16be",
+      "symbol": "KITE",
+      "name": "Kite",
+      "cmcId": 38828,
+      "cmcRank": 121,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "KITE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x4b0f1812e5df2a09796481ff14017e6005508003",
+      "symbol": "TWT",
+      "name": "Trust Wallet Token",
+      "cmcId": 5964,
+      "cmcRank": 128,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "TWT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6e88056e8376ae7709496ba64d37fa2f8015ce3e",
+      "symbol": "DEXE",
+      "name": "DeXe",
+      "cmcId": 7326,
+      "cmcRank": 128,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "DEXE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6e02ef88fd22390449d1610d1b8154b401134444",
+      "symbol": "H",
+      "name": "Humanity",
+      "cmcId": 36922,
+      "cmcRank": 130,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "H",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x52ce071bd9b1c4b00a0b92d298c512478cad67e8",
+      "symbol": "COMP",
+      "name": "Compound",
+      "cmcId": 5692,
+      "cmcRank": 132,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "COMP",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x715d400f88c167884bbcc41c5fea407ed4d2f8a0",
+      "symbol": "AXS",
+      "name": "Axie Infinity",
+      "cmcId": 6783,
+      "cmcRank": 135,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "AXS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6bdcce4a559076e37755a78ce0c06214e59e4444",
+      "symbol": "B",
+      "name": "BUILDon",
+      "cmcId": 36532,
+      "cmcRank": 140,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "B",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x208bf3e7da9639f1eaefa2de78c23396b0682025",
+      "symbol": "TAG",
+      "name": "Tagger",
+      "cmcId": 34958,
+      "cmcRank": 150,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "TAG",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8f86a15ec17cb3369d8b3e666dadbc11daa82b79",
+      "symbol": "APE",
+      "name": "ApeCoin",
+      "cmcId": 18876,
+      "cmcRank": 153,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "APE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xd41fdb03ba84762dd66a0af1a6c8540ff1ba5dfb",
+      "symbol": "SFP",
+      "name": "SafePal",
+      "cmcId": 8119,
+      "cmcRank": 156,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "SFP",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x1f12b85aac097e43aa1555b2881e98a51090e9a6",
+      "symbol": "GENIUS",
+      "name": "Genius Terminal",
+      "cmcId": 39841,
+      "cmcRank": 157,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "GENIUS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xb9e1fd5a02d3a33b25a14d661414e6ed6954a721",
+      "symbol": "SOON",
+      "name": "SOON",
+      "cmcId": 36542,
+      "cmcRank": 158,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "SOON",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x111111111117dc0aa78b770fa6a738034120c302",
+      "symbol": "1INCH",
+      "name": "1inch",
+      "cmcId": 8104,
+      "cmcRank": 160,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "1INCH",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x7324c7c0d95cebc73eea7e85cbaac0dbdf88a05b",
+      "symbol": "XCN",
+      "name": "Onyxcoin",
+      "cmcId": 18679,
+      "cmcRank": 162,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "XCN",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6907a5986c4950bdaf2f81828ec0737ce787519f",
+      "symbol": "ZAMA",
+      "name": "Zama",
+      "cmcId": 39332,
+      "cmcRank": 165,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ZAMA",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x3d4f0513e8a29669b960f9dbca61861548a9a760",
+      "symbol": "BANANAS31",
+      "name": "Banana For Scale",
+      "cmcId": 34118,
+      "cmcRank": 167,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "$BANANA",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x365de036a1f7dccb621530d517133521debb2013",
+      "symbol": "NEX",
+      "name": "Nexus",
+      "cmcId": 39965,
+      "cmcRank": 171,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "NEX",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0df0587216a4a1bb7d5082fdc491d93d2dd4b413",
+      "symbol": "CHEEMS",
+      "name": "Cheems (cheems.pet)",
+      "cmcId": 33280,
+      "cmcRank": 175,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "Cheems",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x95034f653d5d161890836ad2b6b8cc49d14e029a",
+      "symbol": "AB",
+      "name": "AB",
+      "cmcId": 3871,
+      "cmcRank": 177,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "AB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x92aa03137385f18539301349dcfc9ebc923ffb10",
+      "symbol": "SKYAI",
+      "name": "SKYAI",
+      "cmcId": 36300,
+      "cmcRank": 178,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "SKYAI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5b73a93b4e5e4f1fd27d8b3f8c97d69908b5e284",
+      "symbol": "FORM",
+      "name": "Four",
+      "cmcId": 23635,
+      "cmcRank": 186,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "FORM",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x99991c6aabba5a096f24f250b73580f5179b9999",
+      "symbol": "CAP",
+      "name": "Cap",
+      "cmcId": 40531,
+      "cmcRank": 189,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "CAP",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x97693439ea2f0ecdeb9135881e49f354656a911c",
+      "symbol": "RAVE",
+      "name": "RaveDAO",
+      "cmcId": 38967,
+      "cmcRank": 191,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "RAVE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5afadcd1e8e3ca78ee2d37100102f2aec8bc0aa8",
+      "symbol": "PLUME",
+      "name": "Plume",
+      "cmcId": 35364,
+      "cmcRank": 194,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "PLUME",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5de3939b2f811a61d830e6f52d13b066881412ab",
+      "symbol": "XPR",
+      "name": "XPR Network",
+      "cmcId": 5350,
+      "cmcRank": 195,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "XPR",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x500a02a20b0b0a3f3efccfc0559543f5743bd1c4",
+      "symbol": "O",
+      "name": "o1.exchange",
+      "cmcId": 40092,
+      "cmcRank": 197,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "O",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xc160598f2f5b216b48fa36007b4538114a234444",
+      "symbol": "SAFE",
+      "name": "Safe",
+      "cmcId": 21585,
+      "cmcRank": 199,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "SAFE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x608593d17a2decbbc4399e4185be4922f97ed32e",
+      "symbol": "USDY",
+      "name": "Ondo US Dollar Yield",
+      "cmcId": 29256,
+      "cmcRank": 203,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "USDY",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x61ec85ab89377db65762e234c946b5c25a56e99e",
+      "symbol": "HTX",
+      "name": "HTX",
+      "cmcId": 29160,
+      "cmcRank": 204,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "HTX",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xb3b02e4a9fb2bd28cc2ff97b0ab3f6b3ec1ee9d2",
+      "symbol": "USDf",
+      "name": "Falcon USD",
+      "cmcId": 35721,
+      "cmcRank": 205,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "USDf",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xc8fb80fcc03f699c70ff0cc08c09106288888888",
+      "symbol": "CTM",
+      "name": "c8ntinuum",
+      "cmcId": 37745,
+      "cmcRank": 207,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "CTM",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x9d10a1ec41fe7878429bb457e31f9b050d38c633",
+      "symbol": "BDX",
+      "name": "Beldex",
+      "cmcId": 3987,
+      "cmcRank": 210,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BDX",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x758a3e0b1f842c9306b783f8a4078c6c8c03a270",
+      "symbol": "USD0",
+      "name": "Usual USD",
+      "cmcId": 32307,
+      "cmcRank": 211,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "USD0",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x444045b0ee1ee319a660a5e3d604ca0ffa35acaa",
+      "symbol": "BTW",
+      "name": "Bitway",
+      "cmcId": 39158,
+      "cmcRank": 214,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BTW",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x40b8129b786d766267a7a118cf8c07e31cdb6fde",
+      "symbol": "UB",
+      "name": "Unibase",
+      "cmcId": 38339,
+      "cmcRank": 215,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "UB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0c69199c1562233640e0db5ce2c399a88eb507c7",
+      "symbol": "CYS",
+      "name": "Cysic",
+      "cmcId": 39071,
+      "cmcRank": 216,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "CYS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x90c97f71e18723b0cf0dfa30ee176ab653e89f40",
+      "symbol": "FRAX",
+      "name": "Legacy Frax Dollar",
+      "cmcId": 6952,
+      "cmcRank": 217,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "FRAX",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x00000000efe302beaa2b3e6e1b18d08d69a9012a",
+      "symbol": "AUSD",
+      "name": "AUSD",
+      "cmcId": 32864,
+      "cmcRank": 218,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "AUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xe6df05ce8c8301223373cf5b969afcb1498c5528",
+      "symbol": "KOGE",
+      "name": "48 Club Token",
+      "cmcId": 7184,
+      "cmcRank": 221,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "KOGE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x90c48855bb69f9d2c261efd0d8c7f35990f2dd6f",
+      "symbol": "WFI",
+      "name": "WeFi",
+      "cmcId": 34261,
+      "cmcRank": 222,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "WFI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x9dce13e71b11eb5df66ca269bd657696587fd4e2",
+      "symbol": "ALE",
+      "name": "Ailey",
+      "cmcId": 30605,
+      "cmcRank": 229,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "ALE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xba5ed44733953d79717f6269357c77718c8ba5ed",
+      "symbol": "U",
+      "name": "Union",
+      "cmcId": 38270,
+      "cmcRank": 232,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "U",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5a110fc00474038f6c02e89c707d638602ea44b5",
+      "symbol": "USDF",
+      "name": "Aster USDF",
+      "cmcId": 35437,
+      "cmcRank": 237,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "USDF",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x80eede496655fb9047dd39d9f418d5483ed600df",
+      "symbol": "FRXUSD",
+      "name": "Frax USD",
+      "cmcId": 36039,
+      "cmcRank": 238,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "frxUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xc6bdfc4f2e90196738873e824a9efa03f7c64176",
+      "symbol": "VCNT",
+      "name": "ViciCoin",
+      "cmcId": 28656,
+      "cmcRank": 240,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "VCNT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x65e7a112db1142eae919201b1232f7aa488ed83c",
+      "symbol": "REAL",
+      "name": "RealLink",
+      "cmcId": 14721,
+      "cmcRank": 241,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "REAL",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x992879cd8ce0c312d98648875b5a8d6d042cbf34",
+      "symbol": "CRCLon",
+      "name": "Circle Internet Group Tokenized Stock (Ondo)",
+      "cmcId": 38056,
+      "cmcRank": 242,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "CRCLon",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xc07e1300dc138601fa6b0b59f8d0fa477e690589",
+      "symbol": "Q",
+      "name": "Quack AI",
+      "cmcId": 38236,
+      "cmcRank": 243,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "Q",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xb0f09ea9ae0515c3551080d4a745c8115aa30e37",
+      "symbol": "DOS",
+      "name": "DAPPOS",
+      "cmcId": 40980,
+      "cmcRank": 246,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "DOS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x2c3a8ee94ddd97244a93bc48298f97d2c412f7db",
+      "symbol": "AKE",
+      "name": "AKEDO",
+      "cmcId": 38127,
+      "cmcRank": 247,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "AKE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x1f8955e640cbd9abc3c3bb408c9e2e1f5f20dfe6",
+      "symbol": "USDon",
+      "name": "U.S. Dollar Tokenized Currency (Ondo)",
+      "cmcId": 38273,
+      "cmcRank": 248,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "USDon",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xcaae2a2f939f51d97cdfa9a86e79e3f085b799f3",
+      "symbol": "TUT",
+      "name": "Tutorial",
+      "cmcId": 35892,
+      "cmcRank": 249,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "TUT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x51f1afc16e154d1601e61eca21d8af4897f1e840",
+      "symbol": "US",
+      "name": "Talus",
+      "cmcId": 38869,
+      "cmcRank": 250,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "US",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x3ee4df61bd4f867e349beae8bfe07bc31b4850fb",
+      "symbol": "SNDKB",
+      "name": "SNDKB",
+      "sources": [
+        "bstocks",
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "bstocks",
+      "cmcId": 40216,
+      "cmcRank": 251,
+      "onChainSymbol": "SNDKB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xbe9d156892e55e7154bcd3cb0fea677f9d3103e1",
+      "symbol": "SPCXB",
+      "name": "SPCXB",
+      "sources": [
+        "bstocks",
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "bstocks",
+      "cmcId": 40217,
+      "cmcRank": 252,
+      "onChainSymbol": "SPCXB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6ced5c6d3f913b48d59fa07abbfe9060c409087c",
+      "symbol": "ANTFUN",
+      "name": "AntFun",
+      "cmcId": 39094,
+      "cmcRank": 255,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ANTFUN",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x4d3dc895a9edb234dfa3e303a196c009dc918f84",
+      "symbol": "ZBU",
+      "name": "Zeebu",
+      "cmcId": 27765,
+      "cmcRank": 257,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ZBU",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x80f3d493ebce97e343c53d29a137942416b4ffc0",
+      "symbol": "CRCLB",
+      "name": "CRCLB",
+      "sources": [
+        "bstocks",
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "bstocks",
+      "cmcId": 40213,
+      "cmcRank": 258,
+      "onChainSymbol": "CRCLB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0782b6d8c4551b9760e74c0545a9bcd90bdc41e5",
+      "symbol": "lisUSD",
+      "name": "lisUSD",
+      "cmcId": 21330,
+      "cmcRank": 259,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "lisUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0a8d6c86e1bce73fe4d0bd531e1a567306836ea5",
+      "symbol": "COAI",
+      "name": "ChainOpera AI",
+      "cmcId": 38489,
+      "cmcRank": 262,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "COAI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x1104eb7e85e25eb45f88e638b0c27a06c1a91cb2",
+      "symbol": "IVVon",
+      "name": "iShares Core S&P 500 Tokenized ETF (Ondo)",
+      "cmcId": 38051,
+      "cmcRank": 263,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "IVVon",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0affe50d637114656f6ba27fa94abf0de260f918",
+      "symbol": "YFI",
+      "name": "Yearn",
+      "cmcId": 5864,
+      "cmcRank": 267,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "YFI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x62d0a8458ed7719fdaf978fe5929c6d342b0bfce",
+      "symbol": "BEAM",
+      "name": "Beam",
+      "cmcId": 28298,
+      "cmcRank": 267,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BEAM",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xd955c9ba56fb1ab30e34766e252a97ccce3d31a6",
+      "symbol": "XPIN",
+      "name": "XPIN Network",
+      "cmcId": 36238,
+      "cmcRank": 270,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "XPIN",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x00f8da33734feb9b946fec2228c25072d2e2e41f",
+      "symbol": "NILA",
+      "name": "MindWaveDAO",
+      "cmcId": 36302,
+      "cmcRank": 276,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "NILA",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xf2b51cc1850fed939658317a22d73d3482767591",
+      "symbol": "NXPC",
+      "name": "NEXPACE",
+      "cmcId": 36044,
+      "cmcRank": 278,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "NXPC",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xaf44a1e76f56ee12adbb7ba8acd3cbd474888122",
+      "symbol": "DUSD",
+      "name": "StandX DUSD",
+      "cmcId": 36762,
+      "cmcRank": 280,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "DUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0f0df6cb17ee5e883eddfef9153fc6036bdb4e37",
+      "symbol": "BAS",
+      "name": "BNB Attestation Service",
+      "cmcId": 37387,
+      "cmcRank": 282,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "BAS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xaa88c603d142c371ea0eac8756123c5805edee03",
+      "symbol": "DOG",
+      "name": "Dog (Bitcoin)",
+      "cmcId": 30933,
+      "cmcRank": 283,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "DOG",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x92516e0ddf1ddbf7fab1b79cac26689fdc5ba8e6",
+      "symbol": "HUMA",
+      "name": "Huma Finance",
+      "cmcId": 36576,
+      "cmcRank": 284,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "HUMA",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xa227cc36938f0c9e09ce0e64dfab226cad739447",
+      "symbol": "OPEN",
+      "name": "OpenLedger",
+      "cmcId": 37456,
+      "cmcRank": 285,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "OPEN",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0",
+      "symbol": "TSLAX",
+      "name": "Tesla tokenized stock (xStock)",
+      "cmcId": 37004,
+      "cmcRank": 286,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "TSLAx",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xc748673057861a797275cd8a068abb95a902e8de",
+      "symbol": "BabyDoge",
+      "name": "Baby Doge Coin",
+      "cmcId": 10407,
+      "cmcRank": 287,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BabyDoge",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x3e5d4f8aee0d9b3082d5f6da5d6e225d17ba9ea0",
+      "symbol": "UAI",
+      "name": "UnifAI Network",
+      "cmcId": 38841,
+      "cmcRank": 288,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "UAI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xcdf2f3e0fa43c47a6662a91c9e4a7c5f69762699",
+      "symbol": "MUB",
+      "name": "MUB",
+      "sources": [
+        "bstocks",
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "bstocks",
+      "cmcId": 40212,
+      "cmcRank": 294,
+      "onChainSymbol": "MUB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x33d08d8c7a168333a85285a68c0042b39fc3741d",
+      "symbol": "AIOZ",
+      "name": "AIOZ Network",
+      "cmcId": 9104,
+      "cmcRank": 295,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "AIOZ",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xcce5f304fd043d6a4e8ccb5376a4a4fb583b98d5",
+      "symbol": "ALLO",
+      "name": "Allora",
+      "cmcId": 38908,
+      "cmcRank": 296,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ALLO",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xdf24f8c21cb404b3031a450d8e049d6e39fc1fa5",
+      "symbol": "BILL",
+      "name": "Billions Network",
+      "cmcId": 39545,
+      "cmcRank": 297,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BILL",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5bfdaa3f7c28b9994b56135403bf1acea02595b0",
+      "symbol": "COW",
+      "name": "CoW Protocol",
+      "cmcId": 19269,
+      "cmcRank": 299,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "COW",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x95c78222b3d6e262426483d42cfa53685a67ab9d",
+      "symbol": "vBUSD",
+      "name": "Venus BUSD",
+      "cmcId": 7959,
+      "cmcRank": 302,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "vBUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x226a2fa2556c48245e57cd1cba4c6c9e67077dd2",
+      "symbol": "BIO",
+      "name": "Bio Protocol",
+      "cmcId": 34812,
+      "cmcRank": 306,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BIO",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xf486ad071f3bee968384d2e39e2d8af0fcf6fd46",
+      "symbol": "VELO",
+      "name": "Velo",
+      "cmcId": 7127,
+      "cmcRank": 309,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "VELO",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0e4f6209ed984b21edea43ace6e09559ed051d48",
+      "symbol": "ON",
+      "name": "Orochi Network",
+      "cmcId": 38750,
+      "cmcRank": 310,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ON",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xe50e3d1a46070444f44df911359033f2937fcc13",
+      "symbol": "SQD",
+      "name": "Subsquid",
+      "cmcId": 12894,
+      "cmcRank": 312,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "SQD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x000008d2175f9aeaddb2430c26f8a6f73c5a0000",
+      "symbol": "UP",
+      "name": "Unitas",
+      "cmcId": 39665,
+      "cmcRank": 313,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "UP",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xfebded1b0986a8ee107f5ab1a1c5a813491deceb",
+      "symbol": "CRCLX",
+      "name": "Circle tokenized stock (xStock)",
+      "cmcId": 37005,
+      "cmcRank": 314,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "CRCLx",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x53e562b9b7e5e94b81f10e96ee70ad06df3d2657",
+      "symbol": "BABY",
+      "name": "Babylon",
+      "cmcId": 32198,
+      "cmcRank": 317,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BABY",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xfe189e97832da1573e4e4ff034f4ffc3a15c7777",
+      "symbol": "MARSCOIN",
+      "name": "MarsCoin",
+      "cmcId": 40944,
+      "cmcRank": 317,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "MarsCoin",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x299ad4299da5b2b93fba4c96967b040c7f611099",
+      "symbol": "APR",
+      "name": "aPriori",
+      "cmcId": 38569,
+      "cmcRank": 320,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "APR",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xd20fb09a49a8e75fef536a2dbc68222900287bac",
+      "symbol": "PRL",
+      "name": "Perle",
+      "cmcId": 39797,
+      "cmcRank": 321,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "PRL",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x1a5d7e4c3a7f940b240b7357a4bfed30d17f9497",
+      "symbol": "HOLO",
+      "name": "Holoworld AI",
+      "cmcId": 38309,
+      "cmcRank": 323,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "HOLO",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8c907e0a72c3d55627e853f4ec6a96b0c8771145",
+      "symbol": "ZIG",
+      "name": "ZIGChain",
+      "cmcId": 9260,
+      "cmcRank": 325,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ZIG",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x9a4a67721573f2c9209dfff972c52be4e3f6642e",
+      "symbol": "GPS",
+      "name": "GoPlus Security",
+      "cmcId": 35268,
+      "cmcRank": 329,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "GPS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x7ec43cf65f1663f820427c62a5780b8f2e25593a",
+      "symbol": "LAB",
+      "name": "LAB",
+      "cmcId": 33223,
+      "cmcRank": 331,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "LAB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xda7ad9dea9397cffddae2f8a052b82f1484252b3",
+      "symbol": "RIVER",
+      "name": "River",
+      "cmcId": 38417,
+      "cmcRank": 332,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "RIVER",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x7dc31152f557f0a21897cab58b0d2d213a6d4444",
+      "symbol": "FLOW",
+      "name": "Flow",
+      "cmcId": 4558,
+      "cmcRank": 335,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "FLOW",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6bf62ca91e397b5a7d1d6bce97d9092065d7a510",
+      "symbol": "CROSS",
+      "name": "CROSS",
+      "cmcId": 37166,
+      "cmcRank": 341,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "CROSS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x90a2a4c76b5d8c0bc892a69ea28aa775a8f2dd48",
+      "symbol": "SPYX",
+      "name": "SP500 tokenized ETF (xStock)",
+      "cmcId": 37006,
+      "cmcRank": 342,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "SPYx",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xa3f020a5c92e15be13caf0ee5c95cf79585eecc9",
+      "symbol": "ELF",
+      "name": "aelf",
+      "cmcId": 2299,
+      "cmcRank": 343,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ELF",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x23ae4fd8e7844cdbc97775496ebd0e8248656028",
+      "symbol": "XAUM",
+      "name": "Matrixdock Gold",
+      "cmcId": 34212,
+      "cmcRank": 344,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "XAUM",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xb86abcb37c3a4b64f74f59301aff131a1becc787",
+      "symbol": "ZIL",
+      "name": "Zilliqa",
+      "cmcId": 2469,
+      "cmcRank": 346,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ZIL",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x947950bcc74888a40ffa2593c5798f11fc9124c4",
+      "symbol": "SUSHI",
+      "name": "SushiSwap",
+      "cmcId": 6758,
+      "cmcRank": 350,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "SUSHI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8fd0d741e09a98e82256c63f25f90301ea71a83e",
+      "symbol": "SENTIS",
+      "name": "SentismAI",
+      "cmcId": 38838,
+      "cmcRank": 353,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "SENTIS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xf81ac2e1a0373dde1bce01e2fe694a9b7e3bfcb9",
+      "symbol": "XUSD",
+      "name": "StraitsX USD",
+      "cmcId": 32372,
+      "cmcRank": 354,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "XUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xac246674dd88dd08f9c6dd0ab5e2115988bff34a",
+      "symbol": "MMT",
+      "name": "Momentum",
+      "cmcId": 38231,
+      "cmcRank": 355,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "MMT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xcf6bb5389c92bdda8a3747ddb454cb7a64626c63",
+      "symbol": "XVS",
+      "name": "Venus",
+      "cmcId": 7288,
+      "cmcRank": 356,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "XVS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x755341c49f4427e43d99d8254a8dd87056f1ee00",
+      "symbol": "ELG",
+      "name": "EscoinToken",
+      "cmcId": 10312,
+      "cmcRank": 357,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ELG",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6a708ead771238919d85930b5a0f10454e1c331a",
+      "symbol": "SPYon",
+      "name": "SPDR S&P 500 Tokenized ETF (Ondo)",
+      "cmcId": 38067,
+      "cmcRank": 358,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "SPYon",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x30117e4bc17d7b044194b76a38365c53b72f7d49",
+      "symbol": "GWEI",
+      "name": "ETHGas",
+      "cmcId": 39379,
+      "cmcRank": 359,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "GWEI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0000028a2eb8346cd5c0267856ab7594b7a55308",
+      "symbol": "ZETA",
+      "name": "ZetaChain",
+      "cmcId": 21259,
+      "cmcRank": 360,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ZETA",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5dbde81fce337ff4bcaaee4ca3466c00aecae274",
+      "symbol": "AGT",
+      "name": "Alaya Governance Token",
+      "cmcId": 36195,
+      "cmcRank": 362,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "AGT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xae2f842ef90c0d5213259ab82639d5bbf649b08e",
+      "symbol": "MSTRX",
+      "name": "MicroStrategy tokenized stock (xStock)",
+      "cmcId": 37003,
+      "cmcRank": 363,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "MSTRx",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x9bafc8d4b487cebff201721702507a3e2c67ad79",
+      "symbol": "KAVA",
+      "name": "Kava",
+      "cmcId": 4846,
+      "cmcRank": 364,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "KAVA",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xf00600ebc7633462bc4f9c61ea2ce99f5aaebd4a",
+      "symbol": "ROSE",
+      "name": "Oasis",
+      "cmcId": 7653,
+      "cmcRank": 365,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "wROSE",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8b1f4432f943c465a973fedc6d7aa50fc96f1f65",
+      "symbol": "AXL",
+      "name": "Axelar",
+      "cmcId": 17799,
+      "cmcRank": 368,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "AXL",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6a2608dabe09bc1128eec7275b92dfb939d5db3f",
+      "symbol": "TOSHI",
+      "name": "Toshi",
+      "cmcId": 27750,
+      "cmcRank": 373,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "TOSHI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x2dff88a56767223a5529ea5960da7a3f5f766406",
+      "symbol": "ID",
+      "name": "SPACE ID",
+      "cmcId": 21846,
+      "cmcRank": 374,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ID",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xbc7d6b50616989655afd682fb42743507003056d",
+      "symbol": "ACH",
+      "name": "Alchemy Pay",
+      "cmcId": 6958,
+      "cmcRank": 375,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ACH",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xf3d5b4c34ed623478cc5141861776e6cf7ae3a1e",
+      "symbol": "KGEN",
+      "name": "KGeN",
+      "cmcId": 38554,
+      "cmcRank": 377,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "KGEN",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8b6acf6041a81567f012ff6a4c6d96d5818d74bf",
+      "symbol": "MUon",
+      "name": "Micron Technology Tokenized Stock (Ondo)",
+      "cmcId": 38014,
+      "cmcRank": 378,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "MUon",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xa9ee28c80f960b889dfbd1902055218cba016f75",
+      "symbol": "NVDAon",
+      "name": "NVIDIA Tokenized Stock (Ondo)",
+      "cmcId": 38093,
+      "cmcRank": 380,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "NVDAon",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xfebfa339e44c28e2aa9e62ea1027c9cb4e378605",
+      "symbol": "NPC",
+      "name": "Non-Playable Coin",
+      "cmcId": 27960,
+      "cmcRank": 381,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "NPC",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x68b07cef227cea1b2b6683921c8c825cd5c69ec7",
+      "symbol": "IBITon",
+      "name": "iShares Bitcoin Trust Tokenized Stock (Ondo)",
+      "cmcId": 39769,
+      "cmcRank": 382,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "IBITon",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x91152b4ef635403efbae860edd0f8c321d7c035d",
+      "symbol": "IRYS",
+      "name": "Irys",
+      "cmcId": 38978,
+      "cmcRank": 385,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "IRYS",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xff7d6a96ae471bbcd7713af9cb1feeb16cf56b41",
+      "symbol": "BR",
+      "name": "Bedrock",
+      "cmcId": 36063,
+      "cmcRank": 386,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "BR",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x8457ca5040ad67fdebbcc8edce889a335bc0fbfb",
+      "symbol": "ALT",
+      "name": "Altlayer",
+      "cmcId": 29073,
+      "cmcRank": 390,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ALT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xab3dbcd9b096c3ff76275038bf58eac10d22c61f",
+      "symbol": "YUSD",
+      "name": "Aegis YUSD",
+      "cmcId": 35976,
+      "cmcRank": 391,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "YUSD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xea37a8de1de2d9d10772eeb569e28bfa5cb17707",
+      "symbol": "JCT",
+      "name": "Janction",
+      "cmcId": 38909,
+      "cmcRank": 392,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "JCT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xa7440029eca41deabd8775ef1d6086b37d4df8d6",
+      "symbol": "BRETT",
+      "name": "Brett (Based)",
+      "cmcId": 29743,
+      "cmcRank": 394,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "BRETT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x6ec90334d89dbdc89e08a133271be3d104128edb",
+      "symbol": "WKC",
+      "name": "Wiki Cat",
+      "cmcId": 20700,
+      "cmcRank": 401,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "WKC",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xd23a186a78c0b3b805505e5f8ea4083295ef9f3a",
+      "symbol": "BARD",
+      "name": "Lombard",
+      "cmcId": 38408,
+      "cmcRank": 402,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "BARD",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x9d1a7a3191102e9f900faa10540837ba84dcbae7",
+      "symbol": "EURI",
+      "name": "Eurite",
+      "cmcId": 32644,
+      "cmcRank": 412,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "EURI",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x9810beac9af3c30d14cfb61cdd557e160f60fd50",
+      "symbol": "LION",
+      "name": "Loaded Lions",
+      "cmcId": 35954,
+      "cmcRank": 412,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "LIon",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x52721d159cd90dd76014f73c1440e4ff983420ac",
+      "symbol": "TROLL",
+      "name": "TROLL (SOL)",
+      "cmcId": 36313,
+      "cmcRank": 416,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "Troll",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x2e45bed32903ea421edd9f53f4b895683bf84444",
+      "symbol": "FB",
+      "name": "Fractal Bitcoin",
+      "cmcId": 32941,
+      "cmcRank": 417,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "FB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x4bfaa776991e85e5f8b1255461cbbd216cfc714f",
+      "symbol": "HOME",
+      "name": "Defi App",
+      "cmcId": 36133,
+      "cmcRank": 417,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "HOME",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xe2dca969624795985f2f083bcd0b674337ba130a",
+      "symbol": "SKR",
+      "name": "Seeker",
+      "cmcId": 39377,
+      "cmcRank": 419,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "SKR",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xc845b2894dbddd03858fd2d643b4ef725fe0849d",
+      "symbol": "NVDAX",
+      "name": "NVIDIA tokenized stock (xStock)",
+      "cmcId": 36992,
+      "cmcRank": 422,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "NVDAx",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xf0ebb572643336834d516c485ad31d3299999999",
+      "symbol": "MY",
+      "name": "MetYa",
+      "cmcId": 35269,
+      "cmcRank": 425,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "MY",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x19c018e13cff682e729cc7b5fb68c8a641bf98a4",
+      "symbol": "BURN",
+      "name": "Burnedfi",
+      "cmcId": 30460,
+      "cmcRank": 426,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "burn",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xfd7b3a77848f1c2d67e05e54d78d174a0c850335",
+      "symbol": "ONT",
+      "name": "Ontology",
+      "cmcId": 2566,
+      "cmcRank": 427,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "ONT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0c8382719ef242cae2247e4decb2891fbf699818",
+      "symbol": "BDCA",
+      "name": "BitDCA",
+      "cmcId": 35637,
+      "cmcRank": 428,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "BDCA",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x9be61a38725b265bc3eb7bfdf17afdfc9d26c130",
+      "symbol": "AT",
+      "name": "APRO",
+      "cmcId": 38757,
+      "cmcRank": 432,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "coingecko",
+      "onChainSymbol": "AT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x009a0fbf4928362d79077b4f38da9b5fb2ce64e2",
+      "symbol": "VAM",
+      "name": "Vitalum",
+      "cmcId": 39172,
+      "cmcRank": 434,
+      "sources": [
+        "cmc-top200-bsc"
+      ],
+      "addressSource": "cmc-map",
+      "onChainSymbol": "VAM",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "native",
+      "symbol": "BNB",
+      "name": "BNB",
+      "sources": [
+        "static"
+      ],
+      "addressSource": "static",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",
+      "symbol": "WBNB",
+      "name": "Wrapped BNB",
+      "sources": [
+        "static"
+      ],
+      "addressSource": "static",
+      "onChainSymbol": "WBNB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c",
+      "symbol": "BTCB",
+      "name": "BTCB (Binance-pegged BTC)",
+      "sources": [
+        "static"
+      ],
+      "addressSource": "static",
+      "onChainSymbol": "BTCB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x55d398326f99059ff775485246999027b3197955",
+      "symbol": "USDT",
+      "name": "Tether USD (Binance-pegged, BSC-USD)",
+      "sources": [
+        "static"
+      ],
+      "addressSource": "static",
+      "expectedOnChainSymbol": "BSC-USD",
+      "onChainSymbol": "USDT",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x75fd4cf6f8392e41e70391d60c90c0d5211603a1",
+      "symbol": "AMDB",
+      "name": "AMDB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "AMDB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xe81c6bb0266cd68b4f17278531dd03ea1f12da4e",
+      "symbol": "CBRSB",
+      "name": "CBRSB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "CBRSB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x585bde7c54abb5ccd7791f923d6c2187635f3952",
+      "symbol": "COINB",
+      "name": "COINB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "COINB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x93862d63fd9fd488b1328e9b47717d75e994a84b",
+      "symbol": "DRAMB",
+      "name": "DRAMB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "DRAMB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xbe82f76637dba2c114c41df856c2c51e522e2cb8",
+      "symbol": "EWYB",
+      "name": "EWYB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "EWYB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x740e075cbbea22a082b9d6679e65e82767875b6a",
+      "symbol": "GLWB",
+      "name": "GLWB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "GLWB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x3f53de71c126bdabae20f9cd64848d317f6c3238",
+      "symbol": "GOOGLB",
+      "name": "GOOGLB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "GOOGLB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xe614e2fc6c787035ff51f452e8e826bfd32d5283",
+      "symbol": "INTCB",
+      "name": "INTCB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "INTCB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x64748bea17b6d19e242adf20425de2440c656142",
+      "symbol": "LITEB",
+      "name": "LITEB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "LITEB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x7425889fe94f9d693e8daefe88bcced6acfef4c0",
+      "symbol": "METAB",
+      "name": "METAB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "METAB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x80106cb3ead06659a5ad19df39d9b4733863b9b0",
+      "symbol": "MSFTB",
+      "name": "MSFTB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "MSFTB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xe87afb3076aeb0f9b14e368de8145ae6a2826a14",
+      "symbol": "MSTRB",
+      "name": "MSTRB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "MSTRB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xe256bc2a4f5297f8ba6f043f180a46300ecbcbb1",
+      "symbol": "NBISB",
+      "name": "NBISB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "NBISB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x02fca66c1d1afb4e2a7884261eb00f63598a7436",
+      "symbol": "NVDAB",
+      "name": "NVDAB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "NVDAB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x0ca5d51d0277bd006fd9607d3e560785ebad8222",
+      "symbol": "PLTRB",
+      "name": "PLTRB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "PLTRB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5f7a56e877b9130608bf8be962621011182fefe1",
+      "symbol": "QCOMB",
+      "name": "QCOMB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "QCOMB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x205812cdbed920aff76c6580abd681a46d11efc7",
+      "symbol": "QQQB",
+      "name": "QQQB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "QQQB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xd97d097a89113fa59b76c572e5b2eb647e8eefaf",
+      "symbol": "SOXLB",
+      "name": "SOXLB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "SOXLB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8",
+      "symbol": "SPYB",
+      "name": "SPYB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "SPYB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0x5b1910eaad6450e50f816082aa078c41f10c292f",
+      "symbol": "TSLAB",
+      "name": "TSLAB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "TSLAB",
+      "verifiedOnChain": true
+    },
+    {
+      "address": "0xebe29695f8047c13d36e7a790ca8c1b239ffad1c",
+      "symbol": "WDCB",
+      "name": "WDCB",
+      "sources": [
+        "bstocks"
+      ],
+      "addressSource": "bstocks",
+      "onChainSymbol": "WDCB",
+      "verifiedOnChain": true
+    }
+  ]
+}
