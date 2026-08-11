@@ -13,7 +13,7 @@ Node 22, TypeScript strict ESM, Hono HTTP, `pg` with an in-memory fallback when 
 ## Source map
 
 - `src/core/` — `DataRecord<T>` with `staleness: fresh|stale|dead` (computed at read time, never stored); `SnapshotStore` (Memory + Postgres); job `scheduler` (each job on its own interval + jitter + AbortSignal timeout; a timed-out run is aborted; failures isolated per-job, never crash the process; health persisted).
-- `src/adapters/` — fourmeme, onchainos (OKX HMAC-signed), binanceWeb3 (Binance Alpha token list ~660 + Sintral kline), gmgn, pancake (public explorer API), venus (on-chain via BSC RPC).
+- `src/adapters/` — fourmeme, flap (on-chain: Portal `TokenCreated` logs + lens), onchainos (OKX HMAC-signed), binanceWeb3 (Binance Alpha token list ~660 + Sintral kline), gmgn, pancake (public explorer API), venus (on-chain via BSC RPC).
 - `src/query/` — kline read-through chain, tiered security scan, and the eligibility gate.
 - `src/server.ts` — Hono app (pure `createServer(deps)`, no listen).
 
@@ -22,6 +22,7 @@ Node 22, TypeScript strict ESM, Hono HTTP, `pg` with an in-memory fallback when 
 - `{ data, error?, meta? }` envelope everywhere; parameterized SQL only; sanitize upstream errors; secrets never logged.
 - Every route except `/health` requires header `x-dp-token` (constant-time compare; env `DP_AUTH_TOKEN`). Consumers call over HTTP **server-side only**, never the browser.
 - Endpoints: `/status` (job health + snapshot freshness — the "Data status" surface for judges), `/universe?lane=meme|coins|bstocks`, `/tokens/:addr` + batch `/tokens?addresses=`, `/klines/:addr`, `/security/:addr`, `/eligibility/:addr` + batch `/eligibility?addresses=`, `/pools`, `/venus/:owner`, `/diag/latency`. `npm run loadtest` — hit 300 rps, 0 errors, p95 ~37ms.
+- The **meme lane is a union of two launchpads**, written by two independent jobs to two keys (`universe:meme` from `fourmeme-ranking`, `universe:flap` from `flap-launches`) and unioned at read time. Separate keys on purpose: one shared key would mean whichever job ran last erased the other's tokens. `lanes.meme.source` reports `fourmeme+flap`, and the lane is only as fresh as its stalest contributor.
 
 ## Eligibility gate (`src/query/eligibility.ts`)
 
@@ -56,6 +57,16 @@ Flap is an EVM launch protocol (bonding curve → DEX, like Four.Meme) that also
 - **Near enough everything is a tax token, but not quite.** Of 208 live tokens: `TOKEN_TAXED_V3` 152, `TOKEN_TAXED` 54, `TOKEN_V2_PERMIT` 2 — so 206/208 carry a tax and the non-tax path does occur. Buy and sell rates differ on 23 of them (e.g. 300/400 bps), so slippage has to be sized per direction. The docs' *Inspect A Token* page lists the enum only to 5; the authoritative list is on *Token Version Specification*, which goes to 7.
 - **A third of tokens are quoted in something other than BNB** (64/208), and `nativeToQuoteSwapEnabled` was true for **exactly those 64** — every non-native-quote token in the sample lets the Portal swap BNB into the quote. So a non-native quote is a routing detail, not a blocker.
 - Public `bsc-dataseed*` refuses `eth_getLogs` outright and `publicnode` refuses historical ranges; `bsc.drpc.org` served both. Only matters for indexing work — the gate itself is `eth_call` only.
+
+### `flap-launches` job (the meme lane's second half)
+
+Flap has no ranking API, so the lane is built from chain logs: `TokenCreated` on the Portal for discovery, the lens's `progress` field for "hot". Every 60s, 150 blocks (~68s at 0.45s/block, so cycles overlap rather than leave a gap), three 50-block `eth_getLogs` chunks. Measured 35 launches per window, ~2–3s per cycle, 0 missed chunks.
+
+- **`TokenCreated` has nothing indexed** — one topic, all seven args in `data`, so address, name and symbol all come out of the payload. topic0 `0x504e7f36…9603`.
+- **The server's `topics` filter cannot be trusted.** `bsc-rpc.publicnode.com` — currently the only public endpoint serving `eth_getLogs` at all — returns the identical 157 logs whether or not a topic filter is passed, other events included. The filter is still sent (a server that honours it saves ~30x: only 11 of 338 Portal logs in a window are launches) but the topic match is *always* redone locally, or `decodeEventLog` would be fed the wrong events.
+- **Trailing window, not a cursor.** A cursor turns any downtime into unbounded catch-up over a path that public endpoints already refuse past 50 blocks. What keeps the lane wider than one window is that each cycle merges into the stored set rather than replacing it; the lens read then prunes anything no longer Tradable/DEX, and the lane is capped at 100 = newest 50 ∪ hottest 50 by `progress`.
+- **The lane fails *open*, unlike the eligibility gate.** If the lens is unreadable the cycle publishes unpruned instead of emptying the lane — a universe lane that blanks on an RPC blink is worse than one carrying a stale row, and the record's own age already says how much to trust it. In the adapter this is why a per-token revert is folded into "absent" but a transport failure is rethrown to rotate endpoints: `isContractLevelFailure` (now in `chain/rpc.ts`, shared with the gate) is what keeps those apart.
+- Known limitation: the lane is seeded only from the trailing window, so a token that got hot *before* the service started is never picked up. Running continuously it converges, since a token is discovered at launch and then keeps its slot while its progress stays top-50.
 
 Flap docs are wired in as an MCP server (`flap`, user scope → `https://docs.flap.sh/flap/~gitbook/mcp`): search/fetch over the docs only, no market-data endpoints.
 

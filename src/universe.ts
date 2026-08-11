@@ -14,6 +14,16 @@ import { normalizeAddress } from "./adapters/http.js";
 
 /** Store key holding the Four.Meme-discovered lane. */
 export const MEME_UNIVERSE_KEY = "universe:meme";
+/**
+ * Store key holding the Flap-discovered lane.
+ *
+ * Kept separate from {@link MEME_UNIVERSE_KEY} rather than written into it: the
+ * two launchpads are polled by independent jobs on different cadences, and a
+ * shared key would mean whichever job ran last silently erased the other's
+ * tokens. They are unioned at read time instead, so either job can be down
+ * without taking the other's half of the lane with it.
+ */
+export const FLAP_UNIVERSE_KEY = "universe:flap";
 /** Store key holding the Binance-Alpha-discovered lane. */
 export const COINS_UNIVERSE_KEY = "universe:coins";
 
@@ -90,15 +100,24 @@ export interface UniverseResult {
  * under the highest-precedence lane: bstocks > coins > meme. The precedence
  * reflects certainty — the static equity list and the curated Alpha list are
  * both stronger classifications than "appeared in a meme ranking".
+ *
+ * The meme lane is itself a union of two launchpads, Four.Meme and Flap. They
+ * stay one lane because they are one product surface — a continuously launching
+ * token that no snapshot can enumerate — and each entry still names which
+ * launchpad found it in its `source`.
  */
 export async function buildUniverse(store: SnapshotStore): Promise<UniverseResult> {
-  const meme = await readLane(store, MEME_UNIVERSE_KEY, "meme");
+  const fourmeme = await readLane(store, MEME_UNIVERSE_KEY, "meme");
+  const flap = await readLane(store, FLAP_UNIVERSE_KEY, "meme");
   const coins = await readLane(store, COINS_UNIVERSE_KEY, "coins");
   const bstocks = bstocksUniverse();
 
+  const memeEntries = new Map<string, UniverseEntry>();
+  for (const entry of [...fourmeme.entries, ...flap.entries]) memeEntries.set(entry.address, entry);
+
   const byAddress = new Map<string, UniverseEntry>();
   // Lowest precedence first, so later lanes overwrite earlier ones.
-  for (const entry of [...meme.entries, ...coins.entries, ...bstocks]) {
+  for (const entry of [...memeEntries.values(), ...coins.entries, ...bstocks]) {
     byAddress.set(entry.address, entry);
   }
 
@@ -107,11 +126,48 @@ export async function buildUniverse(store: SnapshotStore): Promise<UniverseResul
   return {
     entries,
     lanes: {
-      meme: { count: meme.entries.length, staleness: meme.staleness, asOf: meme.asOf, source: "fourmeme" },
+      meme: combineLane(memeEntries.size, [
+        { name: "fourmeme", read: fourmeme },
+        { name: "flap", read: flap },
+      ]),
       coins: { count: coins.entries.length, staleness: coins.staleness, asOf: coins.asOf, source: "binance" },
       bstocks: { count: bstocks.length, staleness: "fresh", asOf: null, source: "static" },
     },
   };
+}
+
+/** Worst-first ordering, so a lane is only as fresh as its stalest contributor. */
+const STALENESS_RANK: Record<Staleness, number> = { fresh: 0, stale: 1, dead: 2 };
+
+/**
+ * Folds several producers into one lane status.
+ *
+ * A contributor that has never written is skipped rather than counted as dead —
+ * a lane served entirely by one launchpad is not stale because the other has yet
+ * to run. Where both have written, the lane reports the worse staleness and the
+ * older `asOf`, because that is the age of the weakest part of what it returned.
+ */
+function combineLane(
+  count: number,
+  contributors: { name: string; read: LaneRead }[],
+): LaneStatus {
+  const present = contributors.filter((c) => c.read.staleness !== null);
+  const source = present.length === 0
+    ? contributors.map((c) => c.name).join("+")
+    : present.map((c) => c.name).join("+");
+
+  let staleness: Staleness | null = null;
+  let asOf: number | null = null;
+  for (const { read } of present) {
+    if (read.staleness !== null) {
+      if (staleness === null || STALENESS_RANK[read.staleness] > STALENESS_RANK[staleness]) {
+        staleness = read.staleness;
+      }
+    }
+    if (read.asOf !== null) asOf = asOf === null ? read.asOf : Math.min(asOf, read.asOf);
+  }
+
+  return { count, staleness, asOf, source };
 }
 
 interface LaneRead {

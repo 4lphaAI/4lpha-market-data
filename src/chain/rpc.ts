@@ -16,7 +16,15 @@
  * Endpoint URLs may embed an API key, so they are never logged.
  */
 
-import { createPublicClient, http, type HttpTransport, type PublicClient } from "viem";
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  ContractFunctionZeroDataError,
+  createPublicClient,
+  http,
+  type HttpTransport,
+  type PublicClient,
+} from "viem";
 import { bsc } from "viem/chains";
 import { AdapterError, REQUEST_TIMEOUT_MS, requestSignal, sanitizeMessage } from "../adapters/http.js";
 
@@ -113,4 +121,26 @@ export async function withBscClient<T>(
  */
 function isAborted(signal: AbortSignal | undefined): boolean {
   return signal !== undefined && signal.aborted;
+}
+
+/**
+ * A revert is an answer; a dead endpoint is not.
+ *
+ * viem wraps both in `ContractFunctionExecutionError`, so the discriminator has
+ * to walk the cause chain for the two specifically-contractual failures: an
+ * explicit revert, and `0x` returned by a call to an address holding no code.
+ * Anything else — timeout, 429, malformed JSON-RPC — is transport, and must
+ * reach {@link withBscClient} so it rotates to the next endpoint.
+ *
+ * Callers depend on this split in opposite directions and both are unsafe to get
+ * wrong: the eligibility gate turns a transport failure into a denial, and the
+ * Flap universe job would otherwise prune a token from the lane because the RPC
+ * hiccupped rather than because the token is gone.
+ */
+export function isContractLevelFailure(error: unknown): boolean {
+  if (!(error instanceof BaseError)) return false;
+  return (
+    error.walk((cause) => cause instanceof ContractFunctionRevertedError) !== null ||
+    error.walk((cause) => cause instanceof ContractFunctionZeroDataError) !== null
+  );
 }

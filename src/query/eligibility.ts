@@ -44,13 +44,14 @@
  */
 
 import { readFileSync } from "node:fs";
+import { type Abi } from "viem";
+import { isContractLevelFailure, type BscClient, withBscClient } from "../chain/rpc.js";
 import {
-  BaseError,
-  ContractFunctionRevertedError,
-  ContractFunctionZeroDataError,
-  type Abi,
-} from "viem";
-import { type BscClient, withBscClient } from "../chain/rpc.js";
+  FLAP_PORTAL,
+  FLAP_STATUS_DEX,
+  flapPortalAbi,
+  isFlapTradable,
+} from "../adapters/flap.js";
 import { isEvmAddress, sanitizeMessage } from "../adapters/http.js";
 import type { SnapshotStore } from "../core/store.js";
 
@@ -100,64 +101,6 @@ const helperAbi = [
       { name: "funds", type: "uint256" },
       { name: "maxFunds", type: "uint256" },
       { name: "liquidityAdded", type: "bool" },
-    ],
-  },
-] as const satisfies Abi;
-
-/**
- * Flap's Portal on BSC (v5.14.16). There is no separate lens contract: the
- * `IPortalLens` view functions live on the Portal proxy itself.
- */
-export const FLAP_PORTAL = "0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0" as const;
-
-/**
- * `TokenStatus` values this gate acts on. The enum also carries `InDuel` (2) and
- * `Killed` (3), both documented as obsolete, and `Staged` (5) for a token whose
- * address is determined but which has not been deployed yet — none of the three
- * is tradable, so all three are refused.
- */
-const FLAP_STATUS_TRADABLE = 1;
-const FLAP_STATUS_DEX = 4;
-
-/**
- * `getTokenV8Safe` rather than `getTokenV8`: it returns the four enum-typed
- * fields as `uint8`, so a future Flap release that adds an enum variant widens
- * a number here instead of failing to decode. Only available on BNB mainnet and
- * testnet, which is all this plane reads.
- *
- * Declared as the full 18-field tuple for the same reason the Four.Meme ABI is
- * declared whole — viem decodes positionally.
- */
-const flapPortalAbi = [
-  {
-    name: "getTokenV8Safe",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ name: "token", type: "address" }],
-    outputs: [
-      {
-        type: "tuple",
-        components: [
-          { name: "status", type: "uint8" },
-          { name: "reserve", type: "uint256" },
-          { name: "circulatingSupply", type: "uint256" },
-          { name: "price", type: "uint256" },
-          { name: "tokenVersion", type: "uint8" },
-          { name: "r", type: "uint256" },
-          { name: "h", type: "uint256" },
-          { name: "k", type: "uint256" },
-          { name: "dexSupplyThresh", type: "uint256" },
-          { name: "quoteTokenAddress", type: "address" },
-          { name: "nativeToQuoteSwapEnabled", type: "bool" },
-          { name: "extensionID", type: "bytes32" },
-          { name: "buyTaxRate", type: "uint256" },
-          { name: "sellTaxRate", type: "uint256" },
-          { name: "pool", type: "address" },
-          { name: "progress", type: "uint256" },
-          { name: "lpFeeProfile", type: "uint8" },
-          { name: "dexId", type: "uint8" },
-        ],
-      },
     ],
   },
 ] as const satisfies Abi;
@@ -382,23 +325,6 @@ export interface ChainOutcomes {
   flap: FlapOutcome;
 }
 
-/**
- * A revert is an answer; a dead endpoint is not.
- *
- * viem wraps both in `ContractFunctionExecutionError`, so the discriminator has
- * to walk the cause chain for the two specifically-contractual failures: an
- * explicit revert, and `0x` returned by a call to an address holding no code.
- * Anything else — timeout, 429, malformed JSON-RPC — is transport, and must
- * reach {@link withBscClient} so it rotates to the next endpoint.
- */
-function isContractLevelFailure(error: unknown): boolean {
-  if (!(error instanceof BaseError)) return false;
-  return (
-    error.walk((cause) => cause instanceof ContractFunctionRevertedError) !== null ||
-    error.walk((cause) => cause instanceof ContractFunctionZeroDataError) !== null
-  );
-}
-
 /** Reads Four.Meme state for one token, folding a revert into a definite "absent". */
 async function readFourMemeOn(client: BscClient, address: string): Promise<HelperOutcome> {
   try {
@@ -527,6 +453,8 @@ export function decideEligibility(
     };
   }
   if (flap.kind === "answered" && isFlapTradable(flap.state.status)) {
+    // `isFlapTradable` and FLAP_STATUS_DEX are the adapter's, so the gate and
+    // the universe job cannot drift apart on what "tradable" means.
     return {
       ...base,
       eligible: true,
@@ -563,11 +491,6 @@ export function decideEligibility(
   }
 
   return { ...base, eligible: false, reason: "not_listed" };
-}
-
-/** Tradable on the curve, or graduated onto a pool. Everything else is refused. */
-function isFlapTradable(status: number): boolean {
-  return status === FLAP_STATUS_TRADABLE || status === FLAP_STATUS_DEX;
 }
 
 export interface IsEligibleParams {

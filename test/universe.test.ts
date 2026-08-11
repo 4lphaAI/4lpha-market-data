@@ -66,7 +66,9 @@ describe("buildUniverse", () => {
       count: 0,
       staleness: null,
       asOf: null,
-      source: "fourmeme",
+      // Both launchpads are named even before either has written, so the lane
+      // describes its producers rather than looking single-sourced.
+      source: "fourmeme+flap",
     });
     assert.equal(universe.lanes.bstocks.count, 25);
     assert.equal(universe.lanes.bstocks.staleness, "fresh");

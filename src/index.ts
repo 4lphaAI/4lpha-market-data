@@ -5,6 +5,7 @@ import { createStore } from "./core/store.js";
 import { createServer } from "./server.js";
 import { binancePricesJob } from "./jobs/binancePrices.js";
 import { binanceUniverseJob } from "./jobs/binanceUniverse.js";
+import { flapLaunchesJob } from "./jobs/flapLaunches.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { pancakePoolsJob } from "./jobs/pancakePools.js";
 import { venusHealthHotJob, venusHealthJob } from "./jobs/venusHealth.js";
@@ -42,6 +43,9 @@ scheduler.register({
 // Market-data producers. Each is fully isolated by the scheduler: a failing
 // upstream degrades its own lane and nothing else.
 scheduler.register(fourmemeRankingJob(store));
+// The other half of the meme lane. Independent of the Four.Meme job on purpose:
+// they write different keys, so one launchpad going dark cannot blank the other.
+scheduler.register(flapLaunchesJob(store));
 scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
 scheduler.register(pancakePoolsJob(store));
