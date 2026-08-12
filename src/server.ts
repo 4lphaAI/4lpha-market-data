@@ -6,6 +6,8 @@ import type { Lane, TokenSnapshot, VenusHealth } from "./core/models.js";
 import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
 import { getSecurity } from "./query/security.js";
+import { getHolders } from "./query/holders.js";
+import { getSocials } from "./query/socials.js";
 import { isEligible, isEligibleBatch } from "./query/eligibility.js";
 import { buildUniverse } from "./universe.js";
 import { tokenKey } from "./jobs/tokenStore.js";
@@ -30,6 +32,8 @@ const SNAPSHOT_KEY_PREFIXES = [
   "token:",
   "klines:",
   "security:",
+  "holders:",
+  "socials:",
   "eligibility:",
   "pool:",
   "pools:",
@@ -311,6 +315,40 @@ export function createServer(deps: ServerDeps): Hono {
         asOf: result.asOf,
         staleness: result.staleness,
       },
+    });
+  });
+
+  app.get("/holders/:address", async (c) => {
+    const address = c.req.param("address").toLowerCase();
+    if (!isEvmAddress(address)) {
+      return c.json({ error: { code: "invalid_address" } }, 400);
+    }
+
+    const result = await getHolders(deps.store, { address });
+    if (result === null) {
+      return c.json({ error: { code: "not_found", message: "no holder data available" } }, 404);
+    }
+
+    return c.json({
+      data: result.stats,
+      meta: { address: result.address, asOf: result.asOf, staleness: result.staleness },
+    });
+  });
+
+  app.get("/socials/:address", async (c) => {
+    const address = c.req.param("address").toLowerCase();
+    if (!isEvmAddress(address)) {
+      return c.json({ error: { code: "invalid_address" } }, 400);
+    }
+
+    const result = await getSocials(deps.store, { address });
+    if (result === null) {
+      return c.json({ error: { code: "not_found", message: "no social data available" } }, 404);
+    }
+
+    return c.json({
+      data: result.socials,
+      meta: { address: result.address, asOf: result.asOf, staleness: result.staleness },
     });
   });
 

@@ -148,6 +148,78 @@ function toSnapshot(address: string, symbol: string, row: Record<string, unknown
   };
 }
 
+/**
+ * Social links for one token, as declared by its creator on the launchpad.
+ * Presence, not signal: a link says the project filled the form in, nothing
+ * about activity behind it. Every field nullable — most launches skip some.
+ */
+export interface TokenSocials {
+  address: string;
+  website: string | null;
+  twitter: string | null;
+  telegram: string | null;
+  description: string | null;
+}
+
+export interface FourMemeDetailParams {
+  address: string;
+  signal?: AbortSignal | undefined;
+  fetchFn?: FetchFn;
+}
+
+/**
+ * Fetches one token's detail record, for its social links.
+ *
+ * The path says `private` but the endpoint is keyless — measured 2026-08-12: a
+ * plain GET with no cookie or header answers `code 0` with `webUrl`,
+ * `telegramUrl` and `twitterUrl`. The ranking rows do *not* carry these fields,
+ * which is why the lane job cannot collect them in passing.
+ *
+ * Returns `null` for a token Four.Meme does not know — a valid answer for the
+ * whole rest of the universe, not a failure.
+ */
+export async function fetchFourMemeSocials(
+  params: FourMemeDetailParams,
+): Promise<TokenSocials | null> {
+  const address = params.address.toLowerCase();
+  const payload = await fetchJson({
+    source: SOURCE,
+    url: `${BASE_URL}/private/token/get/v2?address=${encodeURIComponent(address)}`,
+    fetchFn: params.fetchFn ?? globalThis.fetch,
+    signal: params.signal,
+  });
+  return normalizeSocials(address, payload);
+}
+
+/** Exported for tests: normalizes a token-detail payload into socials. */
+export function normalizeSocials(address: string, payload: unknown): TokenSocials | null {
+  if (!isRecord(payload)) return null;
+  const code = payload["code"];
+  if (code !== undefined && String(code) !== "0") return null;
+  const data = payload["data"];
+  if (!isRecord(data)) return null;
+
+  return {
+    address,
+    website: parseUrl(data["webUrl"]),
+    twitter: parseUrl(data["twitterUrl"]),
+    telegram: parseUrl(data["telegramUrl"]),
+    description: parseStr(data["descr"]) ?? parseStr(data["description"]),
+  };
+}
+
+/** Accepts only http(s) URLs; creators paste anything into these fields. */
+function parseUrl(value: unknown): string | null {
+  const raw = parseStr(value);
+  if (raw === null) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 const USD_QUOTES = new Set(["USDT", "USDC", "USD", "BUSD", "USD1"]);
 
 function resolveUsdMultiplier(
