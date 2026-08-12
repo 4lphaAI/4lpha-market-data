@@ -2,6 +2,20 @@
 
 The **data plane** for the 4lpha BNB-Chain agent marketplace: a standalone service that is the single source of market data for the whole product. Built phase by phase, each part Opus-built and independently audited. GitHub: private `kann420/4lpha-market-data` (branch `master`, linear history).
 
+## Product context (hackathon)
+
+Built for the BNB Chain **Smart Money Era** hackathon — brief and resources: https://www.bnbchain.org/en/hackathons/smart-money-era?tab=resources. The target data surface for the marketplace is: **holders, on-chain activity, price, k-lines, token eligibility, smart money, social**. All built to the extent decided: klines/price/eligibility/security, `/holders/:addr` (GMGN holder + smart-money count), `/socials/:addr` (creator-declared links).
+
+**Scope decision — do not re-propose (2026-08-12):** deeper smart money (wallet-level tracking) and real social *signal* (X/KOL mentions, via Grok or any paid feed) are **out of scope for this plane**. The product will let users buy that data themselves via x402; this plane does not supply it. GMGN smart-money count and Four.Meme social links are the ceiling of what the plane provides.
+
+Repos to port from / learn from:
+
+- `D:\4alpha` — trading agent; source of the live Four.Meme trade path already ported into the eligibility gate.
+- `D:\4lpha-0G` — LP agent.
+- https://github.com/ClipXonchain/neural-alpha
+- https://github.com/yeheskieltame/gridora
+- https://github.com/rishu4436/Genesis
+
 ## What it is (the whole point)
 
 Workers poll each upstream at its own cadence and write into one store; UI and agents read **only** from this store, never from upstreams directly. This turns fragmented sources (measured latencies 90–500ms, one dead) into one uniform-latency internal API. User load rises without upstream load rising — a leaked/slow upstream never reaches consumers.
@@ -14,21 +28,21 @@ Node 22, TypeScript strict ESM, Hono HTTP, `pg` with an in-memory fallback when 
 
 - `src/core/` — `DataRecord<T>` with `staleness: fresh|stale|dead` (computed at read time, never stored); `SnapshotStore` (Memory + Postgres); job `scheduler` (each job on its own interval + jitter + AbortSignal timeout; a timed-out run is aborted; failures isolated per-job, never crash the process; health persisted).
 - `src/adapters/` — fourmeme, flap (on-chain: Portal `TokenCreated` logs + lens), onchainos (OKX HMAC-signed), binanceWeb3 (Binance Alpha token list ~660 + Sintral kline), gmgn, pancake (public explorer API), venus (on-chain via BSC RPC).
-- `src/query/` — kline read-through chain, tiered security scan, and the eligibility gate.
+- `src/query/` — kline read-through chain, tiered security scan, the eligibility gate, holders/smart-money (`holders.ts`), and social links (`socials.ts`).
 - `src/server.ts` — Hono app (pure `createServer(deps)`, no listen).
 
 ## Conventions
 
 - `{ data, error?, meta? }` envelope everywhere; parameterized SQL only; sanitize upstream errors; secrets never logged.
 - Every route except `/health` requires header `x-dp-token` (constant-time compare; env `DP_AUTH_TOKEN`). Consumers call over HTTP **server-side only**, never the browser.
-- Endpoints: `/status` (job health + snapshot freshness — the "Data status" surface for judges), `/universe?lane=meme|coins|bstocks`, `/tokens/:addr` + batch `/tokens?addresses=`, `/klines/:addr`, `/security/:addr`, `/eligibility/:addr` + batch `/eligibility?addresses=`, `/pools`, `/venus/:owner`, `/diag/latency`. `npm run loadtest` — hit 300 rps, 0 errors, p95 ~37ms.
+- Endpoints: `/status` (job health + snapshot freshness — the "Data status" surface for judges), `/universe?lane=meme|coins|bstocks`, `/tokens/:addr` + batch `/tokens?addresses=`, `/klines/:addr`, `/security/:addr`, `/holders/:addr`, `/socials/:addr`, `/eligibility/:addr` + batch `/eligibility?addresses=`, `/pools`, `/venus/:owner`, `/diag/latency`. `npm run loadtest` — hit 300 rps, 0 errors, p95 ~37ms.
 - The **meme lane is a union of two launchpads**, written by two independent jobs to two keys (`universe:meme` from `fourmeme-ranking`, `universe:flap` from `flap-launches`) and unioned at read time. Separate keys on purpose: one shared key would mean whichever job ran last erased the other's tokens. `lanes.meme.source` reports `fourmeme+flap`, and the lane is only as fresh as its stalest contributor.
 
 ## Eligibility gate (`src/query/eligibility.ts`)
 
 The one read path that is **fail-closed**: klines and security fall back to a stale record, this one denies. An RPC outage, an unloadable allowlist, or a stale cache entry all answer "not eligible" — a wrong `false` refuses a trade, a wrong `true` sends capital at an unvetted contract. Never throws, so a caller cannot catch a failure into an allow.
 
-Three rules, unioned. `data/eligible-tokens.json` covers the 222 enumerable tokens. Launchpad tokens launch continuously and can never be enumerated, so each launchpad gets a factory rule:
+Four rules, unioned. `data/eligible-tokens.json` covers the 222 enumerable tokens. The **Binance Alpha rule** admits any address in the `universe:coins` snapshot (written by `binance-universe` every 6h; the adapter drops `offline`/`fullyDelisted` rows — measured 2026-08-12: 486 BSC rows, 314 live) — read from the **store, fresh-only** (12h window), never from the bapi endpoint directly; a snapshot past fresh silences the rule and the token falls through to the other rules, keeping the gate fail-closed against an undocumented upstream. An Alpha hit is decided live like an allowlist hit (checked before the verdict cache, so a newly listed token overrides a cached `not_listed`) and never stored as a verdict. Launchpad tokens launch continuously and can never be enumerated, so each launchpad gets a factory rule:
 
 - **Four.Meme**: TokenManagerHelper3 `0xF251F83e40a78868FcfA3FA4599Dad6494E46034` → `getTokenInfo(token)`, eligible iff `version == 2`. The same call returns `liquidityAdded`, the graduation flag and therefore the routing answer (`fourmeme-bonding` vs `pancake-v2`). Ported from `D:\4alpha`'s live trade path, which drives real orders through the same helper.
 - **Flap** (BSC only): Portal `0xe2cE6ab80874Fa9Fa2aAE65D277Dd6B8e65C9De0` → `getTokenV8Safe(token)`, eligible iff `status` is Tradable (1) or DEX (4). `status` is the graduation flag (`flap-bonding` vs `pancake-v2`).
@@ -73,6 +87,13 @@ Flap has no ranking API, so the lane is built from chain logs: `TokenCreated` on
 - Known limitation: the lane is seeded only from the trailing window, so a token that got hot *before* the service started is never picked up. Running continuously it converges, since a token is discovered at launch and then keeps its slot while its progress stays top-50. Observed converging in production from 14 to 85 entries over a few minutes, against a cap of 100.
 
 Flap docs are wired in as an MCP server (`flap`, user scope → `https://docs.flap.sh/flap/~gitbook/mcp`): search/fetch over the docs only, no market-data endpoints.
+
+## Holders / smart money (`src/query/holders.ts`) and socials (`src/query/socials.ts`)
+
+Both are on-demand read-through paths, **fail-open** (serve stale on upstream failure) — telemetry, not gates.
+
+- `/holders/:addr` — GMGN only: holder count + top-10 concentration (`fetchGmgnTokenHolders`) then smart-money count (`fetchGmgnSmartMoney`, tag `smart_degen`), issued **strictly in sequence** (a parallel pair is the easiest way to trip GMGN's per-IP burst limit, whose penalty is a host-wide ban; there is a test asserting no overlap). Cached hard: fresh 15min, dead 24h — wider than every other path because a miss costs ~3 sequential ~500ms round trips. Partial answers merge via `mergeHolderStats`; this is the current "smart money" surface — wallet-level tracking was assessed and deferred (would need log scans the public-RPC policy can't afford).
+- `/socials/:addr` — creator-declared links (website/X/Telegram + description), presence not signal; real social signal has no keyless source (decided 2026-08-12). One upstream, measured: Four.Meme `private/token/get/v2?address=` is **keyless despite the path** and answers `webUrl`/`twitterUrl`/`telegramUrl`; the ranking rows do *not* carry these fields. A token Four.Meme never launched answers `code 0` with **no `data`** — a definite negative, cached as all-null links so unknown addresses don't become upstream load. Links are URL-validated (http/https only — creators paste garbage). Fresh 6h, dead 7d.
 
 ## Deployment
 
