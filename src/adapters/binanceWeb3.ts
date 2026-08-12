@@ -112,6 +112,7 @@ export function normalizeAlphaUniverse(payload: unknown): UniverseEntry[] {
     const address = normalizeAddress(row["contractAddress"] ?? row["tokenAddress"]);
     if (address === null || seen.has(address)) continue;
     if (!isBscRow(row)) continue;
+    if (!isLiveRow(row)) continue;
 
     const symbol = parseStr(row["symbol"]) ?? parseStr(row["tokenSymbol"]) ?? "";
     const name = parseStr(row["name"]) ?? parseStr(row["tokenName"]);
@@ -141,6 +142,18 @@ function isBscRow(row: Record<string, unknown>): boolean {
   if (chainId === BSC_CHAIN_ID) return true;
   const normalized = chainName?.toUpperCase() ?? "";
   return normalized === "BSC" || normalized === "BNB" || normalized === "BNB CHAIN";
+}
+
+/**
+ * Drops rows the list itself marks as retired. Measured 2026-08-12: of 486 BSC
+ * rows, 82 were `fullyDelisted` and another 90 `offline` — 314 live. Both flags
+ * exclude, by decision: this list feeds the coins lane *and* the eligibility
+ * gate's Alpha rule, and a retired listing must not read as "eligible".
+ * Only an explicit `true` drops a row — a missing or reshaped flag keeps it,
+ * consistent with how every other bapi field is read defensively.
+ */
+function isLiveRow(row: Record<string, unknown>): boolean {
+  return row["offline"] !== true && row["fullyDelisted"] !== true;
 }
 
 export interface BinanceTokenParams extends BaseParams {

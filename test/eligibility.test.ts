@@ -18,6 +18,7 @@ import {
   type FourMemeState,
   type HelperOutcome,
 } from "../src/query/eligibility.js";
+import { COINS_UNIVERSE_KEY } from "../src/universe.js";
 
 /** In the frozen snapshot. */
 const USDT = "0x55d398326f99059ff775485246999027b3197955";
@@ -96,7 +97,7 @@ describe("loadAllowlist", () => {
 
 describe("decideEligibility", () => {
   it("admits an allowlisted token without a chain answer", () => {
-    const result = decideEligibility(USDT, true, null);
+    const result = decideEligibility(USDT, "allowlist", null);
     assert.equal(result.eligible, true);
     assert.equal(result.reason, "allowlist");
     assert.equal(result.source, "allowlist");
@@ -104,8 +105,17 @@ describe("decideEligibility", () => {
     assert.equal(result.venue, null);
   });
 
+  it("admits a Binance Alpha token without a chain answer", () => {
+    const result = decideEligibility(MEME, "binance-alpha", null);
+    assert.equal(result.eligible, true);
+    assert.equal(result.reason, "binance_alpha");
+    assert.equal(result.source, "binance-alpha");
+    // Same as the allowlist: no venue, it routes by ordinary pool discovery.
+    assert.equal(result.venue, null);
+  });
+
   it("admits a Four.Meme token and routes it to the bonding curve", () => {
-    const result = decideEligibility(MEME, false, chain({ fourmeme: fourMeme() }));
+    const result = decideEligibility(MEME, null,chain({ fourmeme: fourMeme() }));
     assert.equal(result.eligible, true);
     assert.equal(result.reason, "fourmeme_factory");
     assert.equal(result.source, "fourmeme");
@@ -116,7 +126,7 @@ describe("decideEligibility", () => {
 
   it("routes a graduated Four.Meme token to PancakeSwap", () => {
     const outcomes = chain({ fourmeme: fourMeme({ liquidityAdded: true }) });
-    const result = decideEligibility(MEME, false, outcomes);
+    const result = decideEligibility(MEME, null,outcomes);
     assert.equal(result.eligible, true);
     assert.equal(result.venue, "pancake-v2");
   });
@@ -125,7 +135,7 @@ describe("decideEligibility", () => {
     // Measured behaviour: the helper returns a zero-filled struct rather than
     // reverting, so version 0 is the ordinary negative answer.
     const outcomes = chain({ fourmeme: fourMeme({ version: 0 }) });
-    const result = decideEligibility(MEME, false, outcomes);
+    const result = decideEligibility(MEME, null,outcomes);
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "not_listed");
     assert.equal(result.fourmeme, null);
@@ -133,7 +143,7 @@ describe("decideEligibility", () => {
 
   it("denies a Four.Meme token on a TokenManager version with no trade path", () => {
     const outcomes = chain({ fourmeme: fourMeme({ version: 1 }) });
-    const result = decideEligibility(MEME, false, outcomes);
+    const result = decideEligibility(MEME, null,outcomes);
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "unsupported_token_manager");
     // The state is still reported, so an operator can see why it was refused.
@@ -141,7 +151,7 @@ describe("decideEligibility", () => {
   });
 
   it("admits a Flap token and routes it to the Flap curve", () => {
-    const result = decideEligibility(FLAP, false, chain({ flap: flapToken() }));
+    const result = decideEligibility(FLAP, null,chain({ flap: flapToken() }));
     assert.equal(result.eligible, true);
     assert.equal(result.reason, "flap_portal");
     assert.equal(result.source, "flap");
@@ -160,7 +170,7 @@ describe("decideEligibility", () => {
         progress: "1000000000000000000",
       }),
     });
-    const result = decideEligibility(FLAP, false, outcomes);
+    const result = decideEligibility(FLAP, null,outcomes);
     assert.equal(result.eligible, true);
     assert.equal(result.venue, "pancake-v2");
     assert.equal(result.flap?.pool, "0x25a85d181a8d9e66fd1f0da3dddd79c980b1a74f");
@@ -168,7 +178,7 @@ describe("decideEligibility", () => {
 
   it("denies a Flap token that is staged but not yet deployed", () => {
     const outcomes = chain({ flap: flapToken({ status: 5 }) });
-    const result = decideEligibility(FLAP, false, outcomes);
+    const result = decideEligibility(FLAP, null,outcomes);
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "unsupported_flap_status");
     assert.equal(result.flap?.status, 5);
@@ -181,20 +191,20 @@ describe("decideEligibility", () => {
     const outcomes = chain({
       flap: flapToken({ quote: "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8" }),
     });
-    const result = decideEligibility(FLAP, false, outcomes);
+    const result = decideEligibility(FLAP, null,outcomes);
     assert.equal(result.eligible, true);
     assert.equal(result.flap?.quote, "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8");
   });
 
   it("denies when neither launchpad claims the token", () => {
-    const result = decideEligibility(MEME, false, chain());
+    const result = decideEligibility(MEME, null,chain());
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "not_listed");
   });
 
   it("denies when the chain could not be read", () => {
     const outcomes = chain({ fourmeme: { kind: "unavailable" }, flap: { kind: "unavailable" } });
-    const result = decideEligibility(MEME, false, outcomes);
+    const result = decideEligibility(MEME, null,outcomes);
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "chain_unavailable");
     assert.equal(result.source, null);
@@ -206,33 +216,33 @@ describe("decideEligibility", () => {
     // Four.Meme answered first. `not_listed` is cached; `chain_unavailable` is
     // not, so mislabelling here would freeze the denial past the outage.
     const outcomes = chain({ fourmeme: fourMeme({ version: 0 }), flap: { kind: "unavailable" } });
-    const result = decideEligibility(FLAP, false, outcomes);
+    const result = decideEligibility(FLAP, null,outcomes);
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "chain_unavailable");
   });
 
   it("still admits a Four.Meme token while the Flap read is failing", () => {
     const outcomes = chain({ fourmeme: fourMeme(), flap: { kind: "unavailable" } });
-    const result = decideEligibility(MEME, false, outcomes);
+    const result = decideEligibility(MEME, null,outcomes);
     assert.equal(result.eligible, true);
     assert.equal(result.reason, "fourmeme_factory");
   });
 
   it("still admits a Flap token while the Four.Meme read is failing", () => {
     const outcomes = chain({ fourmeme: { kind: "unavailable" }, flap: flapToken() });
-    const result = decideEligibility(FLAP, false, outcomes);
+    const result = decideEligibility(FLAP, null,outcomes);
     assert.equal(result.eligible, true);
     assert.equal(result.reason, "flap_portal");
   });
 
   it("denies everything when the allowlist could not be loaded", () => {
-    const result = decideEligibility(MEME, false, null);
+    const result = decideEligibility(MEME, null,null);
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "allowlist_unavailable");
   });
 
   it("denies a malformed address before anything else", () => {
-    const result = decideEligibility("0xnot-an-address", true, chain({ fourmeme: fourMeme() }));
+    const result = decideEligibility("0xnot-an-address", "allowlist", chain({ fourmeme: fourMeme() }));
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "invalid_address");
   });
@@ -241,7 +251,7 @@ describe("decideEligibility", () => {
     // `progress` is a uint256 on chain. Held as a bigint it would throw here,
     // taking down both the route and the snapshot write.
     const outcomes = chain({ flap: flapToken({ status: 4, progress: "1000000000000000000" }) });
-    const result = decideEligibility(FLAP, false, outcomes);
+    const result = decideEligibility(FLAP, null,outcomes);
     assert.doesNotThrow(() => JSON.stringify(result));
     assert.equal(JSON.parse(JSON.stringify(result)).flap.progress, "1000000000000000000");
   });
@@ -265,6 +275,72 @@ describe("isEligible", () => {
     });
     assert.equal(result.eligible, false);
     assert.equal(result.reason, "invalid_address");
+  });
+
+  it("answers an Alpha-listed token from a fresh coins snapshot alone", async () => {
+    const store = new MemoryStore();
+    await store.put(COINS_UNIVERSE_KEY, [{ address: MEME, symbol: "ALPHA" }], {
+      source: "binance",
+      freshForMs: 60_000,
+      deadAfterMs: 120_000,
+    });
+
+    const result = await isEligible(store, { address: MEME, readState: forbidChain });
+    assert.equal(result.eligible, true);
+    assert.equal(result.reason, "binance_alpha");
+    assert.equal(result.source, "binance-alpha");
+    assert.equal(result.cached, false);
+  });
+
+  it("ignores a stale coins snapshot and falls through to the chain", async () => {
+    const store = new MemoryStore();
+    // Fresh for zero milliseconds: stale the instant it lands. The rule must go
+    // silent rather than trust an old membership list — fail-closed.
+    await store.put(COINS_UNIVERSE_KEY, [{ address: MEME, symbol: "ALPHA" }], {
+      source: "binance",
+      freshForMs: 0,
+      deadAfterMs: 120_000,
+    });
+
+    let reads = 0;
+    const result = await isEligible(store, {
+      address: MEME,
+      readState: async () => {
+        reads += 1;
+        return chain();
+      },
+    });
+    assert.equal(reads, 1);
+    assert.equal(result.eligible, false);
+    assert.equal(result.reason, "not_listed");
+  });
+
+  it("admits a token newly added to the Alpha list over a cached denial", async () => {
+    const store = new MemoryStore();
+    const denied: EligibilityResult = {
+      address: MEME,
+      eligible: false,
+      reason: "not_listed",
+      source: null,
+      venue: null,
+      fourmeme: null,
+      flap: null,
+      checkedAt: Date.now(),
+      cached: false,
+    };
+    await store.put(eligibilityKey(MEME), denied, {
+      source: "eligibility",
+      ...ELIGIBILITY_TTL.ineligible,
+    });
+    await store.put(COINS_UNIVERSE_KEY, [{ address: MEME, symbol: "ALPHA" }], {
+      source: "binance",
+      freshForMs: 60_000,
+      deadAfterMs: 120_000,
+    });
+
+    const result = await isEligible(store, { address: MEME, readState: forbidChain });
+    assert.equal(result.eligible, true);
+    assert.equal(result.reason, "binance_alpha");
   });
 
   it("caches a definite verdict and serves it without re-reading the chain", async () => {

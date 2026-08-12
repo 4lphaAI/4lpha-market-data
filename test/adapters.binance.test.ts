@@ -43,6 +43,27 @@ describe("fetchBinanceAlphaUniverse", () => {
     assert.equal((await fetchBinanceAlphaUniverse({ fetchFn: fake.fetch })).length, 1);
   });
 
+  it("drops offline and fully-delisted rows, keeping only live listings", async () => {
+    // Measured 2026-08-12: 82 of 486 BSC rows were fullyDelisted and another 90
+    // offline. This list feeds the eligibility gate's Alpha rule, so a retired
+    // listing must not survive into it. Only an explicit `true` drops a row.
+    const fake = fakeFetch(() =>
+      jsonResponse({
+        data: [
+          { contractAddress: ADDRESS, chainId: "56", symbol: "LIVE", offline: false, fullyDelisted: false },
+          { contractAddress: "0xbb00000000000000000000000000000000000002", chainId: "56", symbol: "OFF", offline: true },
+          { contractAddress: "0xcc00000000000000000000000000000000000003", chainId: "56", symbol: "DEAD", fullyDelisted: true },
+          { contractAddress: "0xdd00000000000000000000000000000000000004", chainId: "56", symbol: "NOFLAG" },
+        ],
+      }),
+    );
+    const entries = await fetchBinanceAlphaUniverse({ fetchFn: fake.fetch });
+    assert.deepEqual(
+      entries.map((entry) => entry.symbol),
+      ["LIVE", "NOFLAG"],
+    );
+  });
+
   it("drops malformed rows and de-duplicates addresses", async () => {
     const fake = fakeFetch(() =>
       jsonResponse({

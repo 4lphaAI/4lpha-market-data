@@ -1,15 +1,22 @@
 /**
  * Token eligibility — the gate the execution plane asks before trading or LPing.
  *
- * Eligibility is a union of three rules that answer in completely different ways:
+ * Eligibility is a union of four rules that answer in completely different ways:
  *
  *   1. `data/eligible-tokens.json` — a frozen 222-token allowlist (BNB/WBNB/BTCB/
  *      USDT, the bStocks, and CMC top-200 with a BSC deployment). Enumerable
  *      because it changes only by an explicit regeneration.
- *   2. The Four.Meme factory rule — meme tokens launch continuously, so they can
+ *   2. The Binance Alpha rule — membership in the `universe:coins` snapshot the
+ *      `binance-universe` job maintains from the Alpha token list. Read from the
+ *      store, never from the bapi endpoint directly: the gate must not put load
+ *      on an undocumented upstream, and a store read keeps the fail-closed
+ *      posture measurable — the rule only answers while the snapshot is *fresh*
+ *      (12h window against a 6h job cadence), so a dead upstream degrades this
+ *      rule to silent within a bounded time instead of trusting an old list.
+ *   3. The Four.Meme factory rule — meme tokens launch continuously, so they can
  *      never be enumerated by a snapshot. A token is Four.Meme-launched iff
  *      TokenManagerHelper3 `getTokenInfo` reports `version == 2` for it.
- *   3. The Flap Portal rule — the same problem on a second launchpad. A token is
+ *   4. The Flap Portal rule — the same problem on a second launchpad. A token is
  *      Flap-launched iff the Portal lens `getTokenV8Safe` answers at all, and
  *      tradable iff the status it reports is Tradable (curve) or DEX (graduated).
  *
@@ -52,8 +59,9 @@ import {
   flapPortalAbi,
   isFlapTradable,
 } from "../adapters/flap.js";
-import { isEvmAddress, sanitizeMessage } from "../adapters/http.js";
+import { isEvmAddress, normalizeAddress, sanitizeMessage } from "../adapters/http.js";
 import type { SnapshotStore } from "../core/store.js";
+import { COINS_UNIVERSE_KEY } from "../universe.js";
 
 const SOURCE = "eligibility";
 
@@ -106,7 +114,13 @@ const helperAbi = [
 ] as const satisfies Abi;
 
 /** Which rule admitted the token. */
-export type EligibilitySource = "allowlist" | "fourmeme" | "flap";
+export type EligibilitySource = "allowlist" | "binance-alpha" | "fourmeme" | "flap";
+
+/**
+ * A hit on one of the two enumerable lists, or none. The allowlist wins over
+ * Alpha when a token is on both — the frozen snapshot is the stronger claim.
+ */
+export type ListHit = "allowlist" | "binance-alpha" | null;
 
 /**
  * Where a trade in this token has to be routed.
@@ -126,6 +140,8 @@ export type EligibilityVenue = "fourmeme-bonding" | "flap-bonding" | "pancake-v2
 export type EligibilityReason =
   /** Listed in the frozen snapshot. */
   | "allowlist"
+  /** Listed in a fresh `universe:coins` snapshot of the Binance Alpha list. */
+  | "binance_alpha"
   /** `getTokenInfo` reported a supported Four.Meme TokenManager version. */
   | "fourmeme_factory"
   /** The Flap Portal lens answered with a tradable status. */
@@ -300,6 +316,39 @@ export function resetAllowlistCache(): void {
   allowlistError = null;
 }
 
+/**
+ * Reads the Binance Alpha membership set out of the `universe:coins` snapshot.
+ *
+ * Fresh only, deliberately stricter than the universe lane (which serves the
+ * snapshot until it is dead at 48h): a lane row carries its age for the reader
+ * to judge, an eligibility verdict does not. With the `binance-universe` job on
+ * a 6h cadence and a 12h freshness window, "not fresh" means the upstream has
+ * been failing for at least two cycles — at which point this rule goes silent
+ * and Alpha tokens fall through to the launchpad rules and `not_listed`, the
+ * same denial they got before this rule existed.
+ *
+ * Returns null when there is nothing usable; never throws, because a failure
+ * here must degrade to "rule contributes nothing", not take the gate down.
+ */
+async function readAlphaSet(store: SnapshotStore): Promise<ReadonlySet<string> | null> {
+  try {
+    const record = await store.get<unknown>(COINS_UNIVERSE_KEY);
+    if (record === null || record.staleness !== "fresh") return null;
+    if (!Array.isArray(record.data)) return null;
+
+    const set = new Set<string>();
+    for (const raw of record.data) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const address = normalizeAddress((raw as Record<string, unknown>)["address"]);
+      if (address !== null) set.add(address);
+    }
+    return set.size === 0 ? null : set;
+  } catch (error) {
+    console.warn(`[${SOURCE}] alpha snapshot read failed: ${sanitizeMessage(error)}`);
+    return null;
+  }
+}
+
 /** What one launchpad read can conclude. */
 export type ChainOutcome<TState> =
   /** The contract answered. */
@@ -422,7 +471,7 @@ async function readChainState(
  */
 export function decideEligibility(
   address: string,
-  allowlisted: boolean,
+  listed: ListHit,
   outcomes: ChainOutcomes | null,
 ): Omit<EligibilityResult, "checkedAt" | "cached"> {
   const base = { address, source: null, venue: null, fourmeme: null, flap: null } as const;
@@ -430,8 +479,13 @@ export function decideEligibility(
   if (!isEvmAddress(address)) {
     return { ...base, eligible: false, reason: "invalid_address" };
   }
-  if (allowlisted) {
+  if (listed === "allowlist") {
     return { ...base, eligible: true, reason: "allowlist", source: "allowlist" };
+  }
+  if (listed === "binance-alpha") {
+    // No venue, same as the allowlist: an Alpha token is an established BEP-20
+    // that routes by ordinary pool discovery, not a launchpad curve.
+    return { ...base, eligible: true, reason: "binance_alpha", source: "binance-alpha" };
   }
   if (outcomes === null) {
     return { ...base, eligible: false, reason: "allowlist_unavailable" };
@@ -519,7 +573,7 @@ export async function isEligible(
   const now = Date.now();
 
   if (!isEvmAddress(address)) {
-    return { ...decideEligibility(address, false, null), checkedAt: now, cached: false };
+    return { ...decideEligibility(address, null, null), checkedAt: now, cached: false };
   }
 
   const allowlist = loadAllowlist();
@@ -527,7 +581,16 @@ export async function isEligible(
   // Checked before the cache: a snapshot hit is a local map lookup, and it must
   // keep answering even while the chain is unreachable.
   if (allowlist !== null && allowlist.has(address)) {
-    return { ...decideEligibility(address, true, null), checkedAt: now, cached: false };
+    return { ...decideEligibility(address, "allowlist", null), checkedAt: now, cached: false };
+  }
+
+  // Also before the cache, so a token newly added to the Alpha list is admitted
+  // immediately instead of waiting out a cached `not_listed`. A store read, not
+  // an upstream call — and not cached as a verdict, because the snapshot it was
+  // decided from can be replaced by the next job cycle at any moment.
+  const alpha = await readAlphaSet(store);
+  if (alpha !== null && alpha.has(address)) {
+    return { ...decideEligibility(address, "binance-alpha", null), checkedAt: now, cached: false };
   }
 
   // Fresh only. A stale verdict is discarded rather than served — see the
@@ -539,7 +602,7 @@ export async function isEligible(
 
   const read = params.readState ?? readChainState;
   const outcomes = allowlist === null ? null : await read(address, params.signal);
-  const decided = decideEligibility(address, false, outcomes);
+  const decided = decideEligibility(address, null, outcomes);
   const result: EligibilityResult = { ...decided, checkedAt: Date.now(), cached: false };
 
   // Only a definite observation is cached. `chain_unavailable` and
