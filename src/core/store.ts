@@ -119,8 +119,12 @@ interface SnapshotRow {
   payload: unknown;
   as_of: Date;
   source: string;
-  fresh_for_ms: number;
-  dead_after_ms: number;
+  /**
+   * `bigint` on the wire, which `pg` hands back as a string rather than risk a
+   * silent precision loss. Coerced at the one place it is read.
+   */
+  fresh_for_ms: number | string;
+  dead_after_ms: number | string;
 }
 
 interface JobHealthRow {
@@ -138,10 +142,26 @@ const SNAPSHOT_DDL = `
     payload jsonb not null,
     as_of timestamptz not null,
     source text not null,
-    fresh_for_ms int not null,
-    dead_after_ms int not null,
+    fresh_for_ms bigint not null,
+    dead_after_ms bigint not null,
     updated_at timestamptz not null default now()
   )
+`;
+
+/**
+ * Widens the retention columns on a table created before they were `bigint`.
+ *
+ * They were `int`, which caps a TTL at 24.8 days in milliseconds — and a caller
+ * writing a longer one got a rejected insert rather than a clamped value. The
+ * launchpad-origin cache, whose whole design is that a verdict is permanent, hit
+ * exactly that: every write failed against Postgres while passing every test,
+ * because the tests run on the in-memory store. Idempotent, and a no-op once the
+ * columns are already wide.
+ */
+const SNAPSHOT_MIGRATION_DDL = `
+  alter table dp_snapshots
+    alter column fresh_for_ms type bigint,
+    alter column dead_after_ms type bigint
 `;
 
 const JOB_HEALTH_DDL = `
@@ -173,6 +193,7 @@ export class PostgresStore implements SnapshotStore {
     const pool = new PgPool({ connectionString });
     try {
       await pool.query(SNAPSHOT_DDL);
+      await pool.query(SNAPSHOT_MIGRATION_DDL);
       await pool.query(JOB_HEALTH_DDL);
     } catch (error) {
       await pool.end();
@@ -211,7 +232,12 @@ export class PostgresStore implements SnapshotStore {
       data: row.payload as T,
       asOf,
       source: row.source,
-      staleness: computeStaleness(asOf, this.#now(), row.fresh_for_ms, row.dead_after_ms),
+      staleness: computeStaleness(
+        asOf,
+        this.#now(),
+        Number(row.fresh_for_ms),
+        Number(row.dead_after_ms),
+      ),
     };
   }
 

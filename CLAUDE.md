@@ -22,7 +22,9 @@ Workers poll each upstream at its own cadence and write into one store; UI and a
 
 ## Stack
 
-Node 22, TypeScript strict ESM, Hono HTTP, `pg` with an in-memory fallback when `DATABASE_URL` is unset, `node:test` offline-only (Postgres paths tested through a `FakeSqlClient` — no live DB), viem for on-chain reads.
+Node 22, TypeScript strict ESM, Hono HTTP, `pg` with an in-memory fallback when `DATABASE_URL` is unset, `node:test` offline-only, viem for on-chain reads.
+
+**`PostgresStore` has no test coverage and this has already cost a production bug** (2026-08-14): the retention columns were `int`, which caps a TTL at 24.8 days in milliseconds, so the launchpad-origin cache — whose 30-day window is the point of it — failed every write against Postgres while passing the whole suite, because the suite runs on `MemoryStore`. The columns are `bigint` now with an idempotent migration, and `pg` returns `bigint` as a string, so `get` coerces. Anything touching the Postgres path is untested until a fake `pg` client seam exists; write it before trusting that code again.
 
 ## Source map
 
