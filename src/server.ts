@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Scheduler } from "./core/scheduler.js";
 import type { SnapshotStore } from "./core/store.js";
-import type { Lane, TokenSnapshot, VenusHealth } from "./core/models.js";
+import type { Lane, PoolStats, PoolTier, TokenSnapshot, VenusHealth } from "./core/models.js";
 import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
 import { getSecurity } from "./query/security.js";
@@ -11,7 +11,15 @@ import { getSocials } from "./query/socials.js";
 import { isEligible, isEligibleBatch } from "./query/eligibility.js";
 import { buildUniverse } from "./universe.js";
 import { tokenKey } from "./jobs/tokenStore.js";
-import { readStoredPools } from "./jobs/pancakePools.js";
+import { fetchPancakePoolStats, poolKey } from "./adapters/pancake.js";
+import { type RangeRequest, estimateRange, loadRangeSnapshot } from "./query/poolRange.js";
+import {
+  MAX_LANE_POOLS,
+  POOL_DEAD_AFTER_MS,
+  POOL_FRESH_FOR_MS,
+  readPoolsLane,
+  readStoredPools,
+} from "./jobs/pancakePools.js";
 import { venusKey } from "./jobs/venusHealth.js";
 
 /** Collaborators the HTTP layer reads from. Injected so the app stays testable. */
@@ -37,6 +45,8 @@ const SNAPSHOT_KEY_PREFIXES = [
   "eligibility:",
   "pool:",
   "pools:",
+  "origins:",
+  "pancake:",
   "venus:",
 ];
 
@@ -71,7 +81,186 @@ const MAX_BATCH_TOKENS = 50;
  * Snapshot keys surfaced in `/status`. These are the always-on feeds; per-token
  * and per-pool keys are demand-driven and would make the list unbounded.
  */
-const STATUS_SNAPSHOT_KEYS = ["heartbeat", "universe:meme", "universe:coins", "pools:index"];
+const STATUS_SNAPSHOT_KEYS = [
+  "heartbeat",
+  "universe:meme",
+  "universe:coins",
+  "universe:pools",
+  "pools:index",
+];
+
+/** Fields `/pools/top` will sort by. */
+const POOL_ORDER_FIELDS = [
+  "combinedApr",
+  "lpFeeApr24h",
+  "lpFeeApr7d",
+  "cakeFarmApr",
+  "tvlUsd",
+  "volume24hUsd",
+] as const;
+type PoolOrderField = (typeof POOL_ORDER_FIELDS)[number];
+
+/** The subset an APR filter may be measured against. */
+const POOL_APR_FIELDS = ["combinedApr", "lpFeeApr24h", "lpFeeApr7d", "cakeFarmApr"] as const;
+type PoolAprField = (typeof POOL_APR_FIELDS)[number];
+
+const POOL_TIERS: PoolTier[] = ["core", "degen", "unclassified"];
+
+const DEFAULT_POOL_LIMIT = 50;
+
+/** A rejected query parameter, reported as a 400 rather than an empty result. */
+class QueryError extends Error {}
+
+/** Parses an optional numeric parameter. Absent and blank both mean "no filter". */
+function numberParam(raw: string | undefined, name: string): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) throw new QueryError(`${name} must be a number`);
+  return parsed;
+}
+
+/** Parses an optional parameter constrained to a fixed set. */
+function enumParam<T extends string>(
+  raw: string | undefined,
+  name: string,
+  allowed: readonly T[],
+): T | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  if (!(allowed as readonly string[]).includes(raw)) {
+    throw new QueryError(`${name} must be one of ${allowed.join(", ")}`);
+  }
+  return raw as T;
+}
+
+/**
+ * Orders pools by one field, descending, with unknown values last.
+ *
+ * A `null` is not a zero: a pool whose farm could not be read has an unknown
+ * yield, and sorting it as the worst pool in the lane would be a claim the data
+ * does not support. Sorting it last is a display choice, not a verdict.
+ */
+function comparePools(a: PoolStats, b: PoolStats, field: PoolOrderField): number {
+  const left = a[field];
+  const right = b[field];
+  if (left === null && right === null) return 0;
+  if (left === null) return 1;
+  if (right === null) return -1;
+  return right - left;
+}
+
+/**
+ * Parses a `/pools/:address/range` query.
+ *
+ * All three are required and none has a sensible default: a range estimate
+ * without bounds or without capital is not a smaller answer, it is a different
+ * question.
+ */
+function parseRangeQuery(get: (name: string) => string | undefined): RangeRequest {
+  const lowerPrice = requiredNumber(get("lower"), "lower");
+  const upperPrice = requiredNumber(get("upper"), "upper");
+  const capitalUsd = requiredNumber(get("capital"), "capital");
+
+  if (lowerPrice <= 0 || upperPrice <= 0) throw new QueryError("lower and upper must be positive");
+  if (lowerPrice >= upperPrice) throw new QueryError("lower must be below upper");
+  if (capitalUsd <= 0) throw new QueryError("capital must be positive");
+  return { lowerPrice, upperPrice, capitalUsd };
+}
+
+function requiredNumber(raw: string | undefined, name: string): number {
+  const value = numberParam(raw, name);
+  if (value === undefined) throw new QueryError(`${name} is required`);
+  return value;
+}
+
+/** A parsed `/pools/top` query. Every filter is optional; none has a default. */
+interface PoolQuery {
+  tier: PoolTier | undefined;
+  token: string | undefined;
+  feeTier: number | undefined;
+  minTvlUsd: number | undefined;
+  maxTvlUsd: number | undefined;
+  minVolume24hUsd: number | undefined;
+  maxVolTvlRatio: number | undefined;
+  /** Which APR `minAprPct`/`maxAprPct` are measured against. */
+  aprField: PoolAprField;
+  minAprPct: number | undefined;
+  maxAprPct: number | undefined;
+  orderBy: PoolOrderField;
+  limit: number;
+}
+
+function parsePoolQuery(get: (name: string) => string | undefined): PoolQuery {
+  const aprField = enumParam(get("aprField"), "aprField", POOL_APR_FIELDS) ?? "combinedApr";
+
+  const tokenRaw = get("token");
+  let token: string | undefined;
+  if (tokenRaw !== undefined && tokenRaw.trim() !== "") {
+    const normalized = normalizeAddress(tokenRaw);
+    if (normalized === null) throw new QueryError("token must be an address");
+    token = normalized;
+  }
+
+  const limitRaw = numberParam(get("limit"), "limit");
+  if (limitRaw !== undefined && (!Number.isInteger(limitRaw) || limitRaw < 1)) {
+    throw new QueryError("limit must be a positive integer");
+  }
+
+  return {
+    tier: enumParam(get("tier"), "tier", POOL_TIERS),
+    token,
+    feeTier: numberParam(get("feeTier"), "feeTier"),
+    minTvlUsd: numberParam(get("minTvlUsd"), "minTvlUsd"),
+    maxTvlUsd: numberParam(get("maxTvlUsd"), "maxTvlUsd"),
+    minVolume24hUsd: numberParam(get("minVolume24hUsd"), "minVolume24hUsd"),
+    maxVolTvlRatio: numberParam(get("maxVolTvlRatio"), "maxVolTvlRatio"),
+    aprField,
+    minAprPct: numberParam(get("minAprPct"), "minAprPct"),
+    maxAprPct: numberParam(get("maxAprPct"), "maxAprPct"),
+    // Ordering follows the filtered APR unless asked otherwise, so a caller who
+    // sets a floor gets the pools nearest it first without a second parameter.
+    orderBy: enumParam(get("orderBy"), "orderBy", POOL_ORDER_FIELDS) ?? aprField,
+    limit: Math.min(limitRaw ?? DEFAULT_POOL_LIMIT, MAX_LANE_POOLS),
+  };
+}
+
+/**
+ * Applies the caller's filters to one pool.
+ *
+ * A threshold on a field the pool does not carry excludes it. Asking for pools
+ * above 20% APR is asking for pools *known* to be above 20%, and an unpriced
+ * farm is not evidence of anything — including of being below the line.
+ */
+function matchesPoolQuery(pool: PoolStats, query: PoolQuery): boolean {
+  if (query.tier !== undefined && pool.tier !== query.tier) return false;
+  if (query.token !== undefined && pool.token0 !== query.token && pool.token1 !== query.token) {
+    return false;
+  }
+  if (query.feeTier !== undefined && pool.fee !== query.feeTier) return false;
+
+  if (query.minTvlUsd !== undefined && (pool.tvlUsd === null || pool.tvlUsd < query.minTvlUsd)) {
+    return false;
+  }
+  if (query.maxTvlUsd !== undefined && (pool.tvlUsd === null || pool.tvlUsd > query.maxTvlUsd)) {
+    return false;
+  }
+  if (
+    query.minVolume24hUsd !== undefined &&
+    (pool.volume24hUsd === null || pool.volume24hUsd < query.minVolume24hUsd)
+  ) {
+    return false;
+  }
+
+  if (query.maxVolTvlRatio !== undefined) {
+    if (pool.tvlUsd === null || pool.tvlUsd <= 0 || pool.volume24hUsd === null) return false;
+    if (pool.volume24hUsd / pool.tvlUsd > query.maxVolTvlRatio) return false;
+  }
+
+  const apr = pool[query.aprField];
+  if (query.minAprPct !== undefined && (apr === null || apr < query.minAprPct)) return false;
+  if (query.maxAprPct !== undefined && (apr === null || apr > query.maxAprPct)) return false;
+
+  return true;
+}
 
 /**
  * Finds the lane a token was discovered in. Unknown tokens are treated as
@@ -400,6 +589,49 @@ export function createServer(deps: ServerDeps): Hono {
     });
   });
 
+  /**
+   * The yield surface: the stored lane, filtered and ordered by the caller.
+   *
+   * Every threshold is a query parameter and none is baked in. The plane
+   * discovers pools, values their APR and labels them; deciding that $50k of TVL
+   * is too little, or that 200% APR is too good to be true, belongs to whoever
+   * is putting up the capital. `meta.cap` and `meta.ingestOrder` say plainly
+   * that this is the top of a TVL-ordered lane rather than every pool on BSC.
+   */
+  app.get("/pools/top", async (c) => {
+    let query: PoolQuery;
+    try {
+      query = parsePoolQuery((name) => c.req.query(name));
+    } catch (error) {
+      if (error instanceof QueryError) {
+        return c.json({ error: { code: "invalid_query", message: error.message } }, 400);
+      }
+      throw error;
+    }
+
+    const lane = await readPoolsLane(deps.store);
+    const pools = lane?.pools ?? [];
+    const matched = pools.filter((pool) => matchesPoolQuery(pool, query));
+    const ordered = [...matched].sort((a, b) => comparePools(a, b, query.orderBy));
+    const data = ordered.slice(0, query.limit);
+
+    return c.json({
+      data,
+      meta: {
+        total: pools.length,
+        matched: matched.length,
+        returned: data.length,
+        cap: MAX_LANE_POOLS,
+        ingestOrder: "tvlUSD",
+        orderBy: query.orderBy,
+        aprField: query.aprField,
+        asOf: lane?.asOf ?? null,
+        staleness: lane?.staleness ?? null,
+        source: lane?.source ?? null,
+      },
+    });
+  });
+
   app.get("/pools", async (c) => {
     const tokenParam = c.req.query("token");
     let token: string | null = null;
@@ -424,6 +656,107 @@ export function createServer(deps: ServerDeps): Hono {
       })),
       meta: { total: filtered.length, ...(token === null ? {} : { token }) },
     });
+  });
+
+  /**
+   * One pool, whether or not it made the lane.
+   *
+   * Read-through in three steps, cheapest first: the lane, then a cached
+   * per-pool snapshot, then a live explorer read that is cached on the way out
+   * so an address asked about twice costs one upstream call. `meta.source` says
+   * which step answered, because they differ in what they carry — only a lane
+   * row has been through farm pricing and classification.
+   */
+  /**
+   * What one position in one pool would earn.
+   *
+   * `/pools/top` answers "which pool" with the APR the pool as a whole earns.
+   * This answers "which range", for stated capital, which on a concentrated
+   * AMM is a different number entirely — and the one an LP agent actually acts
+   * on. `unavailable` names any input that was missing, so a `null` here is
+   * always attributable.
+   */
+  app.get("/pools/:address/range", async (c) => {
+    const address = normalizeAddress(c.req.param("address"));
+    if (address === null) {
+      return c.json({ error: { code: "invalid_address", message: "not an address" } }, 400);
+    }
+
+    let request: RangeRequest;
+    try {
+      request = parseRangeQuery((name) => c.req.query(name));
+    } catch (error) {
+      if (error instanceof QueryError) {
+        return c.json({ error: { code: "invalid_query", message: error.message } }, 400);
+      }
+      throw error;
+    }
+
+    let loaded: Awaited<ReturnType<typeof loadRangeSnapshot>>;
+    try {
+      loaded = await loadRangeSnapshot(deps.store, address);
+    } catch {
+      return c.json(
+        { error: { code: "not_found", message: "no priced PancakeSwap V3 pool at that address" } },
+        404,
+      );
+    }
+
+    const { inputs, basis, prices } = loaded.snapshot;
+    return c.json({
+      data: estimateRange(inputs, request, prices, basis),
+      meta: { asOf: loaded.asOf, staleness: loaded.staleness, source: "pancake" },
+    });
+  });
+
+  app.get("/pools/:address", async (c) => {
+    const address = normalizeAddress(c.req.param("address"));
+    if (address === null) {
+      return c.json({ error: { code: "invalid_address", message: "not an address" } }, 400);
+    }
+
+    const lane = await readPoolsLane(deps.store);
+    const laneRow = lane?.pools.find((pool) => pool.pool === address);
+    if (laneRow !== undefined && lane !== null) {
+      return c.json({
+        data: laneRow,
+        meta: { asOf: lane.asOf, staleness: lane.staleness, source: "lane" },
+      });
+    }
+
+    const stored = await deps.store.get<PoolStats>(poolKey(address));
+    if (stored !== null && stored.staleness !== "dead") {
+      return c.json({
+        data: stored.data,
+        meta: { asOf: stored.asOf, staleness: stored.staleness, source: "cache" },
+      });
+    }
+
+    try {
+      const stats = await fetchPancakePoolStats({ address });
+      await deps.store.put(poolKey(address), stats, {
+        source: stats.source,
+        freshForMs: POOL_FRESH_FOR_MS,
+        deadAfterMs: POOL_DEAD_AFTER_MS,
+      });
+      return c.json({
+        data: stats,
+        // Off the lane, so nothing has priced its farm or classified its tokens.
+        meta: { asOf: stats.asOf, staleness: "fresh", source: "live" },
+      });
+    } catch {
+      // A dead snapshot beats no answer: this path is telemetry, not a gate.
+      if (stored !== null) {
+        return c.json({
+          data: stored.data,
+          meta: { asOf: stored.asOf, staleness: stored.staleness, source: "cache" },
+        });
+      }
+      return c.json(
+        { error: { code: "not_found", message: "no such PancakeSwap V3 pool on bsc" } },
+        404,
+      );
+    }
   });
 
   app.get("/venus/:owner", async (c) => {

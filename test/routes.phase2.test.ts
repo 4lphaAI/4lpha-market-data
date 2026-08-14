@@ -63,6 +63,7 @@ async function putSecurity(store: MemoryStore, address: string): Promise<void> {
 function pool(address: string, token0: string, token1: string): PoolStats {
   return {
     pool: address,
+    protocol: "v3",
     token0,
     token1,
     token0Symbol: "AAA",
@@ -73,7 +74,14 @@ function pool(address: string, token0: string, token1: string): PoolStats {
     tick: 10,
     tvlUsd: 1000,
     volume24hUsd: 50,
-    aprPct: 36.5,
+    lpFeeApr24h: 36.5,
+    lpFeeApr7d: 30.25,
+    cakeFarmApr: 4.5,
+    combinedApr: 41,
+    aprSources: ["lpFee", "cakeFarm"],
+    farm: { pid: 7, allocPoint: 100, cakePerYear: 1000 },
+    tier: "unclassified",
+    tokenOrigin: { token0: "unknown", token1: "unknown" },
     asOf: 1,
     source: "pancake",
   };

@@ -465,6 +465,91 @@ async function readChainState(
   }
 }
 
+/** Which launchpad minted a token, or that neither did. */
+export type LaunchpadOrigin = "fourmeme" | "flap" | "none";
+
+/**
+ * Resolves which launchpad each token came from, in batches.
+ *
+ * Not part of the gate — pool classification uses it — but it asks the two
+ * launchpads exactly the same questions {@link readChainState} does, so there is
+ * one definition of what "this token is a Four.Meme token" means.
+ *
+ * The answer is a permanent property: a launchpad mints new contracts, it never
+ * adopts an existing one, so `none` is as final as `fourmeme`. That is what
+ * makes caching it forever safe, and it is why this is affordable at all — the
+ * cost is one resolution per token for the life of the deployment, not one per
+ * cycle.
+ *
+ * All reads for a chunk are issued in the same tick so viem folds them into
+ * Multicall3 batches. A revert is a definite answer and becomes `none`; a
+ * transport failure is rethrown so {@link withBscClient} rotates endpoints, and
+ * a chunk that no endpoint can serve is omitted from the result rather than
+ * being recorded as `none`.
+ */
+export async function resolveLaunchpadOrigins(
+  addresses: string[],
+  options: { signal?: AbortSignal | undefined; rpcUrls?: string[] | undefined } = {},
+): Promise<Map<string, LaunchpadOrigin>> {
+  const tokens = [...new Set(addresses.map((address) => normalizeAddress(address)))].filter(
+    (address): address is string => address !== null,
+  );
+
+  const resolved = new Map<string, LaunchpadOrigin>();
+  for (let start = 0; start < tokens.length; start += ORIGIN_CHUNK) {
+    const chunk = tokens.slice(start, start + ORIGIN_CHUNK);
+    try {
+      const outcomes = await withBscClient(
+        async (client) =>
+          Promise.all(chunk.map((address) => readChainStateOn(client, address))),
+        {
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
+          ...(options.rpcUrls === undefined ? {} : { rpcUrls: options.rpcUrls }),
+        },
+      );
+      chunk.forEach((address, index) => {
+        const outcome = outcomes[index];
+        if (outcome === undefined) return;
+        const origin = classifyOutcome(outcome);
+        if (origin !== null) resolved.set(address, origin);
+      });
+    } catch (error) {
+      // Omitted, never recorded: writing `none` for an unreachable chunk would
+      // cache an outage as a fact about the tokens, and this cache is forever.
+      console.warn(`[${SOURCE}] origin resolution failed for a chunk: ${sanitizeMessage(error)}`);
+    }
+  }
+  return resolved;
+}
+
+/** Tokens per batched round trip. Keeps one bad round from costing the lot. */
+const ORIGIN_CHUNK = 100;
+
+/** Both launchpad reads for one token, on a client the caller already holds. */
+async function readChainStateOn(client: BscClient, address: string): Promise<ChainOutcomes> {
+  const [fourmeme, flap] = await Promise.all([
+    readFourMemeOn(client, address),
+    readFlapOn(client, address),
+  ]);
+  return { fourmeme, flap };
+}
+
+/**
+ * `null` when either launchpad failed to answer.
+ *
+ * A zero-filled Four.Meme struct (`version == 0`) is the helper's ordinary way
+ * of saying it never heard of the token — measured on chain, an EOA and a plain
+ * BEP-20 both come back that way — so it means `none`, not "Four.Meme". Flap
+ * answers the same negative by reverting, which `readFlapOn` already folded into
+ * `absent`.
+ */
+function classifyOutcome(outcome: ChainOutcomes): LaunchpadOrigin | null {
+  if (outcome.fourmeme.kind === "unavailable" || outcome.flap.kind === "unavailable") return null;
+  if (outcome.fourmeme.kind === "answered" && outcome.fourmeme.state.version > 0) return "fourmeme";
+  if (outcome.flap.kind === "answered") return "flap";
+  return "none";
+}
+
 /**
  * Decides eligibility from an allowlist hit and a chain read, without touching
  * either. Exported so the whole decision table is testable offline.

@@ -38,6 +38,9 @@ const MIX: Array<{ route: string; weight: number }> = [
   { route: `/tokens/${NVDAB}`, weight: 20 },
   { route: `/tokens?addresses=${NVDAB},${TSLAB}`, weight: 20 },
   { route: "/pools", weight: 10 },
+  // The heaviest store-backed read: a 500-row lane, re-validated, filtered and
+  // ordered per request.
+  { route: "/pools/top?minTvlUsd=100000&minAprPct=5&limit=20", weight: 15 },
 ];
 
 function parsePositive(raw: string | undefined, fallback: number): number {
@@ -45,8 +48,15 @@ function parsePositive(raw: string | undefined, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
+/**
+ * Rolled against the actual sum, not a hardcoded 100: with the weights adding to
+ * anything higher, every route past the hundredth point of the cumulative
+ * distribution becomes unreachable and silently drops out of the run.
+ */
+const TOTAL_WEIGHT = MIX.reduce((sum, entry) => sum + entry.weight, 0);
+
 function pickRoute(): string {
-  let roll = Math.random() * 100;
+  let roll = Math.random() * TOTAL_WEIGHT;
   for (const entry of MIX) {
     roll -= entry.weight;
     if (roll <= 0) return entry.route;

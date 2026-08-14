@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
     "smoke": "node --import tsx scripts/smoke.ts",
+    "lane-check": "node --import tsx scripts/lane-check.ts",
     "loadtest": "tsx scripts/dp-load-test.ts"
   },
   "dependencies": {

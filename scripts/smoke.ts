@@ -29,10 +29,15 @@ import {
   hasGmgnCredentials,
 } from "../src/adapters/gmgn.js";
 import {
+  fetchCakePriceUsd,
+  fetchPancakeFarmedPools,
+  fetchPancakePoolList,
   fetchPancakePoolOnchain,
   fetchPancakePoolStats,
   seedPools,
+  withCakeFarm,
 } from "../src/adapters/pancake.js";
+import { computeCakeFarmApr, fetchCakeEmissions } from "../src/adapters/masterchefV3.js";
 import { fetchVenusHealth } from "../src/adapters/venus.js";
 import { withBscClient } from "../src/chain/rpc.js";
 import { getKlines } from "../src/query/klines.js";
@@ -193,13 +198,55 @@ await check("pancake pool (explorer)", async () => {
   const stats = await fetchPancakePoolStats({ address: PROBE_POOL });
   return (
     `${stats.token0Symbol ?? "?"}/${stats.token1Symbol ?? "?"} fee=${stats.fee}, ` +
-    `tvl=${stats.tvlUsd === null ? "null" : Math.round(stats.tvlUsd)}, apr=${stats.aprPct ?? "null"}%`
+    `tvl=${stats.tvlUsd === null ? "null" : Math.round(stats.tvlUsd)}, ` +
+    `lpFeeApr24h=${stats.lpFeeApr24h ?? "null"}%, lpFeeApr7d=${stats.lpFeeApr7d ?? "null"}%`
   );
 });
 
 await check("pancake pool (on-chain)", async () => {
   const stats = await fetchPancakePoolOnchain({ address: PROBE_POOL });
   return `${stats.token0Symbol ?? "?"}/${stats.token1Symbol ?? "?"} fee=${stats.fee}, tick=${stats.tick}`;
+});
+
+await check("pancake pool list (page 1)", async () => {
+  const page = await fetchPancakePoolList({ orderBy: "tvlUSD" });
+  const top = page.rows[0];
+  return (
+    `${page.rows.length} rows, hasNext=${page.hasNextPage}, ` +
+    `top=${top?.token0Symbol ?? "?"}/${top?.token1Symbol ?? "?"} apr=${top?.lpFeeApr24h ?? "null"}%`
+  );
+});
+
+await check("pancake farmed pools", async () => {
+  const farmed = await fetchPancakeFarmedPools();
+  return `${farmed.length} farmed BSC V3 pools`;
+});
+
+/**
+ * The one row that has to be right: a farmed pool's combined APR, built the same
+ * way PancakeSwap's own UI builds the number it shows.
+ */
+await check("cake farm apr (combined)", async () => {
+  const farmed = await fetchPancakeFarmedPools();
+  const target = farmed.find((pool) => (pool.tvlUsd ?? 0) > 100_000) ?? farmed[0];
+  if (target === undefined) return "no farmed pools returned";
+
+  const [price, emissions] = await Promise.all([
+    fetchCakePriceUsd(),
+    fetchCakeEmissions({ pools: [target.pool] }),
+  ]);
+  const farm = emissions.farms.get(target.pool) ?? null;
+  const stats = withCakeFarm(
+    target,
+    farm,
+    computeCakeFarmApr(farm?.cakePerYear ?? 0, price, target.tvlUsd),
+  );
+
+  return (
+    `${stats.token0Symbol ?? "?"}/${stats.token1Symbol ?? "?"} ` +
+    `lpFee=${stats.lpFeeApr24h ?? "null"}% + cake=${stats.cakeFarmApr ?? "null"}% ` +
+    `= combined ${stats.combinedApr ?? "null"}% (cake $${price.toFixed(4)}, pid ${farm?.pid ?? "none"})`
+  );
 });
 
 /**

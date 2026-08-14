@@ -221,15 +221,64 @@ export function mergeHolderStats(base: HolderStats, incoming: HolderStats): Hold
 }
 
 /**
+ * Which APR components a record actually carries.
+ *
+ * Reported alongside the numbers so a consumer can tell "this pool earns no
+ * CAKE" from "nobody asked the farm contract" — the two produce the same
+ * `combinedApr` shape but mean opposite things.
+ */
+export type AprSource = "lpFee" | "cakeFarm";
+
+/**
+ * How much is known about the two tokens a pool is made of.
+ *
+ * A label, never a filter: the plane classifies and reports, and the caller
+ * decides what to do with the classification. `unclassified` is the honest
+ * default for a pool nothing has been established about yet.
+ */
+export type PoolTier = "core" | "degen" | "unclassified";
+
+/**
+ * Where one of a pool's tokens came from, and the evidence {@link PoolTier} is
+ * derived from. `unknown` means this plane holds nothing about the token — not
+ * that anything is wrong with it.
+ */
+export type TokenOrigin = "fourmeme" | "flap" | "allowlist" | "alpha" | "pancake-list" | "unknown";
+
+/** The provenance of both sides of a pool. */
+export interface PoolTokenOrigins {
+  token0: TokenOrigin;
+  token1: TokenOrigin;
+}
+
+/** A pool's MasterChefV3 farm slot. `allocPoint` 0 is registered but unfunded. */
+export interface PoolFarm {
+  /** MasterChefV3 pool id. Assigned once and never reassigned. */
+  pid: number;
+  /** Share of CAKE emissions, set by veCAKE gauge voting. */
+  allocPoint: number;
+  /** CAKE emitted to this pool over a year at the current rate. */
+  cakePerYear: number;
+}
+
+/**
  * State of one PancakeSwap V3 pool.
  *
- * The first six fields come from the pool contract and are always present. The
- * three USD-denominated ones come from PancakeSwap's aggregation API and stay
- * `null` when only the on-chain path ran — they are never derived from a guess.
+ * Three groups of fields, with different failure modes:
+ *
+ * - Identity (`pool` … `fee`) is always present; a record without it is not
+ *   built at all.
+ * - Chain state (`liquidity`, `sqrtPriceX96`, `tick`) comes from the pool
+ *   contract or the per-pool explorer read. The list endpoint does not carry it,
+ *   so a record discovered through the lane leaves all three `null`.
+ * - USD and APR fields come from PancakeSwap's aggregation API and the farm
+ *   contract. They are never re-derived locally — see {@link PoolStats.lpFeeApr24h}.
  */
 export interface PoolStats {
   /** Pool contract address, lowercased. */
   pool: string;
+  /** Only V3 is served. The field exists so an Infinity lane is additive. */
+  protocol: "v3";
   /** token0 contract address, lowercased. */
   token0: string;
   /** token1 contract address, lowercased. */
@@ -239,15 +288,43 @@ export interface PoolStats {
   /** Fee tier in hundredths of a basis point, e.g. `2500` for 0.25%. */
   fee: number;
   /** In-range liquidity, as a decimal string because it exceeds `Number`. */
-  liquidity: string;
+  liquidity: string | null;
   /** Q64.96 price, as a decimal string for the same reason. */
-  sqrtPriceX96: string;
-  tick: number;
+  sqrtPriceX96: string | null;
+  tick: number | null;
   tvlUsd: number | null;
   volume24hUsd: number | null;
-  /** Fee APR: 24h fees over TVL, annualized. `null` without USD data. */
-  aprPct: number | null;
-  /** Epoch milliseconds at which the pool was read. */
+  /**
+   * Trading-fee APR over 24h, as a percentage, net of the protocol fee cut.
+   *
+   * This is PancakeSwap's own `apr24h`, converted from a fraction to a percent
+   * and never recomputed from `feeUSD24h`: that field is gross of the ~33%
+   * protocol fee, so deriving from it overstates what an LP receives by about
+   * 1.5x and would not match the number PancakeSwap's own UI shows.
+   */
+  lpFeeApr24h: number | null;
+  /** The same measure over 7 days. Steadier, and the honest tiebreak. */
+  lpFeeApr7d: number | null;
+  /** CAKE emissions APR, percent. `0` means not farmed; `null` means unasked. */
+  cakeFarmApr: number | null;
+  /**
+   * `lpFeeApr24h + cakeFarmApr` — the APR column of PancakeSwap's pool list.
+   * `null` unless both components are known, because a sum missing a term reads
+   * as a smaller pool yield rather than as a gap.
+   */
+  combinedApr: number | null;
+  aprSources: AprSource[];
+  farm: PoolFarm | null;
+  tier: PoolTier;
+  /** The evidence behind `tier`, carried so a label can be argued with. */
+  tokenOrigin: PoolTokenOrigins;
+  /**
+   * Epoch milliseconds at which *this pool* was read.
+   *
+   * Distinct from the age of the lane snapshot holding it: a cycle that only
+   * managed part of its paging republishes the lane with fresh rows alongside
+   * rows carried over from before, and each one keeps saying when it was read.
+   */
   asOf: number;
   source: string;
 }

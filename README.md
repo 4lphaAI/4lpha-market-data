@@ -98,17 +98,119 @@ upstream's own `x-ratelimit-reset` has passed.
 
 ## Pools
 
-`pancake-pools` reads PancakeSwap's keyless cached explorer API
-(`explorer.pancakeswap.com/api/cached/pools/v3/bsc/<pool>`), which carries the
-aggregates no node can answer: TVL, 24h volume and 24h fees. `aprPct` is derived
-from those — one day of fees annualized over TVL — and is suppressed when TVL is
-dust, where the ratio is meaningless.
+`pancake-pools` reads PancakeSwap's keyless cached explorer API — the same
+service their own web app reads, which is what makes matching the APR a user
+sees on pancakeswap.finance a property of the architecture rather than of a
+formula kept in sync by hand. BSC V3 only.
+
+A pool's APR is two independent things, and they are never conflated:
+
+- `lpFeeApr24h` / `lpFeeApr7d` — trading fees, taken verbatim from the
+  explorer's `apr24h` / `apr7d` and converted from a fraction to a percent. It
+  is **not** derived from the `feeUSD24h` in the per-pool payload: that figure is
+  gross of the ~33% protocol fee, so annualizing it overstates what an LP
+  receives by roughly 1.5x and does not match PancakeSwap's UI.
+- `cakeFarmApr` — CAKE emissions, read from MasterChefV3
+  (`0x556B9306565093C855AEA9AE92A594704c2Cd59e`) over the public BSC endpoints:
+  `cakePerSecond × allocPoint / totalAllocPoint × 31_536_000 × cakePrice / tvl`.
+  `0` means the pool earns no CAKE; `null` means nobody asked.
+
+`combinedApr` is their sum — the APR column of PancakeSwap's pool list — and is
+`null` unless both components are known, because a sum missing a term reads as a
+smaller yield rather than as a gap. `aprSources` names the components that are
+actually present. Nothing else is folded in: third-party incentive APRs and
+points campaigns are out of scope for this plane.
+
+Pools arrive two ways. `pools/list` pages the lane 50 rows at a time — the
+endpoint truncates to 50 whatever `limit` asks for, so `after=<endCursor>` is
+the only way to a larger set — and carries aggregates but no chain state, which
+is why a lane record leaves `liquidity`, `sqrtPriceX96` and `tick` `null`.
+`pools/farming` returns every farmed BSC V3 pool unpaginated in one call, and is
+the candidate set for the MasterChefV3 reads.
 
 When the explorer is unavailable the adapter falls back to reading the pool
 contract directly (`slot0`, `liquidity`, `fee`, `token0/1`, plus ERC-20 symbols
-cached for the process lifetime). That path leaves `tvlUsd`, `volume24hUsd` and
-`aprPct` as `null`: a node knows the pool's state, not what it is worth, and an
-invented TVL is worse than an honest gap.
+cached for the process lifetime). That path leaves every USD and APR field
+`null`: a node knows the pool's state, not what it is worth, and an invented TVL
+is worse than an honest gap.
+
+The job publishes the whole lane as one snapshot, `universe:pools`, capped at
+500 pools ingested in TVL order. That order decides which pools the lane has
+room for, never which pools deserve to be in it — `/pools/top` carries every
+threshold as a query parameter (`minTvlUsd`, `minAprPct`, `aprField`, `feeTier`,
+`maxVolTvlRatio`, `token`, `tier`, `orderBy`, `limit`) and applies none of its
+own, while `meta.cap` and `meta.ingestOrder` state that the answer is the top of
+a lane rather than every pool on the chain. A filter on a field a pool does not
+carry excludes it: asking for pools above 20% APR asks for pools *known* to be
+above 20%, and an unpriced farm is not evidence of being below the line.
+
+The lane fails open. A paging pass that completes replaces it; one that breaks
+part-way is backfilled from what was already stored, so a bad page cannot shrink
+it. A cycle that reads nothing at all throws without republishing — restamping
+would age the surviving rows into looking freshly read — and every row carries
+its own `asOf` next to the snapshot's.
+
+### Tiers
+
+A pool on PancakeSwap is permissionless, so its TVL, volume and APR are all
+things anyone can manufacture — the numbers are the thing being faked, which is
+why no threshold on them detects it. What cannot be faked is the provenance of
+the two tokens, and that is what `tier` reports:
+
+- `core` — both tokens are curated by somebody: the frozen eligible-token
+  allowlist, the Binance Alpha snapshot, or PancakeSwap's own Extended list.
+- `degen` — both tokens are accounted for and at least one came off Four.Meme or
+  Flap. Requiring the other side to be known is what separates a real launchpad
+  pair from a pool whose quote token nothing recognizes.
+- `unclassified` — anything else, which is where the wash-traded pairs land.
+
+`tokenOrigin` carries the evidence behind the label so it can be argued with.
+
+Curated origins come from state the plane already holds — the frozen allowlist,
+the Binance Alpha snapshot and PancakeSwap's token list — three store reads a
+cycle whatever the size of the lane. Launchpad origin is read from the launchpad
+contracts themselves, using the same two calls the eligibility gate makes, and
+cached permanently: a launchpad mints new contracts and never adopts an existing
+one, so both `fourmeme` and `none` are final answers. A token is therefore asked
+about once, ever. Resolution is capped at 150 tokens per cycle, so a cold start
+converges over a few minutes instead of one long burst, and a batch no endpoint
+could serve is left unresolved rather than recorded as a negative — the cache
+outlives the outage that would otherwise be written into it.
+
+Labels are sticky: provenance does not change, so an `unclassified` verdict on a
+pool that was labelled before says a source was unavailable, not that the pool
+changed. With the frozen allowlist unreadable the pass is skipped entirely.
+
+### Range economics
+
+`/pools/top` answers which pool, with the APR the pool as a whole earns.
+`/pools/:address/range?lower=&upper=&capital=` answers which range, for stated
+capital — on a concentrated AMM a different number, and the one an LP actually
+receives. The same $10,000 in USDT/WBNB 0.01%, against a pool APR of 9.82%:
+±50% projects 2.62%, ±10% 12.75%, ±2% 62.42%, ±0.5% 244.39%.
+
+Fees accrue to whatever liquidity is in range, so a position's share is
+`L / (L_active + L)` — the position's liquidity follows from its capital and
+bounds, and `L_active` is the pool's own. That makes the arithmetic exact
+without scanning the tick array, which would only be needed to model the price
+moving across ticks. The projection is then the pool's `lpFeeApr24h` scaled by
+how much more liquidity per dollar the position holds than the pool average,
+which keeps it anchored to the figure that matches PancakeSwap's UI rather than
+drifting into an APR of its own.
+
+What is exact and what is projected stay separate in the response. Exact: the
+position's liquidity, the token amounts it needs, its fee share, and whether the
+range brackets the current price — out of range it earns a real zero. Projected:
+that volume repeats and the price stays put, which `assumptions` states on every
+response, while `unavailable` names any missing input so a `null` is always
+attributable. Impermanent loss is not modelled; it depends on where the price
+ends up, and a number invented for it would sit in the payload looking exactly
+like the ones that are real.
+
+Bounds snap outward onto the fee tier's tick grid, so the placeable range always
+contains the one asked for. The pool's facts — state, APR and both token prices
+— are cached together for a minute, so sweeping twenty candidate ranges over one
+pool costs one fetch.
 
 ## Venus health factors
 
