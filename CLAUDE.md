@@ -24,7 +24,11 @@ Workers poll each upstream at its own cadence and write into one store; UI and a
 
 Node 22, TypeScript strict ESM, Hono HTTP, `pg` with an in-memory fallback when `DATABASE_URL` is unset, `node:test` offline-only, viem for on-chain reads.
 
-**`PostgresStore` has no test coverage and this has already cost a production bug** (2026-08-14): the retention columns were `int`, which caps a TTL at 24.8 days in milliseconds, so the launchpad-origin cache — whose 30-day window is the point of it — failed every write against Postgres while passing the whole suite, because the suite runs on `MemoryStore`. The columns are `bigint` now with an idempotent migration, and `pg` returns `bigint` as a string, so `get` coerces. Anything touching the Postgres path is untested until a fake `pg` client seam exists; write it before trusting that code again.
+**`PostgresStore` is tested through `test/fakePg.ts`, and that fake is schema-aware on purpose.** It cost a production bug to learn why (2026-08-14): the retention columns were `int`, which caps a TTL at 24.8 days in milliseconds, so the launchpad-origin cache — whose 30-day window is the point of it — failed every write against Postgres while passing the whole suite, because the suite ran only on `MemoryStore`. The columns are `bigint` now with an idempotent migration.
+
+`FakePg` reads the `create table` statement the store actually ships, keeps the declared column types, and rejects a bound value the column could not hold using Postgres's own wording — a fake that only recorded SQL would have accepted the write that broke production. It also answers the way `pg` answers: **`bigint` comes back as a string**, so `get` coerces before computing staleness; `timestamptz` as a `Date`; `jsonb` already parsed. None of those conversions exist on the `MemoryStore` path.
+
+Verified by mutation: restoring `int` columns and dropping the migration turns five tests red with `value "2592000000" is out of range for type integer`, the exact line the deployment logged. Keep it that way — a fake that stops modelling the schema stops being worth having.
 
 ## Source map
 

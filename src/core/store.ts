@@ -1,7 +1,7 @@
 // `pg` is CommonJS and does not expose statically analysable named exports, so
 // the runtime value comes from the default import while types come from `type`.
 import pgPkg from "pg";
-import type { Pool } from "pg";
+import type { QueryResultRow } from "pg";
 import type { DataRecord, JobHealth, Staleness } from "./types.js";
 
 const { Pool: PgPool } = pgPkg;
@@ -177,29 +177,57 @@ const JOB_HEALTH_DDL = `
 `;
 
 /**
+ * The slice of `pg.Pool` this store actually uses.
+ *
+ * Declared as its own interface so the store can be handed a stand-in. Every
+ * other upstream in this codebase is injectable — adapters take `fetchFn`, chain
+ * reads take `rpcUrls` — and Postgres was the one exception, which is precisely
+ * why it was also the one path with no tests, and where a production-only bug
+ * survived a green suite.
+ */
+export interface SqlClient {
+  query<T extends QueryResultRow = QueryResultRow>(
+    sql: string,
+    params?: unknown[],
+  ): Promise<{ rows: T[] }>;
+  end(): Promise<void>;
+}
+
+export interface PostgresStoreOptions {
+  now?: Clock;
+  /** Overrides the real connection pool. Tests supply a fake. */
+  client?: SqlClient;
+}
+
+/**
  * Durable store backed by Postgres. Construct via {@link PostgresStore.create}
  * so the idempotent DDL runs before the instance is handed out.
  */
 export class PostgresStore implements SnapshotStore {
-  readonly #pool: Pool;
+  readonly #pool: SqlClient;
   readonly #now: Clock;
 
-  private constructor(pool: Pool, now: Clock) {
+  private constructor(pool: SqlClient, now: Clock) {
     this.#pool = pool;
     this.#now = now;
   }
 
-  static async create(connectionString: string, now: Clock = Date.now): Promise<PostgresStore> {
-    const pool = new PgPool({ connectionString });
+  static async create(
+    connectionString: string,
+    options: PostgresStoreOptions = {},
+  ): Promise<PostgresStore> {
+    const pool: SqlClient = options.client ?? new PgPool({ connectionString });
     try {
       await pool.query(SNAPSHOT_DDL);
       await pool.query(SNAPSHOT_MIGRATION_DDL);
       await pool.query(JOB_HEALTH_DDL);
     } catch (error) {
+      // The pool is closed rather than left dangling: `create` is the only path
+      // that owns it, so a caller that never receives the store cannot close it.
       await pool.end();
       throw error;
     }
-    return new PostgresStore(pool, now);
+    return new PostgresStore(pool, options.now ?? Date.now);
   }
 
   async put(key: string, payload: unknown, opts: PutOptions): Promise<void> {
