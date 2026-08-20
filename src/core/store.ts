@@ -458,7 +458,8 @@ export class PostgresStore implements SnapshotStore {
        )
        select
          exists(select 1 from deleted) as removed,
-         (select count(*) from dp_tracking_references where namespace = $2 and subject = $3) as reference_count`,
+         (select count(*) from dp_tracking_references where namespace = $2 and subject = $3)
+           - case when exists(select 1 from deleted) then 1 else 0 end as reference_count`,
       [trackingId(namespace, subject, reference), namespace, subject],
     );
     const row = result.rows[0];
