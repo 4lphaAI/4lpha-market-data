@@ -5,8 +5,8 @@ Standalone data-plane service for a BNB Chain agent marketplace.
 Phase 0 built the core: a snapshot store with read-time freshness, a fault-isolated
 job scheduler, and a small HTTP surface. Phase 1 added the market-data layer —
 provider adapters, a three-lane token universe, a read-through kline chain, and
-thin read endpoints. Phase 2 adds the risk layer: a tiered token-security scan,
-PancakeSwap V3 pool stats, and Venus health factors read straight from BSC.
+thin read endpoints. Later phases add tiered token security, PancakeSwap V3 yield,
+and exact Venus Core Pool v2 observations read straight from BSC.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ PancakeSwap V3 pool stats, and Venus health factors read straight from BSC.
  │ binance  │──▶│ binance-universe     │   │  timeout,    │             │
  │          │──▶│ binance-prices       │   │  jitter,     │◀ health ────┤
  │ onchainos│   │ pancake-pools        │   │  no-overlap  │             │
- │ gmgn     │   │ venus-health(+hot)   │   └──────┬───────┘             ▼
+ │ gmgn     │   │ venus-core-*         │   └──────┬───────┘             ▼
  │ pancake  │   └──────────────────────┘                        ┌──────────────┐
  │          │   query/klines.ts    ───── read-through ─────────▶│ SnapshotStore│
  │ venus    │   query/security.ts  ───── read-through ─────────▶│  Memory | PG │
@@ -30,9 +30,11 @@ PancakeSwap V3 pool stats, and Venus health factors read straight from BSC.
                                         └───────────────┘  /snapshots /health /status
 ```
 
-- **Store** (`src/core/store.ts`) — key/value snapshots plus job health.
+- **Store** (`src/core/store.ts`) — key/value snapshots, job health, durable
+  tracking references, and cross-replica scheduler leases.
   `MemoryStore` for dev and tests, `PostgresStore` (tables `dp_snapshots`,
-  `dp_job_health`, created idempotently on init) when `DATABASE_URL` is set.
+  `dp_job_health`, `dp_tracking_references`, and `dp_scheduler_leases`, created
+  idempotently on init) when `DATABASE_URL` is set.
   `createStore()` picks the backend and logs which one, never the URL.
 - **Freshness** is derived at read time, never stored: a record's age is compared
   against its `freshForMs` / `deadAfterMs` to yield `fresh | stale | dead`. Readers
@@ -212,30 +214,28 @@ contains the one asked for. The pool's facts — state, APR and both token price
 — are cached together for a minute, so sweeping twenty candidate ranges over one
 pool costs one fetch.
 
-## Venus health factors
+## Venus Core Pool v2
 
-`src/adapters/venus.ts` reads the Core Pool Unitroller
-`0xfD36E2c2a6789Db23113685031d7F16329158384` — taken from Venus's own deployment
-manifest, not from memory. Per market it reads `getAccountSnapshot`,
-`markets().collateralFactorMantissa` and `oracle().getUnderlyingPrice`, batched
-through Multicall3.
+`src/adapters/venusCore.ts` is a read-only, execution-grade view of Venus's BNB
+Chain **Core Pool only**. Every observation pins its contract discovery, market
+reads and account reads to one block and includes that block number/hash in the
+payload. The catalog exposes market identities, caps/headroom, pause flags,
+forced-liquidation flags, rates/APYs, oracle prices and E-mode configuration.
 
-The math is bigint end to end and mirrors Venus's own `getAccountLiquidity`; it
-was verified against a live borrower, reproducing the contract's reported
-liquidity exactly. No `decimals()` read is needed anywhere: the Venus oracle
-scales prices by `1e(36 - underlyingDecimals)`, which makes the USD conversion
-decimals-agnostic by construction.
+Account risk deliberately has two answers. `protocolSnapshot` uses stored vToken
+snapshots and exact Solidity truncation, and must reconcile with both deployed
+Comptroller checks. `fullyAccruedEstimate` simulates current balances; wake-up
+risk uses the more conservative of the two and becomes unavailable if either
+answer is incomplete. VAI debt, E-mode overrides, bounded collateral/debt prices,
+liquidation thresholds and forced liquidation are all explicit.
 
-| Tier | Health factor |
-| ---- | ------------- |
-| `HEALTHY` | ≥ 1.5, or nothing borrowed |
-| `WARNING` | 1.15 – 1.5 |
-| `DANGER` | 1.0 – 1.15 |
-| `LIQUIDATABLE` | < 1.0 |
+Reward observations keep `entitlement`, simulated `payoutNow`, and
+`claimAvailable` separate. The simulation is block-pinned and never broadcasts a
+transaction. Owner tracking is reference-counted and capped at 1,000 distinct
+owners, so one consumer cannot untrack an owner still used by another.
 
-Owners at `DANGER` or worse are re-read every 15s by `venus-health-hot`, which
-derives its priority set from the tiers already in the store rather than running
-a second scheduler.
+Wire contracts live in `schemas/`; `venus-core-account-v2.example.json` is a
+mainnet-observed, no-position payload the execution plane can pin in fixtures.
 
 ## Lanes
 
@@ -252,8 +252,10 @@ in more than one lane is kept once, with precedence **bstocks > coins > meme**.
 | `binance-universe` | 6h | `universe:coins` |
 | `binance-prices` | 60s | `token:<addr>` for the tracked set |
 | `pancake-pools` | 2min | `pool:<addr>`, `pools:index` |
-| `venus-health` | 60s | `venus:<owner>` for every tracked owner |
-| `venus-health-hot` | 15s | `venus:<owner>` for owners at DANGER or worse |
+| `venus-core-markets` | 60s | `venus:core:markets:v1` |
+| `venus-core-risk` | 60s | block-pinned account v2 records for up to 1,000 owners |
+| `venus-core-risk-hot` | 15s | conservative near-liquidation owner subset |
+| `venus-core-rewards` | 5min | simulated XVS/Prime claim observations |
 
 `binance-prices` reads its address set from the `tracked:addresses` snapshot and
 falls back to the bStocks list. Live quotes are range-checked against the stored
@@ -265,7 +267,7 @@ Operator-controlled input snapshots, all following that same pattern:
 | --- | ------------------ |
 | `tracked:addresses` | the static bStocks list |
 | `pools:seed` | six verified NVDAB/TSLAB V3 pools |
-| `tracked:venus-owners` | empty — both Venus jobs no-op, which is a success |
+| `tracked:venus-owners` | legacy input, migrated once into reference-counted v2 tracking |
 
 `pools:index` only ever lists pools that actually have a snapshot, and keeps an
 entry whose pool failed this cycle, so `/pools` can never advertise a key that
@@ -284,7 +286,12 @@ Every response uses the `{ data, error?, meta? }` envelope.
 | `GET /klines/:address?interval=1m&limit=100` | `Candle[]`; may hit upstream on a miss. `interval` ∈ 1m,5m,15m,1h,4h,1d; `limit` 1..500 |
 | `GET /security/:address?lane=` | merged `TokenSecuritySummary`; `meta.sources` carries each scanner's own verdict. `lane` defaults from the universe, falling back to `meme`. May hit upstream on a miss; answers `unavailable` rather than erroring |
 | `GET /pools?token=` | stored `PoolStats[]` with staleness; `token` filters on either side of the pair |
-| `GET /venus/:owner` | stored `VenusHealth`; 404 with a hint naming `tracked:venus-owners` when the owner is not tracked |
+| `GET /venus/:owner` | deprecated compatibility projection; response points to the v2 replacement |
+| `GET /venus/core/markets` | pinned Core Pool market/risk-control catalog |
+| `GET /venus/core/accounts/:owner` | stored exact protocol risk plus fully-accrued estimate |
+| `GET /venus/core/accounts/:owner/rewards` | XVS/Prime entitlement and simulated payout |
+| `PUT /internal/venus/core/tracked-owners/:owner/:reference` | idempotently register one consumer reference and warm the owner |
+| `DELETE /internal/venus/core/tracked-owners/:owner/:reference` | remove only that consumer reference |
 | `GET /snapshots/:key` | raw record; debug only, keys limited to `heartbeat`, `universe:`, `token:`, `klines:`, `security:`, `pool:`, `pools:`, `venus:` |
 | anything else | `404 { error: { code: "not_found" } }` |
 
