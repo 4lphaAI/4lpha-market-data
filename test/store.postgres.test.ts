@@ -216,7 +216,7 @@ describe("PostgresStore tracking references and leases", () => {
   });
 
   it("removes only the named reference and drops the subject after the last", async () => {
-    const { store } = await build();
+    const { store, pg } = await build();
     await store.addTrackingReference("venus-core", "0x01", "a", 10);
     await store.addTrackingReference("venus-core", "0x01", "b", 10);
     assert.deepEqual(await store.removeTrackingReference("venus-core", "0x01", "a"), {
@@ -227,6 +227,8 @@ describe("PostgresStore tracking references and leases", () => {
       removed: true,
       referenceCount: 0,
     });
+    const deleteSql = pg.queries.find((query) => query.startsWith("with deleted as"));
+    assert.match(deleteSql ?? "", /count\(\*\).* - case when exists\(select 1 from deleted\)/u);
     assert.deepEqual(await store.listTrackedSubjects("venus-core"), []);
   });
 
