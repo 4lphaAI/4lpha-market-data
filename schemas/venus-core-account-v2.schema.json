@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://4lpha.dev/schemas/venus-core-account-v2.schema.json",
+  "title": "Venus Core Account Snapshot v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "chainId", "pool", "owner", "status", "block", "observedAt", "contracts", "eMode", "vaiDebt", "protocolSnapshot", "fullyAccruedEstimate", "wakeRiskHealthFactor", "wakeRiskStatus", "economicLiquidationCondition", "positions", "unavailable"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "chainId": { "const": 56 },
+    "pool": { "const": "core" },
+    "owner": { "$ref": "#/$defs/address" },
+    "status": { "enum": ["available", "unsupported", "unavailable"] },
+    "block": { "$ref": "#/$defs/block" },
+    "observedAt": { "type": "integer", "minimum": 0 },
+    "contracts": { "$ref": "#/$defs/contracts" },
+    "eMode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["userPoolId", "label", "active", "allowCorePoolFallback", "supported"],
+      "properties": {
+        "userPoolId": { "$ref": "#/$defs/uint" },
+        "label": { "type": "string" },
+        "active": { "type": "boolean" },
+        "allowCorePoolFallback": { "type": "boolean" },
+        "supported": { "type": "boolean" }
+      }
+    },
+    "vaiDebt": { "$ref": "#/$defs/exact" },
+    "protocolSnapshot": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/protocolSnapshot" }] },
+    "fullyAccruedEstimate": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/accrued" }] },
+    "wakeRiskHealthFactor": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/exact" }] },
+    "wakeRiskStatus": { "enum": ["available", "unavailable"] },
+    "economicLiquidationCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["protocolShortfall", "forcedMarket", "forcedVai", "effective"],
+      "properties": {
+        "protocolShortfall": { "type": "boolean" },
+        "forcedMarket": { "type": "boolean" },
+        "forcedVai": { "type": "boolean" },
+        "effective": { "type": "boolean" }
+      }
+    },
+    "positions": { "type": "array", "items": { "$ref": "#/$defs/position" } },
+    "unavailable": { "type": "array", "items": { "$ref": "#/$defs/unavailable" } }
+  },
+  "$defs": {
+    "uint": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" },
+    "address": { "type": "string", "pattern": "^0x[0-9a-f]{40}$" },
+    "hash": { "type": "string", "pattern": "^0x[0-9a-f]{64}$" },
+    "exact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "decimals"],
+      "properties": { "value": { "$ref": "#/$defs/uint" }, "decimals": { "type": "integer", "minimum": 0, "maximum": 255 } }
+    },
+    "block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "hash", "timestamp"],
+      "properties": { "number": { "$ref": "#/$defs/uint" }, "hash": { "$ref": "#/$defs/hash" }, "timestamp": { "$ref": "#/$defs/uint" } }
+    },
+    "contracts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comptroller", "oracle", "deviationBoundedOracle", "vaiController", "xvs", "primeV2"],
+      "properties": {
+        "comptroller": { "$ref": "#/$defs/address" }, "oracle": { "$ref": "#/$defs/address" },
+        "deviationBoundedOracle": { "$ref": "#/$defs/address" }, "vaiController": { "$ref": "#/$defs/address" },
+        "xvs": { "$ref": "#/$defs/address" }, "primeV2": { "$ref": "#/$defs/address" }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collateral", "debt", "liquidity", "shortfall", "healthFactor"],
+      "properties": {
+        "collateral": { "$ref": "#/$defs/exact" }, "debt": { "$ref": "#/$defs/exact" },
+        "liquidity": { "$ref": "#/$defs/exact" }, "shortfall": { "$ref": "#/$defs/exact" },
+        "healthFactor": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/exact" }] }
+      }
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["errorCode", "liquidity", "shortfall", "matched"],
+      "properties": {
+        "errorCode": { "$ref": "#/$defs/uint" }, "liquidity": { "$ref": "#/$defs/exact" },
+        "shortfall": { "$ref": "#/$defs/exact" }, "matched": { "type": "boolean" }
+      }
+    },
+    "protocolSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["borrowingPower", "liquidationRisk", "borrowingPowerCheck", "liquidationCheck"],
+      "properties": {
+        "borrowingPower": { "$ref": "#/$defs/risk" }, "liquidationRisk": { "$ref": "#/$defs/risk" },
+        "borrowingPowerCheck": { "$ref": "#/$defs/check" }, "liquidationCheck": { "$ref": "#/$defs/check" }
+      }
+    },
+    "accrued": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["borrowingPower", "liquidationRisk", "kind"],
+      "properties": { "borrowingPower": { "$ref": "#/$defs/risk" }, "liquidationRisk": { "$ref": "#/$defs/risk" }, "kind": { "const": "fully_accrued_estimate" } }
+    },
+    "factorSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collateralFactor", "liquidationThreshold", "liquidationIncentive"],
+      "properties": { "collateralFactor": { "$ref": "#/$defs/exact" }, "liquidationThreshold": { "$ref": "#/$defs/exact" }, "liquidationIncentive": { "$ref": "#/$defs/exact" } }
+    },
+    "position": {
+      "type": "object",
+      "required": ["vToken", "vTokenSymbol", "vTokenDecimals", "underlying", "collateralMember", "vTokenBalance", "suppliedUnderlyingStored", "suppliedUnderlyingCurrent", "borrowStored", "borrowCurrent", "prices", "coreFactors", "effectiveFactors", "listed", "borrowAllowed", "forcedLiquidation"],
+      "properties": {
+        "vToken": { "$ref": "#/$defs/address" }, "vTokenSymbol": { "type": "string" }, "vTokenDecimals": { "type": "integer" },
+        "underlying": { "type": "object" }, "collateralMember": { "type": "boolean" },
+        "vTokenBalance": { "$ref": "#/$defs/exact" }, "suppliedUnderlyingStored": { "$ref": "#/$defs/exact" },
+        "suppliedUnderlyingCurrent": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/exact" }] },
+        "borrowStored": { "$ref": "#/$defs/exact" }, "borrowCurrent": { "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/exact" }] },
+        "prices": { "type": "object" }, "coreFactors": { "$ref": "#/$defs/factorSet" }, "effectiveFactors": { "$ref": "#/$defs/factorSet" },
+        "listed": { "type": "boolean" }, "borrowAllowed": { "type": "boolean" }, "forcedLiquidation": { "type": "object" }
+      }
+    },
+    "unavailable": {
+      "type": "object",
+      "required": ["code", "scope"],
+      "properties": { "code": { "type": "string" }, "scope": { "enum": ["account", "market", "reward", "block"] }, "market": { "$ref": "#/$defs/address" } }
+    }
+  }
+}

@@ -193,3 +193,49 @@ describe("PostgresStore job health", () => {
     assert.equal(pg.ended, true);
   });
 });
+
+describe("PostgresStore tracking references and leases", () => {
+  it("enforces the distinct-subject cap while allowing another reference", async () => {
+    const { store } = await build();
+    assert.deepEqual(await store.addTrackingReference("venus-core", "0x01", "agent-a", 1), {
+      accepted: true,
+      created: true,
+      referenceCount: 1,
+    });
+    assert.deepEqual(await store.addTrackingReference("venus-core", "0x01", "agent-b", 1), {
+      accepted: true,
+      created: true,
+      referenceCount: 2,
+    });
+    assert.deepEqual(await store.addTrackingReference("venus-core", "0x02", "agent-a", 1), {
+      accepted: false,
+      created: false,
+      referenceCount: 0,
+    });
+    assert.deepEqual(await store.listTrackedSubjects("venus-core"), ["0x01"]);
+  });
+
+  it("removes only the named reference and drops the subject after the last", async () => {
+    const { store } = await build();
+    await store.addTrackingReference("venus-core", "0x01", "a", 10);
+    await store.addTrackingReference("venus-core", "0x01", "b", 10);
+    assert.deepEqual(await store.removeTrackingReference("venus-core", "0x01", "a"), {
+      removed: true,
+      referenceCount: 1,
+    });
+    assert.deepEqual(await store.removeTrackingReference("venus-core", "0x01", "b"), {
+      removed: true,
+      referenceCount: 0,
+    });
+    assert.deepEqual(await store.listTrackedSubjects("venus-core"), []);
+  });
+
+  it("holds a lease against another replica until it expires", async () => {
+    let now = 1_000_000;
+    const { store } = await build({ now: () => now });
+    assert.equal(await store.acquireSchedulerLease("venus", "replica-a", 10_000), true);
+    assert.equal(await store.acquireSchedulerLease("venus", "replica-b", 10_000), false);
+    now += 10_001;
+    assert.equal(await store.acquireSchedulerLease("venus", "replica-b", 10_000), true);
+  });
+});

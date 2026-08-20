@@ -3,6 +3,15 @@ import { Hono } from "hono";
 import type { Scheduler } from "./core/scheduler.js";
 import type { SnapshotStore } from "./core/store.js";
 import type { Lane, PoolStats, PoolTier, TokenSnapshot, VenusHealth } from "./core/models.js";
+import {
+  VENUS_CORE_MARKETS_KEY,
+  VENUS_TRACKING_NAMESPACE,
+  venusCoreAccountKey,
+  venusCoreRewardsKey,
+  type VenusCoreAccountSnapshotV2,
+  type VenusCoreMarketsSnapshotV1,
+  type VenusCoreRewardsSnapshotV2,
+} from "./core/venus.js";
 import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
 import { getSecurity } from "./query/security.js";
@@ -21,11 +30,18 @@ import {
   readStoredPools,
 } from "./jobs/pancakePools.js";
 import { venusKey } from "./jobs/venusHealth.js";
+import {
+  VENUS_CORE_CAPACITY,
+  refreshVenusRewards,
+  refreshVenusRisk,
+} from "./jobs/venusCore.js";
 
 /** Collaborators the HTTP layer reads from. Injected so the app stays testable. */
 export interface ServerDeps {
   scheduler: Scheduler;
   store: SnapshotStore;
+  refreshVenusRisk?: typeof refreshVenusRisk;
+  refreshVenusRewards?: typeof refreshVenusRewards;
 }
 
 const LANES: Lane[] = ["meme", "coins", "bstocks"];
@@ -47,13 +63,15 @@ const SNAPSHOT_KEY_PREFIXES = [
   "pools:",
   "origins:",
   "pancake:",
-  "venus:",
 ];
 
 function isAllowedSnapshotKey(key: string): boolean {
-  return SNAPSHOT_KEY_PREFIXES.some((prefix) =>
-    prefix.endsWith(":") ? key.startsWith(prefix) : key === prefix,
-  );
+  if (SNAPSHOT_KEY_PREFIXES.some((prefix) => prefix.endsWith(":") ? key.startsWith(prefix) : key === prefix)) {
+    return true;
+  }
+  return key === VENUS_CORE_MARKETS_KEY ||
+    /^venus:0x[0-9a-f]{40}$/u.test(key) ||
+    /^venus:core:(?:account|rewards):v2:0x[0-9a-f]{40}$/u.test(key);
 }
 
 function isLane(value: string): value is Lane {
@@ -87,6 +105,7 @@ const STATUS_SNAPSHOT_KEYS = [
   "universe:coins",
   "universe:pools",
   "pools:index",
+  VENUS_CORE_MARKETS_KEY,
 ];
 
 /** Fields `/pools/top` will sort by. */
@@ -294,6 +313,9 @@ export function createServer(deps: ServerDeps): Hono {
   // requires the x-dp-token header. Read per request so tests can flip it.
   app.use("*", async (c, next) => {
     const expected = process.env["DP_AUTH_TOKEN"]?.trim() ?? "";
+    if (c.req.path.startsWith("/internal/") && expected === "") {
+      return c.json({ error: { code: "auth_not_configured" } }, 503);
+    }
     if (expected === "" || c.req.path === "/health") return next();
     const provided = c.req.header("x-dp-token") ?? "";
     if (!tokenMatches(provided, expected)) {
@@ -780,7 +802,95 @@ export function createServer(deps: ServerDeps): Hono {
 
     return c.json({
       data: record.data,
+      meta: {
+        asOf: record.asOf,
+        source: record.source,
+        staleness: record.staleness,
+        deprecated: true,
+        replacement: `/venus/core/accounts/${owner}`,
+      },
+    });
+  });
+
+  app.get("/venus/core/markets", async (c) => {
+    const record = await deps.store.get<VenusCoreMarketsSnapshotV1>(VENUS_CORE_MARKETS_KEY);
+    if (record === null) {
+      return c.json({ data: { status: "pending" }, meta: { staleness: null } }, 202);
+    }
+    return c.json({
+      data: record.data,
       meta: { asOf: record.asOf, source: record.source, staleness: record.staleness },
+    });
+  });
+
+  app.get("/venus/core/accounts/:owner/rewards", async (c) => {
+    const owner = normalizeAddress(c.req.param("owner"));
+    if (owner === null) return c.json({ error: { code: "invalid_address" } }, 400);
+    const tracked = (await deps.store.listTrackedSubjects(VENUS_TRACKING_NAMESPACE)).includes(owner);
+    if (!tracked) return c.json({ error: { code: "not_found" } }, 404);
+    const record = await deps.store.get<VenusCoreRewardsSnapshotV2>(venusCoreRewardsKey(owner));
+    if (record === null) return c.json({ data: { owner, status: "pending" }, meta: { staleness: null } }, 202);
+    return c.json({ data: record.data, meta: { asOf: record.asOf, source: record.source, staleness: record.staleness } });
+  });
+
+  app.get("/venus/core/accounts/:owner", async (c) => {
+    const owner = normalizeAddress(c.req.param("owner"));
+    if (owner === null) return c.json({ error: { code: "invalid_address" } }, 400);
+    const tracked = (await deps.store.listTrackedSubjects(VENUS_TRACKING_NAMESPACE)).includes(owner);
+    if (!tracked) return c.json({ error: { code: "not_found" } }, 404);
+    const record = await deps.store.get<VenusCoreAccountSnapshotV2>(venusCoreAccountKey(owner));
+    if (record === null) return c.json({ data: { owner, status: "pending" }, meta: { staleness: null } }, 202);
+    return c.json({ data: record.data, meta: { asOf: record.asOf, source: record.source, staleness: record.staleness } });
+  });
+
+  app.put("/internal/venus/core/tracked-owners/:owner/:reference", async (c) => {
+    const owner = normalizeAddress(c.req.param("owner"));
+    if (owner === null) return c.json({ error: { code: "invalid_address" } }, 400);
+    const reference = c.req.param("reference");
+    if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(reference)) {
+      return c.json({ error: { code: "invalid_reference" } }, 400);
+    }
+    const added = await deps.store.addTrackingReference(
+      VENUS_TRACKING_NAMESPACE,
+      owner,
+      reference,
+      VENUS_CORE_CAPACITY,
+    );
+    if (!added.accepted) return c.json({ error: { code: "capacity_exceeded" } }, 409);
+    const risk = (deps.refreshVenusRisk ?? refreshVenusRisk)(deps.store, owner, AbortSignal.timeout(12_000));
+    const rewards = (deps.refreshVenusRewards ?? refreshVenusRewards)(deps.store, owner, AbortSignal.timeout(15_000));
+    const [riskResult, rewardsResult] = await Promise.allSettled([risk, rewards]);
+    const ready = riskResult.status === "fulfilled";
+    return c.json({
+      data: {
+        owner,
+        reference,
+        created: added.created,
+        referenceCount: added.referenceCount,
+        tracked: true,
+        snapshotStatus: ready ? riskResult.value.status : "pending",
+        rewardsStatus: rewardsResult.status === "fulfilled" ? rewardsResult.value.status : "pending",
+      },
+      meta: { capacity: VENUS_CORE_CAPACITY },
+    }, ready ? (added.created ? 201 : 200) : 202);
+  });
+
+  app.delete("/internal/venus/core/tracked-owners/:owner/:reference", async (c) => {
+    const owner = normalizeAddress(c.req.param("owner"));
+    if (owner === null) return c.json({ error: { code: "invalid_address" } }, 400);
+    const reference = c.req.param("reference");
+    if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(reference)) {
+      return c.json({ error: { code: "invalid_reference" } }, 400);
+    }
+    const removed = await deps.store.removeTrackingReference(VENUS_TRACKING_NAMESPACE, owner, reference);
+    return c.json({
+      data: {
+        owner,
+        reference,
+        removed: removed.removed,
+        referenceCount: removed.referenceCount,
+        tracked: removed.referenceCount > 0,
+      },
     });
   });
 

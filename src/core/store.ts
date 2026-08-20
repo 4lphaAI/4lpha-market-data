@@ -1,5 +1,6 @@
 // `pg` is CommonJS and does not expose statically analysable named exports, so
 // the runtime value comes from the default import while types come from `type`.
+import { createHash } from "node:crypto";
 import pgPkg from "pg";
 import type { QueryResultRow } from "pg";
 import type { DataRecord, JobHealth, Staleness } from "./types.js";
@@ -25,7 +26,27 @@ export interface SnapshotStore {
   get<T>(key: string): Promise<DataRecord<T> | null>;
   putJobHealth(h: JobHealth): Promise<void>;
   getJobHealth(): Promise<JobHealth[]>;
+  addTrackingReference(
+    namespace: string,
+    subject: string,
+    reference: string,
+    capacity: number,
+  ): Promise<TrackingAddResult>;
+  removeTrackingReference(namespace: string, subject: string, reference: string): Promise<TrackingRemoveResult>;
+  listTrackedSubjects(namespace: string): Promise<string[]>;
+  acquireSchedulerLease(lease: string, holder: string, ttlMs: number): Promise<boolean>;
   close(): Promise<void>;
+}
+
+export interface TrackingAddResult {
+  accepted: boolean;
+  created: boolean;
+  referenceCount: number;
+}
+
+export interface TrackingRemoveResult {
+  removed: boolean;
+  referenceCount: number;
 }
 
 /** Injectable time source; defaults to `Date.now` everywhere. */
@@ -72,6 +93,8 @@ interface MemoryEntry {
 export class MemoryStore implements SnapshotStore {
   readonly #snapshots = new Map<string, MemoryEntry>();
   readonly #jobHealth = new Map<string, JobHealth>();
+  readonly #tracking = new Map<string, Map<string, Set<string>>>();
+  readonly #leases = new Map<string, { holder: string; expiresAt: number }>();
   readonly #now: Clock;
 
   constructor(now: Clock = Date.now) {
@@ -109,9 +132,58 @@ export class MemoryStore implements SnapshotStore {
       .sort((a, b) => a.job.localeCompare(b.job));
   }
 
+  async addTrackingReference(
+    namespace: string,
+    subject: string,
+    reference: string,
+    capacity: number,
+  ): Promise<TrackingAddResult> {
+    let subjects = this.#tracking.get(namespace);
+    if (subjects === undefined) {
+      subjects = new Map();
+      this.#tracking.set(namespace, subjects);
+    }
+    let references = subjects.get(subject);
+    if (references === undefined) {
+      if (subjects.size >= capacity) return { accepted: false, created: false, referenceCount: 0 };
+      references = new Set();
+      subjects.set(subject, references);
+    }
+    const size = references.size;
+    references.add(reference);
+    return { accepted: true, created: references.size !== size, referenceCount: references.size };
+  }
+
+  async removeTrackingReference(
+    namespace: string,
+    subject: string,
+    reference: string,
+  ): Promise<TrackingRemoveResult> {
+    const subjects = this.#tracking.get(namespace);
+    const references = subjects?.get(subject);
+    if (references === undefined) return { removed: false, referenceCount: 0 };
+    const removed = references.delete(reference);
+    if (references.size === 0) subjects?.delete(subject);
+    return { removed, referenceCount: references.size };
+  }
+
+  async listTrackedSubjects(namespace: string): Promise<string[]> {
+    return [...(this.#tracking.get(namespace)?.keys() ?? [])].sort();
+  }
+
+  async acquireSchedulerLease(lease: string, holder: string, ttlMs: number): Promise<boolean> {
+    const current = this.#leases.get(lease);
+    const now = this.#now();
+    if (current !== undefined && current.holder !== holder && current.expiresAt > now) return false;
+    this.#leases.set(lease, { holder, expiresAt: now + ttlMs });
+    return true;
+  }
+
   async close(): Promise<void> {
     this.#snapshots.clear();
     this.#jobHealth.clear();
+    this.#tracking.clear();
+    this.#leases.clear();
   }
 }
 
@@ -176,6 +248,31 @@ const JOB_HEALTH_DDL = `
   )
 `;
 
+const TRACKING_DDL = `
+  create table if not exists dp_tracking_references (
+    id text primary key,
+    namespace text not null,
+    subject text not null,
+    reference text not null,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+  )
+`;
+
+const TRACKING_INDEX_DDL = `
+  create index if not exists dp_tracking_namespace_subject_idx
+    on dp_tracking_references (namespace, subject)
+`;
+
+const LEASE_DDL = `
+  create table if not exists dp_scheduler_leases (
+    lease text primary key,
+    holder text not null,
+    expires_at timestamptz not null,
+    updated_at timestamptz not null default now()
+  )
+`;
+
 /**
  * The slice of `pg.Pool` this store actually uses.
  *
@@ -221,6 +318,9 @@ export class PostgresStore implements SnapshotStore {
       await pool.query(SNAPSHOT_DDL);
       await pool.query(SNAPSHOT_MIGRATION_DDL);
       await pool.query(JOB_HEALTH_DDL);
+      await pool.query(TRACKING_DDL);
+      await pool.query(TRACKING_INDEX_DDL);
+      await pool.query(LEASE_DDL);
     } catch (error) {
       // The pool is closed rather than left dangling: `create` is the only path
       // that owns it, so a caller that never receives the store cannot close it.
@@ -308,9 +408,95 @@ export class PostgresStore implements SnapshotStore {
     }));
   }
 
+  async addTrackingReference(
+    namespace: string,
+    subject: string,
+    reference: string,
+    capacity: number,
+  ): Promise<TrackingAddResult> {
+    const id = trackingId(namespace, subject, reference);
+    const result = await this.#pool.query<{
+      accepted: boolean;
+      created: boolean;
+      reference_count: number | string;
+    }>(
+      `with tracking_lock as (
+         select pg_advisory_xact_lock(hashtext($1))
+       ), accepted as (
+         select exists (
+           select 1 from dp_tracking_references where namespace = $1 and subject = $2
+         ) or (
+           select count(distinct subject) < $5 from dp_tracking_references where namespace = $1
+         ) as ok
+         from tracking_lock
+       ), inserted as (
+         insert into dp_tracking_references (id, namespace, subject, reference, created_at, updated_at)
+         select $4, $1, $2, $3, $6, now() from accepted where ok
+         on conflict (id) do nothing
+         returning id
+       )
+       select
+         (select ok from accepted) as accepted,
+         exists(select 1 from inserted) as created,
+         (select count(*) from dp_tracking_references where namespace = $1 and subject = $2)
+           + case when exists(select 1 from inserted) then 1 else 0 end as reference_count`,
+      [namespace, subject, reference, id, capacity, new Date(this.#now())],
+    );
+    const row = result.rows[0];
+    if (row === undefined) return { accepted: false, created: false, referenceCount: 0 };
+    return { accepted: row.accepted, created: row.created, referenceCount: Number(row.reference_count) };
+  }
+
+  async removeTrackingReference(
+    namespace: string,
+    subject: string,
+    reference: string,
+  ): Promise<TrackingRemoveResult> {
+    const result = await this.#pool.query<{ removed: boolean; reference_count: number | string }>(
+      `with deleted as (
+         delete from dp_tracking_references where id = $1 returning id
+       )
+       select
+         exists(select 1 from deleted) as removed,
+         (select count(*) from dp_tracking_references where namespace = $2 and subject = $3) as reference_count`,
+      [trackingId(namespace, subject, reference), namespace, subject],
+    );
+    const row = result.rows[0];
+    return { removed: row?.removed ?? false, referenceCount: Number(row?.reference_count ?? 0) };
+  }
+
+  async listTrackedSubjects(namespace: string): Promise<string[]> {
+    const result = await this.#pool.query<{ subject: string }>(
+      `select distinct subject from dp_tracking_references where namespace = $1 order by subject asc`,
+      [namespace],
+    );
+    return result.rows.map((row) => row.subject);
+  }
+
+  async acquireSchedulerLease(lease: string, holder: string, ttlMs: number): Promise<boolean> {
+    const now = this.#now();
+    const result = await this.#pool.query<{ holder: string }>(
+      `insert into dp_scheduler_leases (lease, holder, expires_at, updated_at)
+       values ($1, $2, $3, now())
+       on conflict (lease) do update set
+         holder = excluded.holder,
+         expires_at = excluded.expires_at,
+         updated_at = now()
+       where dp_scheduler_leases.holder = excluded.holder
+          or dp_scheduler_leases.expires_at <= $4
+       returning holder`,
+      [lease, holder, new Date(now + ttlMs), new Date(now)],
+    );
+    return result.rows[0]?.holder === holder;
+  }
+
   async close(): Promise<void> {
     await this.#pool.end();
   }
+}
+
+function trackingId(namespace: string, subject: string, reference: string): string {
+  return createHash("sha256").update(namespace).update("\0").update(subject).update("\0").update(reference).digest("hex");
 }
 
 /**

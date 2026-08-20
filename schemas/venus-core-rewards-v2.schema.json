@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://4lpha.dev/schemas/venus-core-rewards-v2.schema.json",
+  "title": "Venus Core Rewards Snapshot v2",
+  "type": "object",
+  "required": ["schemaVersion", "chainId", "pool", "owner", "status", "block", "observedAt", "contracts", "primeHolder", "rewards", "unavailable"],
+  "properties": {
+    "schemaVersion": { "const": 2 }, "chainId": { "const": 56 }, "pool": { "const": "core" },
+    "owner": { "type": "string", "pattern": "^0x[0-9a-f]{40}$" },
+    "status": { "enum": ["available", "unsupported", "unavailable"] },
+    "block": { "type": "object" }, "observedAt": { "type": "integer" }, "contracts": { "type": "object" },
+    "primeHolder": { "type": "boolean" },
+    "rewards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["mechanism", "distributor", "rewardToken", "rewardTokenSymbol", "rewardTokenDecimals", "vToken", "markets", "entitlement", "payoutNow", "remainingAfterSimulatedClaim", "claimAvailable", "claimStatus"],
+        "properties": {
+          "mechanism": { "enum": ["xvs", "prime-v2"] }, "distributor": { "type": "string" },
+          "rewardToken": { "type": "string" }, "rewardTokenSymbol": { "type": "string" }, "rewardTokenDecimals": { "type": "integer" },
+          "vToken": { "type": ["string", "null"] },
+          "markets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["vToken", "entitlement"],
+              "properties": { "vToken": { "type": "string" }, "entitlement": { "$ref": "#/$defs/exact" } }
+            }
+          },
+          "entitlement": { "$ref": "#/$defs/exact" },
+          "payoutNow": { "$ref": "#/$defs/exact" }, "remainingAfterSimulatedClaim": { "$ref": "#/$defs/exact" },
+          "claimAvailable": { "type": "boolean" }, "claimStatus": { "type": "string" }
+        }
+      }
+    },
+    "unavailable": { "type": "array" }
+  },
+  "$defs": {
+    "exact": {
+      "type": "object", "required": ["value", "decimals"],
+      "properties": { "value": { "type": "string", "pattern": "^(0|[1-9][0-9]*)$" }, "decimals": { "type": "integer", "minimum": 0 } }
+    }
+  }
+}

@@ -8,7 +8,12 @@ import { binanceUniverseJob } from "./jobs/binanceUniverse.js";
 import { flapLaunchesJob } from "./jobs/flapLaunches.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { pancakePoolsJob } from "./jobs/pancakePools.js";
-import { venusHealthHotJob, venusHealthJob } from "./jobs/venusHealth.js";
+import {
+  venusCoreHotJob,
+  venusCoreMarketsJob,
+  venusCoreRewardsJob,
+  venusCoreRiskJob,
+} from "./jobs/venusCore.js";
 
 loadDotEnv();
 
@@ -49,9 +54,11 @@ scheduler.register(flapLaunchesJob(store));
 scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
 scheduler.register(pancakePoolsJob(store));
-// Both Venus jobs no-op until an operator writes `tracked:venus-owners`.
-scheduler.register(venusHealthJob(store));
-scheduler.register(venusHealthHotJob(store));
+// Venus Core v2: independent catalog, risk, hot-risk and reward producers.
+scheduler.register(venusCoreMarketsJob(store));
+scheduler.register(venusCoreRiskJob(store));
+scheduler.register(venusCoreHotJob(store));
+scheduler.register(venusCoreRewardsJob(store));
 
 scheduler.start();
 

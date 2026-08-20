@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://4lpha.dev/schemas/venus-core-markets-v1.schema.json",
+  "title": "Venus Core Markets Snapshot v1",
+  "type": "object",
+  "required": ["schemaVersion", "chainId", "pool", "block", "observedAt", "contracts", "protocolPaused", "vai", "markets", "eModePools"],
+  "properties": {
+    "schemaVersion": { "const": 1 }, "chainId": { "const": 56 }, "pool": { "const": "core" },
+    "block": { "type": "object" }, "observedAt": { "type": "integer" }, "contracts": { "type": "object" },
+    "protocolPaused": { "type": "boolean" },
+    "vai": { "type": "object", "required": ["mintPaused", "repayPaused"] },
+    "markets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["vToken", "underlying", "listed", "borrowAllowed", "coreFactors", "prices", "supplyCap", "borrowCap", "actionPaused", "supplyRatePerBlock", "borrowRatePerBlock", "reserveFactor"]
+      }
+    },
+    "eModePools": {
+      "type": "array",
+      "items": { "type": "object", "required": ["poolId", "label", "active", "allowCorePoolFallback", "markets"] }
+    }
+  }
+}

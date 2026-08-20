@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 2,
+  "chainId": 56,
+  "pool": "core",
+  "owner": "0x1000000000000000000000000000000000000001",
+  "status": "available",
+  "block": {
+    "number": "117018069",
+    "hash": "0xaf5a032092138a23f6d90c870348c54a4ed5387341a43787395e2465c4f08526",
+    "timestamp": "1787218941"
+  },
+  "observedAt": 1787218941000,
+  "contracts": {
+    "comptroller": "0xfd36e2c2a6789db23113685031d7f16329158384",
+    "oracle": "0x6592b5de802159f3e74b2486b091d11a8256ab8a",
+    "deviationBoundedOracle": "0xc79cb7efebd121dc4b39ea141c214606595d665a",
+    "vaiController": "0x004065d34c6b18ce4370ced1cebde94865dbfafe",
+    "xvs": "0xcf6bb5389c92bdda8a3747ddb454cb7a64626c63",
+    "primeV2": "0x059eaba8676b03e4e8f009efb7f587c28450f50f"
+  },
+  "eMode": {
+    "userPoolId": "0",
+    "label": "Core",
+    "active": true,
+    "allowCorePoolFallback": true,
+    "supported": true
+  },
+  "vaiDebt": { "value": "0", "decimals": 18 },
+  "protocolSnapshot": {
+    "borrowingPower": {
+      "collateral": { "value": "0", "decimals": 18 },
+      "debt": { "value": "0", "decimals": 18 },
+      "liquidity": { "value": "0", "decimals": 18 },
+      "shortfall": { "value": "0", "decimals": 18 },
+      "healthFactor": null
+    },
+    "liquidationRisk": {
+      "collateral": { "value": "0", "decimals": 18 },
+      "debt": { "value": "0", "decimals": 18 },
+      "liquidity": { "value": "0", "decimals": 18 },
+      "shortfall": { "value": "0", "decimals": 18 },
+      "healthFactor": null
+    },
+    "borrowingPowerCheck": {
+      "errorCode": "0",
+      "liquidity": { "value": "0", "decimals": 18 },
+      "shortfall": { "value": "0", "decimals": 18 },
+      "matched": true
+    },
+    "liquidationCheck": {
+      "errorCode": "0",
+      "liquidity": { "value": "0", "decimals": 18 },
+      "shortfall": { "value": "0", "decimals": 18 },
+      "matched": true
+    }
+  },
+  "fullyAccruedEstimate": {
+    "borrowingPower": {
+      "collateral": { "value": "0", "decimals": 18 },
+      "debt": { "value": "0", "decimals": 18 },
+      "liquidity": { "value": "0", "decimals": 18 },
+      "shortfall": { "value": "0", "decimals": 18 },
+      "healthFactor": null
+    },
+    "liquidationRisk": {
+      "collateral": { "value": "0", "decimals": 18 },
+      "debt": { "value": "0", "decimals": 18 },
+      "liquidity": { "value": "0", "decimals": 18 },
+      "shortfall": { "value": "0", "decimals": 18 },
+      "healthFactor": null
+    },
+    "kind": "fully_accrued_estimate"
+  },
+  "wakeRiskHealthFactor": null,
+  "wakeRiskStatus": "available",
+  "economicLiquidationCondition": {
+    "protocolShortfall": false,
+    "forcedMarket": false,
+    "forcedVai": false,
+    "effective": false
+  },
+  "positions": [],
+  "unavailable": []
+}

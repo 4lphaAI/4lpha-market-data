@@ -75,7 +75,18 @@ export class FakePg implements SqlClient {
     if (failure !== null && failure !== undefined) throw failure;
 
     const lowered = text.toLowerCase();
+    if (lowered.startsWith("with tracking_lock as")) return { rows: this.#addTracking(params) as T[] };
+    if (lowered.startsWith("with deleted as") && lowered.includes("dp_tracking_references")) {
+      return { rows: this.#removeTracking(params) as T[] };
+    }
+    if (lowered.startsWith("select distinct subject from dp_tracking_references")) {
+      return { rows: this.#listTracked(params) as T[] };
+    }
+    if (lowered.startsWith("insert into dp_scheduler_leases")) {
+      return { rows: this.#acquireLease(params) as T[] };
+    }
     if (lowered.startsWith("create table")) return { rows: this.#createTable(text) as T[] };
+    if (lowered.startsWith("create index")) return { rows: [] };
     if (lowered.startsWith("alter table")) return { rows: this.#alterTable(text) as T[] };
     if (lowered.startsWith("insert into")) return { rows: this.#insert(text, params) as T[] };
     if (lowered.startsWith("select")) return { rows: this.#select(text, params) as T[] };
@@ -191,6 +202,70 @@ export class FakePg implements SqlClient {
       }
       return projected;
     });
+  }
+
+  #addTracking(params: unknown[]): Array<Record<string, unknown>> {
+    const table = this.#tables.get("dp_tracking_references");
+    if (table === undefined) throw new Error('fake-pg: relation "dp_tracking_references" does not exist');
+    const [namespace, subject, reference, id, capacity, createdAt] = params;
+    const rows = [...table.rows.values()];
+    const subjectExists = rows.some((row) => row["namespace"] === namespace && row["subject"] === subject);
+    const distinctSubjects = new Set(
+      rows.filter((row) => row["namespace"] === namespace).map((row) => String(row["subject"])),
+    ).size;
+    const accepted = subjectExists || distinctSubjects < Number(capacity);
+    const key = String(id);
+    const created = accepted && !table.rows.has(key);
+    if (created) {
+      table.rows.set(key, {
+        id,
+        namespace,
+        subject,
+        reference,
+        created_at: createdAt,
+        updated_at: new Date(),
+      });
+    }
+    const referenceCount = [...table.rows.values()].filter(
+      (row) => row["namespace"] === namespace && row["subject"] === subject,
+    ).length;
+    return [{ accepted, created, reference_count: String(referenceCount) }];
+  }
+
+  #removeTracking(params: unknown[]): Array<Record<string, unknown>> {
+    const table = this.#tables.get("dp_tracking_references");
+    if (table === undefined) throw new Error('fake-pg: relation "dp_tracking_references" does not exist');
+    const [id, namespace, subject] = params;
+    const removed = table.rows.delete(String(id));
+    const referenceCount = [...table.rows.values()].filter(
+      (row) => row["namespace"] === namespace && row["subject"] === subject,
+    ).length;
+    return [{ removed, reference_count: String(referenceCount) }];
+  }
+
+  #listTracked(params: unknown[]): Array<Record<string, unknown>> {
+    const table = this.#tables.get("dp_tracking_references");
+    if (table === undefined) throw new Error('fake-pg: relation "dp_tracking_references" does not exist');
+    const namespace = params[0];
+    return [...new Set(
+      [...table.rows.values()]
+        .filter((row) => row["namespace"] === namespace)
+        .map((row) => String(row["subject"])),
+    )].sort().map((subject) => ({ subject }));
+  }
+
+  #acquireLease(params: unknown[]): Array<Record<string, unknown>> {
+    const table = this.#tables.get("dp_scheduler_leases");
+    if (table === undefined) throw new Error('fake-pg: relation "dp_scheduler_leases" does not exist');
+    const [lease, holder, expiresAt, now] = params;
+    const key = String(lease);
+    const existing = table.rows.get(key);
+    const canAcquire = existing === undefined ||
+      existing["holder"] === holder ||
+      (existing["expires_at"] instanceof Date && now instanceof Date && existing["expires_at"].getTime() <= now.getTime());
+    if (!canAcquire) return [];
+    table.rows.set(key, { lease, holder, expires_at: expiresAt, updated_at: new Date() });
+    return [{ holder }];
   }
 }
 
