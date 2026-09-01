@@ -51,9 +51,22 @@ export function parseInterval(value: string | undefined): KlineInterval | null {
 /** All supported intervals, for docs and validation messages. */
 export const SUPPORTED_INTERVALS = Object.keys(INTERVALS) as KlineInterval[];
 
-export const KLINES_FRESH_FOR_MS = 5 * 60_000;
 export const KLINES_DEAD_AFTER_MS = 60 * 60_000;
 export const MAX_KLINE_LIMIT = 500;
+
+const FRESH_FOR_MS: Record<KlineInterval, number> = {
+  "1m": 20_000,
+  "5m": 60_000,
+  "15m": 2 * 60_000,
+  "1h": 5 * 60_000,
+  "4h": 10 * 60_000,
+  "1d": 30 * 60_000,
+};
+
+/** How long a candle set stays fresh at each chart interval. */
+export function klineFreshForMs(interval: KlineInterval): number {
+  return FRESH_FOR_MS[interval];
+}
 
 export interface GetKlinesParams {
   address: string;
@@ -153,7 +166,7 @@ export async function getKlines(
     const trimmed = candles.slice(-limit);
     await store.put(key, trimmed, {
       source: source.name,
-      freshForMs: KLINES_FRESH_FOR_MS,
+      freshForMs: klineFreshForMs(params.interval),
       deadAfterMs: KLINES_DEAD_AFTER_MS,
     });
     const written = await store.get<Candle[]>(key);

@@ -65,15 +65,16 @@ and exact Venus Core Pool v2 observations read straight from BSC.
 | `fourmeme` | none | meme lane universe + market snapshots |
 | `binanceWeb3` | none | coins lane universe, live quotes, Sintral klines |
 | `onchainos` | `OKX_*` | preferred klines and price-info, primary token-scan |
+| `geckoterminal` | none | exact BSC pool OHLCV for marketplace charts |
 | `gmgn` | `GMGN_API_KEY` | secondary security scan, holder distribution |
 | `pancake` | none | V3 pool state; explorer API, on-chain fallback |
 | `venus` | none (`BSC_RPC_URL*`) | Core Pool health factors |
 
 Kline reads (`src/query/klines.ts`) check the store first and only on a miss walk
-**OnchainOS → Sintral**, writing the first success back (fresh 5 min,
-dead 60 min). If every source fails, a stale stored record is returned rather than
-nothing, and `meta.staleness` says so. Interval translation between the two
-providers' notations lives in that one file.
+**OnchainOS → Sintral**, writing the first success back. Exact-pool reads use
+GeckoTerminal behind the same store. Freshness follows the candle interval (20s
+for 1m through 30min for 1d); if an upstream fails, a stale stored record is
+returned rather than nothing, and `meta.staleness` says so.
 
 ## Security tiering
 
@@ -284,6 +285,7 @@ Every response uses the `{ data, error?, meta? }` envelope.
 | `GET /universe?lane=` | merged `UniverseEntry[]`, `meta.lanes` carries per-lane count and staleness |
 | `GET /tokens/:address` | stored `TokenSnapshot` with `meta.asOf` / `meta.staleness`, 404 when unknown |
 | `GET /klines/:address?interval=1m&limit=100` | `Candle[]`; may hit upstream on a miss. `interval` ∈ 1m,5m,15m,1h,4h,1d; `limit` 1..500 |
+| `GET /pools/:address/ohlcv?interval=1m&limit=300` | exact-pool `Candle[]` from GeckoTerminal with base/quote metadata; same interval set, `limit` 1..500 |
 | `GET /security/:address?lane=` | merged `TokenSecuritySummary`; `meta.sources` carries each scanner's own verdict. `lane` defaults from the universe, falling back to `meme`. May hit upstream on a miss; answers `unavailable` rather than erroring |
 | `GET /pools?token=` | stored `PoolStats[]` with staleness; `token` filters on either side of the pair |
 | `GET /venus/:owner` | deprecated compatibility projection; response points to the v2 replacement |

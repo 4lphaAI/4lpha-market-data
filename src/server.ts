@@ -14,6 +14,7 @@ import {
 } from "./core/venus.js";
 import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
+import { getPoolOhlcv } from "./query/poolOhlcv.js";
 import { getSecurity } from "./query/security.js";
 import { getHolders } from "./query/holders.js";
 import { getSocials } from "./query/socials.js";
@@ -728,6 +729,55 @@ export function createServer(deps: ServerDeps): Hono {
     return c.json({
       data: estimateRange(inputs, request, prices, basis),
       meta: { asOf: loaded.asOf, staleness: loaded.staleness, source: "pancake" },
+    });
+  });
+
+  app.get("/pools/:address/ohlcv", async (c) => {
+    const poolAddress = c.req.param("address").toLowerCase();
+    if (!isEvmAddress(poolAddress)) {
+      return c.json({ error: { code: "invalid_address" } }, 400);
+    }
+
+    const interval = parseInterval(c.req.query("interval") ?? "1m");
+    if (interval === null) {
+      return c.json(
+        {
+          error: {
+            code: "invalid_interval",
+            message: `interval must be one of ${SUPPORTED_INTERVALS.join(", ")}`,
+          },
+        },
+        400,
+      );
+    }
+
+    const rawLimit = c.req.query("limit");
+    const limit = rawLimit === undefined ? 300 : Number(rawLimit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_KLINE_LIMIT) {
+      return c.json(
+        { error: { code: "invalid_limit", message: `limit must be an integer 1..${MAX_KLINE_LIMIT}` } },
+        400,
+      );
+    }
+
+    const result = await getPoolOhlcv(deps.store, { poolAddress, interval, limit });
+    if (result === null) {
+      return c.json({ error: { code: "not_found", message: "no pool candles available" } }, 404);
+    }
+
+    return c.json({
+      data: result.candles,
+      meta: {
+        poolAddress: result.poolAddress,
+        interval: result.interval,
+        limit: result.limit,
+        source: result.source,
+        asOf: result.asOf,
+        staleness: result.staleness,
+        count: result.candles.length,
+        base: result.base,
+        quote: result.quote,
+      },
     });
   });
 
