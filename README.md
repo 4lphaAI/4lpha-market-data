@@ -252,7 +252,8 @@ in more than one lane is kept once, with precedence **bstocks > coins > meme**.
 | `fourmeme-ranking` | 30s (±5s) | `universe:meme`, `token:<addr>` |
 | `binance-universe` | 6h | `universe:coins` |
 | `binance-prices` | 60s | `token:<addr>` for the tracked set |
-| `pancake-pools` | 2min | `pool:<addr>`, `pools:index` |
+| `pancake-pools` | 2min | `universe:pools` (the lane), `pool:<addr>` + `pools:index` for the seed set, `origins:launchpad` |
+| `majors-prices` | 30s (±3s) | `token:<addr>` for WBNB, USDT, USDC, BTCB, ETH, CAKE |
 | `venus-core-markets` | 60s | `venus:core:markets:v1` |
 | `venus-core-risk` | 60s | block-pinned account v2 records for up to 1,000 owners |
 | `venus-core-risk-hot` | 15s | conservative near-liquidation owner subset |
@@ -261,6 +262,15 @@ in more than one lane is kept once, with precedence **bstocks > coins > meme**.
 `binance-prices` reads its address set from the `tracked:addresses` snapshot and
 falls back to the bStocks list. Live quotes are range-checked against the stored
 price before being merged, so a bapi glitch cannot poison a snapshot.
+
+`majors-prices` closes the gap the lanes leave: the majors every wallet holds
+are in no universe, so `/tokens/:address` had nothing for them. It reads
+PancakeSwap V3 `slot0` on the deepest pool per major (one multicall per tick),
+anchors **USDT = 1.00 USD** as a stated assumption, and derives the rest in
+bigint from `sqrtPriceX96`. Source is `pancake-v3-slot0`. Writes go through the
+same merge path as every other producer, so a richer snapshot keeps its other
+fields; a pool that fails to read simply leaves its token's record to age.
+Native BNB has no address — consumers price it off WBNB.
 
 Operator-controlled input snapshots, all following that same pattern:
 
@@ -284,10 +294,14 @@ Every response uses the `{ data, error?, meta? }` envelope.
 | `GET /status` | `{ data: { jobs: JobHealth[], startedAt } }` |
 | `GET /universe?lane=` | merged `UniverseEntry[]`, `meta.lanes` carries per-lane count and staleness |
 | `GET /tokens/:address` | stored `TokenSnapshot` with `meta.asOf` / `meta.staleness`, 404 when unknown |
+| `GET /tokens?addresses=a,b,…` | batch of stored `TokenSnapshot`s, each carrying its own `asOf`/`source`/`staleness`; `meta.found`/`missing`/`invalid`; unknown addresses are omitted, not 404 |
 | `GET /klines/:address?interval=1m&limit=100` | `Candle[]`; may hit upstream on a miss. `interval` ∈ 1m,5m,15m,1h,4h,1d; `limit` 1..500 |
 | `GET /pools/:address/ohlcv?interval=1m&limit=300` | exact-pool `Candle[]` from GeckoTerminal with base/quote metadata; same interval set, `limit` 1..500 |
 | `GET /security/:address?lane=` | merged `TokenSecuritySummary`; `meta.sources` carries each scanner's own verdict. `lane` defaults from the universe, falling back to `meme`. May hit upstream on a miss; answers `unavailable` rather than erroring |
-| `GET /pools?token=` | stored `PoolStats[]` with staleness; `token` filters on either side of the pair |
+| `GET /pools?token=` | stored `PoolStats[]` for the operator-tracked seed set; `token` filters on either side of the pair |
+| `GET /pools/top` | the 500-pool V3 lane filtered and ordered by query: `tier`, `feeTier`, `minTvlUsd`, `maxTvlUsd`, `maxVolTvlRatio`, `minAprPct`, `maxAprPct`, `aprField`, `orderBy`, `token`, `limit`; the plane sets no thresholds, `meta.cap`/`meta.ingestOrder` say so |
+| `GET /pools/:address` | one `PoolStats`, read-through: lane row, then cached `pool:<addr>`, then a live explorer read; `meta.source` names which answered |
+| `GET /pools/:address/range?lower=&upper=&capital=` | position economics for one range: exact `liquidity`/amounts/`feeSharePct`/`inRange`, `positionApr` scaled off the pool's fee APR; `assumptions` and `unavailable` are always stated |
 | `GET /venus/:owner` | deprecated compatibility projection; response points to the v2 replacement |
 | `GET /venus/core/markets` | pinned Core Pool market/risk-control catalog |
 | `GET /venus/core/accounts/:owner` | stored exact protocol risk plus fully-accrued estimate |
