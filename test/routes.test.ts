@@ -6,10 +6,13 @@ import { createServer } from "../src/server.js";
 import { emptyTokenSnapshot } from "../src/core/models.js";
 import { klinesKey } from "../src/query/klines.js";
 import { tokenKey } from "../src/jobs/tokenStore.js";
+import { decimalsKey, type DecimalsReader, type TokenDecimals } from "../src/query/decimals.js";
 import { COINS_UNIVERSE_KEY, MEME_UNIVERSE_KEY } from "../src/universe.js";
 
 const ADDRESS = "0x75fd4cf6f8392e41e70391d60c90c0d5211603a1";
 const MEME_ADDRESS = "0xaa00000000000000000000000000000000000001";
+/** In the frozen allowlist under its `static` source. */
+const USDT = "0x55d398326f99059ff775485246999027b3197955";
 
 const originalFetch = globalThis.fetch;
 
@@ -24,9 +27,17 @@ function blockNetwork(): void {
   }) as typeof globalThis.fetch;
 }
 
-function build(): { app: ReturnType<typeof createServer>; store: MemoryStore } {
+/**
+ * The token route reads `decimals()` through on a cache miss, so every server
+ * here is built with an offline reader. The default reports `unavailable`,
+ * which is the honest "no chain in this process"; tests that care about the
+ * number pass their own.
+ */
+function build(
+  readTokenDecimals: DecimalsReader = async () => ({ kind: "unavailable" }),
+): { app: ReturnType<typeof createServer>; store: MemoryStore } {
   const store = new MemoryStore();
-  const app = createServer({ scheduler: createScheduler(store), store });
+  const app = createServer({ scheduler: createScheduler(store), store, readTokenDecimals });
   return { app, store };
 }
 
@@ -81,6 +92,44 @@ describe("GET /universe", () => {
     await store.close();
   });
 
+  it("serves the frozen allowlist lane in full", async () => {
+    const { app, store } = build();
+    blockNetwork();
+
+    const res = await app.request("/universe?lane=allowlist");
+    assert.equal(res.status, 200);
+
+    const body = envelope(await res.json());
+    const data = body["data"];
+    assert.ok(Array.isArray(data));
+    // 221 of the snapshot's 222: the BNB row is the `"native"` sentinel, which
+    // has no contract address (ALLOWLIST-PRICE-SPEC §2b item 5).
+    assert.equal(data.length, 221);
+
+    const meta = body["meta"];
+    assert.ok(isRecord(meta));
+    assert.equal(meta["total"], 221);
+    assert.equal(meta["lane"], "allowlist");
+    const lanes = meta["lanes"];
+    assert.ok(isRecord(lanes));
+    assert.ok(isRecord(lanes["allowlist"]));
+    assert.equal(lanes["allowlist"]["count"], 221);
+    assert.equal(lanes["allowlist"]["staleness"], "fresh");
+    assert.equal(lanes["allowlist"]["asOf"], null);
+
+    // Each row names its first `sources` entry, and the lane keeps the bStocks
+    // the merged universe would otherwise have claimed for its own lane.
+    assert.deepEqual(
+      data.find((entry) => isRecord(entry) && entry["address"] === USDT),
+      { address: USDT, symbol: "USDT", lane: "allowlist", source: "static" },
+    );
+    assert.deepEqual(
+      data.find((entry) => isRecord(entry) && entry["address"] === ADDRESS),
+      { address: ADDRESS, symbol: "AMDB", lane: "allowlist", source: "bstocks" },
+    );
+    await store.close();
+  });
+
   it("rejects an unknown lane with 400", async () => {
     const { app, store } = build();
     const res = await app.request("/universe?lane=stonks");
@@ -125,6 +174,74 @@ describe("GET /tokens/:address", () => {
     const body = envelope(await malformed.json());
     assert.ok(isRecord(body["error"]));
     assert.equal(body["error"]["code"], "invalid_address");
+    await store.close();
+  });
+
+  it("carries the chain decimals and caches them off the response path", async () => {
+    let reads = 0;
+    const { app, store } = build(async () => {
+      reads += 1;
+      return { kind: "answered", decimals: 6 };
+    });
+    await store.put(tokenKey(ADDRESS), emptyTokenSnapshot(ADDRESS), {
+      source: "binance",
+      freshForMs: 60_000,
+      deadAfterMs: 900_000,
+    });
+
+    const first = envelope(await (await app.request(`/tokens/${ADDRESS}`)).json());
+    assert.ok(isRecord(first["data"]));
+    assert.equal(first["data"]["decimals"], 6);
+    assert.ok(isRecord(first["meta"]));
+    assert.equal(first["meta"]["decimalsSource"], "bsc-rpc");
+    // The snapshot's own provenance is untouched by the added field.
+    assert.equal(first["meta"]["source"], "binance");
+    assert.deepEqual(first["data"]["updatedFields"], []);
+
+    const second = envelope(await (await app.request(`/tokens/${ADDRESS}`)).json());
+    assert.ok(isRecord(second["data"]));
+    assert.equal(second["data"]["decimals"], 6);
+    assert.equal(reads, 1, "second hit must be served from the cache");
+    await store.close();
+  });
+
+  it("serves the rest of the payload when decimals cannot be read", async () => {
+    const { app, store } = build(async () => {
+      throw new Error("all rpc endpoints failed");
+    });
+    await store.put(tokenKey(ADDRESS), { ...emptyTokenSnapshot(ADDRESS), priceUsd: 1.5 }, {
+      source: "binance",
+      freshForMs: 60_000,
+      deadAfterMs: 900_000,
+    });
+
+    const res = await app.request(`/tokens/${ADDRESS}`);
+    assert.equal(res.status, 200);
+    const body = envelope(await res.json());
+    assert.ok(isRecord(body["data"]));
+    assert.equal(body["data"]["decimals"], null);
+    assert.equal(body["data"]["priceUsd"], 1.5);
+    assert.ok(isRecord(body["meta"]));
+    assert.equal(body["meta"]["decimalsSource"], null, "an unread field claims no producer");
+    assert.equal(body["meta"]["staleness"], "fresh");
+    // An outage is not a fact about the token, so it is never cached.
+    assert.equal(await store.get<TokenDecimals>(decimalsKey(ADDRESS)), null);
+    await store.close();
+  });
+
+  it("leaves the batch route's shape alone", async () => {
+    const { app, store } = build(async () => ({ kind: "answered", decimals: 6 }));
+    await store.put(tokenKey(ADDRESS), emptyTokenSnapshot(ADDRESS), {
+      source: "binance",
+      freshForMs: 60_000,
+      deadAfterMs: 900_000,
+    });
+
+    const body = envelope(await (await app.request(`/tokens?addresses=${ADDRESS}`)).json());
+    assert.ok(Array.isArray(body["data"]));
+    const [row] = body["data"];
+    assert.ok(isRecord(row));
+    assert.ok(!("decimals" in row), "decimals belong to the single-token route only");
     await store.close();
   });
 });

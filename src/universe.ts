@@ -5,12 +5,17 @@
  * store; `bstocks` is a fixed, verified list of tokenized US equities that only
  * changes with a code change. Assembly is read-only: a lane whose job has never
  * run simply contributes nothing.
+ *
+ * A fourth lane, `allowlist`, is the frozen `data/eligible-tokens.json`
+ * snapshot; it is reported and served on its own rather than merged into the
+ * three (ALLOWLIST-PRICE-SPEC §2b item 5).
  */
 
 import type { Lane, UniverseEntry } from "./core/models.js";
 import type { SnapshotStore } from "./core/store.js";
 import type { Staleness } from "./core/types.js";
 import { normalizeAddress } from "./adapters/http.js";
+import { loadAllowlist } from "./allowlist.js";
 
 /** Store key holding the Four.Meme-discovered lane. */
 export const MEME_UNIVERSE_KEY = "universe:meme";
@@ -80,6 +85,22 @@ export function bstockAddresses(): string[] {
   return BSTOCK_CONTRACTS.map((stock) => stock.address);
 }
 
+/**
+ * The frozen allowlist as universe rows, read through the shared loader
+ * (ALLOWLIST-PRICE-SPEC §2b item 5). Empty when the snapshot is unreadable —
+ * the same degradation the eligibility gate takes.
+ */
+export function allowlistUniverse(): UniverseEntry[] {
+  const allowlist = loadAllowlist();
+  if (allowlist === null) return [];
+  return [...allowlist.values()].map((entry) => ({
+    address: entry.address,
+    symbol: entry.symbol,
+    lane: "allowlist" as const,
+    source: entry.source,
+  }));
+}
+
 /** Per-lane provenance returned alongside the merged universe. */
 export interface LaneStatus {
   count: number;
@@ -92,6 +113,13 @@ export interface LaneStatus {
 
 export interface UniverseResult {
   entries: UniverseEntry[];
+  /**
+   * The allowlist lane, kept beside `entries` rather than merged into them
+   * (ALLOWLIST-PRICE-SPEC §2b item 5): every bStock is also allowlisted, so a
+   * merge would either relabel the bStocks lane or drop those rows from this
+   * one, and this lane has to answer with the whole snapshot.
+   */
+  allowlist: UniverseEntry[];
   lanes: Record<Lane, LaneStatus>;
 }
 
@@ -111,6 +139,7 @@ export async function buildUniverse(store: SnapshotStore): Promise<UniverseResul
   const flap = await readLane(store, FLAP_UNIVERSE_KEY, "meme");
   const coins = await readLane(store, COINS_UNIVERSE_KEY, "coins");
   const bstocks = bstocksUniverse();
+  const allowlist = allowlistUniverse();
 
   const memeEntries = new Map<string, UniverseEntry>();
   for (const entry of [...fourmeme.entries, ...flap.entries]) memeEntries.set(entry.address, entry);
@@ -125,6 +154,7 @@ export async function buildUniverse(store: SnapshotStore): Promise<UniverseResul
 
   return {
     entries,
+    allowlist,
     lanes: {
       meme: combineLane(memeEntries.size, [
         { name: "fourmeme", read: fourmeme },
@@ -132,6 +162,15 @@ export async function buildUniverse(store: SnapshotStore): Promise<UniverseResul
       ]),
       coins: { count: coins.entries.length, staleness: coins.staleness, asOf: coins.asOf, source: "binance" },
       bstocks: { count: bstocks.length, staleness: "fresh", asOf: null, source: "static" },
+      // Static like bStocks, so always fresh with no `asOf` — except when the
+      // file could not be read, where a count of 0 with no staleness says the
+      // lane has nothing rather than that it is empty.
+      allowlist: {
+        count: allowlist.length,
+        staleness: allowlist.length === 0 ? null : "fresh",
+        asOf: null,
+        source: "static",
+      },
     },
   };
 }

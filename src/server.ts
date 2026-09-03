@@ -18,6 +18,7 @@ import { getPoolOhlcv } from "./query/poolOhlcv.js";
 import { getSecurity } from "./query/security.js";
 import { getHolders } from "./query/holders.js";
 import { getSocials } from "./query/socials.js";
+import { getTokenDecimals, type DecimalsReader } from "./query/decimals.js";
 import { isEligible, isEligibleBatch } from "./query/eligibility.js";
 import { buildUniverse } from "./universe.js";
 import { tokenKey } from "./jobs/tokenStore.js";
@@ -43,9 +44,13 @@ export interface ServerDeps {
   store: SnapshotStore;
   refreshVenusRisk?: typeof refreshVenusRisk;
   refreshVenusRewards?: typeof refreshVenusRewards;
+  /** Injectable ERC-20 `decimals()` reader, so route tests stay offline. */
+  readTokenDecimals?: DecimalsReader;
 }
 
-const LANES: Lane[] = ["meme", "coins", "bstocks"];
+// `allowlist` widens the closed set by exactly one member, so the execution
+// plane can enumerate the frozen snapshot (ALLOWLIST-PRICE-SPEC §2b item 5).
+const LANES: Lane[] = ["meme", "coins", "bstocks", "allowlist"];
 
 /**
  * Debug reads are limited to these key prefixes so `/snapshots/:key` can never
@@ -59,6 +64,7 @@ const SNAPSHOT_KEY_PREFIXES = [
   "security:",
   "holders:",
   "socials:",
+  "decimals:",
   "eligibility:",
   "pool:",
   "pools:",
@@ -362,10 +368,15 @@ export function createServer(deps: ServerDeps): Hono {
     }
 
     const universe = await buildUniverse(deps.store);
+    // The allowlist lane is served from the frozen snapshot itself, not from the
+    // merged entries, so it answers with the whole list (ALLOWLIST-PRICE-SPEC
+    // §2b item 5). The other three keep filtering the merge unchanged.
     const entries =
       laneParam === undefined
         ? universe.entries
-        : universe.entries.filter((entry) => entry.lane === laneParam);
+        : laneParam === "allowlist"
+          ? universe.allowlist
+          : universe.entries.filter((entry) => entry.lane === laneParam);
 
     return c.json({
       data: entries,
@@ -446,9 +457,26 @@ export function createServer(deps: ServerDeps): Hono {
       return c.json({ error: { code: "not_found", message: "no snapshot for this token" } }, 404);
     }
 
+    // Read alongside the snapshot rather than merged into it: decimals come
+    // from the chain, not from any snapshot producer, so folding them into the
+    // stored `TokenSnapshot` would put them in `updatedFields` — which reports
+    // what the last *merge* wrote, and nothing merges this — and would silently
+    // widen `/tokens`, which spreads the same stored payload. Provenance
+    // therefore rides in `meta` beside the snapshot's own. Never throws, so a
+    // token whose decimals cannot be read still gets its price.
+    const decimals = await getTokenDecimals(deps.store, {
+      address,
+      ...(deps.readTokenDecimals === undefined ? {} : { readDecimals: deps.readTokenDecimals }),
+    });
+
     return c.json({
-      data: record.data,
-      meta: { asOf: record.asOf, source: record.source, staleness: record.staleness },
+      data: { ...record.data, decimals: decimals.decimals },
+      meta: {
+        asOf: record.asOf,
+        source: record.source,
+        staleness: record.staleness,
+        decimalsSource: decimals.source,
+      },
     });
   });
 
