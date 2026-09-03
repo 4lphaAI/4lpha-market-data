@@ -5,10 +5,12 @@ import { emptyTokenSnapshot } from "../src/core/models.js";
 import { runFourMemeRanking } from "../src/jobs/fourmemeRanking.js";
 import { runBinanceUniverse } from "../src/jobs/binanceUniverse.js";
 import {
+  PRICE_BATCH_SIZE,
   TRACKED_ADDRESSES_KEY,
   readTrackedAddresses,
   runBinancePrices,
 } from "../src/jobs/binancePrices.js";
+import { loadAllowlist } from "../src/allowlist.js";
 import { tokenKey } from "../src/jobs/tokenStore.js";
 import { COINS_UNIVERSE_KEY, MEME_UNIVERSE_KEY, bstockAddresses } from "../src/universe.js";
 import type { TokenSnapshot, UniverseEntry } from "../src/core/models.js";
@@ -127,9 +129,19 @@ describe("binance-universe job", () => {
 });
 
 describe("binance-prices job", () => {
-  it("defaults the tracked set to the bStocks list", async () => {
+  it("defaults the tracked set to the allowlist unioned with the bStocks list", async () => {
     const store = new MemoryStore();
-    assert.deepEqual(await readTrackedAddresses(store), bstockAddresses());
+    const tracked = await readTrackedAddresses(store);
+    const allowlist = loadAllowlist();
+    assert.notEqual(allowlist, null);
+
+    // 221, not the snapshot's 222: the BNB row is the `"native"` sentinel and
+    // carries no contract address. Every bStock is itself allowlisted, so the
+    // union dedupes back to the allowlist (ALLOWLIST-PRICE-SPEC §2 item 4).
+    assert.equal(tracked.length, 221);
+    assert.equal(new Set(tracked).size, tracked.length);
+    for (const address of allowlist!.keys()) assert.ok(tracked.includes(address), address);
+    for (const address of bstockAddresses()) assert.ok(tracked.includes(address), address);
     await store.close();
   });
 
@@ -189,6 +201,40 @@ describe("binance-prices job", () => {
     assert.equal(glitched?.data.priceUsd, 100, "the stored price is untouched");
     const moved = await store.get<TokenSnapshot>(tokenKey(TOKEN_B));
     assert.equal(moved?.data.priceUsd, 110);
+    await store.close();
+  });
+
+  it("keeps quoting every other address when one bapi call misses", async () => {
+    const store = new MemoryStore();
+    // Two full batches and part of a third, so the miss also proves a later
+    // batch still ran (ALLOWLIST-PRICE-SPEC §2 item 4).
+    assert.equal(PRICE_BATCH_SIZE, 25);
+    const addresses = Array.from(
+      { length: PRICE_BATCH_SIZE * 2 + 10 },
+      (_value, index) => `0x${(index + 1).toString(16).padStart(40, "0")}`,
+    );
+    const missing = addresses[7]!;
+    const last = addresses.at(-1)!;
+    await store.put(TRACKED_ADDRESSES_KEY, addresses, {
+      source: "operator",
+      freshForMs: 60_000,
+      deadAfterMs: 900_000,
+    });
+    installFetch((url) =>
+      url.searchParams.get("contractAddress") === missing
+        ? json({}, 503)
+        : json({ code: "000000", data: { price: "1.5" } }),
+    );
+
+    const result = await runBinancePrices(store, AbortSignal.timeout(5_000));
+    assert.deepEqual(result, {
+      attempted: addresses.length,
+      updated: addresses.length - 1,
+      rejected: 0,
+      failed: 1,
+    });
+    assert.equal(await store.get<TokenSnapshot>(tokenKey(missing)), null);
+    assert.equal((await store.get<TokenSnapshot>(tokenKey(last)))?.data.priceUsd, 1.5);
     await store.close();
   });
 

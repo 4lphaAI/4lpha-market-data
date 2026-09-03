@@ -5,6 +5,7 @@ import { MemoryStore } from "../src/core/store.js";
 import { emptyTokenSnapshot, type TokenSnapshot } from "../src/core/models.js";
 import { createServer } from "../src/server.js";
 import { tokenKey, TOKEN_DEAD_AFTER_MS, TOKEN_FRESH_FOR_MS } from "../src/jobs/tokenStore.js";
+import type { DecimalsOutcome } from "../src/query/decimals.js";
 import {
   MAJOR_TOKENS,
   MAJORS_PRICE_SOURCE,
@@ -311,7 +312,13 @@ describe("majors: job", () => {
 describe("majors: routes", () => {
   function build(): { app: ReturnType<typeof createServer>; store: MemoryStore } {
     const store = new MemoryStore();
-    return { app: createServer({ scheduler: createScheduler(store), store }), store };
+    // The token route reads `decimals()` through on a cache miss; this keeps
+    // these price assertions off the chain.
+    const readTokenDecimals = async (): Promise<DecimalsOutcome> => ({ kind: "unavailable" });
+    return {
+      app: createServer({ scheduler: createScheduler(store), store, readTokenDecimals }),
+      store,
+    };
   }
 
   it("GET /tokens/<WBNB> serves the price after the job ran", async () => {

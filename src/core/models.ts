@@ -6,8 +6,12 @@
  * missing or unparseable fields become `null`, never `NaN` and never a guess.
  */
 
-/** Which product surface a token belongs to. */
-export type Lane = "meme" | "coins" | "bstocks";
+/**
+ * Which product surface a token belongs to. `allowlist` is the frozen
+ * `data/eligible-tokens.json` snapshot, enumerable over `/universe`
+ * (ALLOWLIST-PRICE-SPEC §2b item 5).
+ */
+export type Lane = "meme" | "coins" | "bstocks" | "allowlist";
 
 /** A token that the data plane tracks, with the lane it was discovered in. */
 export interface UniverseEntry {
