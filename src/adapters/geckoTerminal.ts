@@ -43,11 +43,13 @@ export interface GeckoPoolOhlcvParams {
   timeframe: GeckoOhlcvTimeframe;
   aggregate: number;
   limit: number;
+  currency?: "usd" | "token";
+  token?: string;
   signal?: AbortSignal | undefined;
   fetchFn?: FetchFn;
 }
 
-/** Fetches candles for the exact BSC pool and prices its base token in quote. */
+/** Explicit denomination; legacy callers retain the provider's USD behavior. */
 export async function fetchGeckoPoolOhlcv(
   params: GeckoPoolOhlcvParams,
 ): Promise<GeckoPoolOhlcv> {
@@ -55,14 +57,16 @@ export async function fetchGeckoPoolOhlcv(
   const query = new URLSearchParams({
     aggregate: String(params.aggregate),
     limit: String(params.limit),
-    token: "base",
+    token: params.token ?? "base",
+    currency: params.currency ?? "usd",
+    include_empty_intervals: "false",
   });
   const payload = await fetchJson({
     source: SOURCE,
     url: `${BASE_URL}/networks/${NETWORK}/pools/${encodeURIComponent(poolAddress)}/ohlcv/${params.timeframe}?${query.toString()}`,
     fetchFn: params.fetchFn ?? globalThis.fetch,
     signal: params.signal,
-    headers: { "accept-version": "20230302" },
+    headers: { accept: "application/json;version=20230203" },
   });
   return normalizeGeckoPoolOhlcv(payload);
 }

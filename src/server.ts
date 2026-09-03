@@ -14,7 +14,7 @@ import {
 } from "./core/venus.js";
 import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
-import { getPoolOhlcv } from "./query/poolOhlcv.js";
+import { getPoolOhlcv, poolOhlcvDiagnostics } from "./query/poolOhlcv.js";
 import { getSecurity } from "./query/security.js";
 import { getHolders } from "./query/holders.js";
 import { getSocials } from "./query/socials.js";
@@ -352,6 +352,7 @@ export function createServer(deps: ServerDeps): Hono {
     return c.json({
       data: {
         jobs: deps.scheduler.healthSnapshot(),
+        poolOhlcv: poolOhlcvDiagnostics(deps.store),
         snapshots,
         startedAt,
       },
@@ -788,7 +789,11 @@ export function createServer(deps: ServerDeps): Hono {
       );
     }
 
-    const result = await getPoolOhlcv(deps.store, { poolAddress, interval, limit });
+    const currency = c.req.query("currency") ?? "usd";
+    if (currency !== "usd" && currency !== "token") {
+      return c.json({ error: { code: "invalid_currency", message: "currency must be usd or token" } }, 400);
+    }
+    const result = await getPoolOhlcv(deps.store, { poolAddress, interval, limit, currency });
     if (result === null) {
       return c.json({ error: { code: "not_found", message: "no pool candles available" } }, 404);
     }
@@ -803,6 +808,11 @@ export function createServer(deps: ServerDeps): Hono {
         asOf: result.asOf,
         staleness: result.staleness,
         count: result.candles.length,
+        schemaVersion: result.schemaVersion,
+        priceCurrency: result.priceCurrency,
+        volumeCurrency: result.volumeCurrency,
+        volumeUnavailableReason: result.volumeUnavailableReason,
+        closedCandlesOnly: true,
         base: result.base,
         quote: result.quote,
       },

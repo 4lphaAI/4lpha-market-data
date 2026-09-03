@@ -9,9 +9,11 @@ const POOL = "0xcc2bffaec373a6004bb6ccc8a62cdd66061f7c6a";
 const originalFetch = globalThis.fetch;
 
 function geckoResponse(): Response {
+  const timestamp = Math.floor(Date.now() / 14_400_000) * 14_400 - 14_400;
   return new Response(JSON.stringify({
-    data: { attributes: { ohlcv_list: [[1_700_000_000, 1, 2, 0.5, 1.5, 10]] } },
-    meta: { base: { symbol: "BASE" }, quote: { symbol: "QUOTE" } },
+    data: { attributes: { ohlcv_list: [[timestamp, 1, 2, 0.5, 1.5, 10]] } },
+    meta: { base: { address: "0x0000000000000000000000000000000000000001", symbol: "BASE" },
+      quote: { address: "0x0000000000000000000000000000000000000002", symbol: "QUOTE" } },
   }));
 }
 
@@ -45,7 +47,11 @@ describe("getPoolOhlcv", () => {
 
 describe("GET /pools/:address/ohlcv", () => {
   it("returns normalized candles and pair metadata", async () => {
-    globalThis.fetch = (async () => geckoResponse()) as typeof globalThis.fetch;
+    globalThis.fetch = (async () => {
+      const raw = await geckoResponse().json() as { data: { attributes: { ohlcv_list: number[][] } } };
+      raw.data.attributes.ohlcv_list[0]![0] = Math.floor(Date.now() / 900_000) * 900 - 900;
+      return new Response(JSON.stringify(raw));
+    }) as typeof globalThis.fetch;
     const store = new MemoryStore();
     const app = createServer({ scheduler: createScheduler(store), store });
 
@@ -58,6 +64,10 @@ describe("GET /pools/:address/ohlcv", () => {
     const meta = body["meta"] as Record<string, unknown>;
     const quote = meta["quote"] as Record<string, unknown>;
     assert.equal(quote["symbol"], "QUOTE");
+    assert.equal(meta["priceCurrency"], "usd");
+    assert.equal(meta["volumeCurrency"], "usd");
+    assert.equal(meta["schemaVersion"], 2);
+    assert.equal(meta["closedCandlesOnly"], true);
     await store.close();
   });
 
@@ -68,6 +78,7 @@ describe("GET /pools/:address/ohlcv", () => {
     assert.equal((await app.request("/pools/nope/ohlcv")).status, 400);
     assert.equal((await app.request(`/pools/${POOL}/ohlcv?interval=7m`)).status, 400);
     assert.equal((await app.request(`/pools/${POOL}/ohlcv?limit=501`)).status, 400);
+    assert.equal((await app.request(`/pools/${POOL}/ohlcv?currency=native`)).status, 400);
     await store.close();
   });
 });

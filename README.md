@@ -65,7 +65,8 @@ and exact Venus Core Pool v2 observations read straight from BSC.
 | `fourmeme` | none | meme lane universe + market snapshots |
 | `binanceWeb3` | none | coins lane universe, live quotes, Sintral klines |
 | `onchainos` | `OKX_*` | preferred klines and price-info, primary token-scan |
-| `geckoterminal` | none | exact BSC pool OHLCV for marketplace charts |
+| `geckoterminal` | none | primary exact BSC pool OHLCV for marketplace charts |
+| `dexpaprika` | optional `DEXPAPRIKA_API_KEY` | exact-pool token-ratio OHLCV fallback; not a USD candle feed |
 | `gmgn` | `GMGN_API_KEY` | secondary security scan, holder distribution |
 | `pancake` | none | V3 pool state; explorer API, on-chain fallback |
 | `venus` | none (`BSC_RPC_URL*`) | Core Pool health factors |
@@ -296,7 +297,7 @@ Every response uses the `{ data, error?, meta? }` envelope.
 | `GET /tokens/:address` | stored `TokenSnapshot` with `meta.asOf` / `meta.staleness`, 404 when unknown |
 | `GET /tokens?addresses=a,b,…` | batch of stored `TokenSnapshot`s, each carrying its own `asOf`/`source`/`staleness`; `meta.found`/`missing`/`invalid`; unknown addresses are omitted, not 404 |
 | `GET /klines/:address?interval=1m&limit=100` | `Candle[]`; may hit upstream on a miss. `interval` ∈ 1m,5m,15m,1h,4h,1d; `limit` 1..500 |
-| `GET /pools/:address/ohlcv?interval=1m&limit=300` | exact-pool `Candle[]` from GeckoTerminal with base/quote metadata; same interval set, `limit` 1..500 |
+| `GET /pools/:address/ohlcv?interval=1m&limit=300&currency=token` | exact-pool closed candles; GeckoTerminal → DexPaprika → old cache for token ratios. Omitting `currency` retains USD (Gecko → old cache). Same interval set, `limit` 1..500; volume may be null |
 | `GET /security/:address?lane=` | merged `TokenSecuritySummary`; `meta.sources` carries each scanner's own verdict. `lane` defaults from the universe, falling back to `meme`. May hit upstream on a miss; answers `unavailable` rather than erroring |
 | `GET /pools?token=` | stored `PoolStats[]` for the operator-tracked seed set; `token` filters on either side of the pair |
 | `GET /pools/top` | the 500-pool V3 lane filtered and ordered by query: `tier`, `feeTier`, `minTvlUsd`, `maxTvlUsd`, `maxVolTvlRatio`, `minAprPct`, `maxAprPct`, `aprField`, `orderBy`, `token`, `limit`; the plane sets no thresholds, `meta.cap`/`meta.ingestOrder` say so |
@@ -313,6 +314,87 @@ Every response uses the `{ data, error?, meta? }` envelope.
 
 The `tracked:` keys stay outside the `/snapshots` allowlist: they are operator
 configuration, not published data.
+
+### Exact-pool OHLCV v2
+
+`currency=usd` is the default, preserving the previous price denomination. It
+uses **GeckoTerminal → old USD cache**. DexPaprika is not a substitute for USD
+candles: its OHLCV is a pair ratio. No current USD price is multiplied into
+historical candles to manufacture a USD series.
+
+Use `currency=token` to enable **GeckoTerminal → DexPaprika → old ratio cache**.
+Price is quote tokens per one base token. Base is always the lower token address
+and quote the higher address (token0/token1 ordering), independent of the
+provider's preferred direction. Inversion swaps reciprocal high/low as well as
+open/close. The route stays exact-pool, never token-wide or another venue.
+
+- `meta.schemaVersion: 2`, `priceCurrency`, `base`, `quote`, `volumeCurrency`,
+  `volumeUnavailableReason`, `source`, `asOf`, and `staleness` describe the series.
+  DexPaprika volume is **null**, not zero, until its unit can be verified. Gecko
+  volume is also null when price inversion would require an inexact volume
+  conversion. Consumers must tolerate nullable volume.
+- Only **closed UTC candles** are returned (`closedCandlesOnly: true`), including
+  for USD requests. Timestamps are epoch milliseconds, ascending and deduplicated.
+  Gaps are not forward-filled. DexPaprika `4h` is aggregated from `1h` using
+  first open / max high / min low / last close.
+- One cache per pool/interval/currency holds the latest **500 time buckets**;
+  `limit` slices that history, not another upstream/cache key. Sparse or young
+  pools may have fewer candles. Dex pages by time windows of up to 365 native
+  intervals, reserving a response slot for an inclusive boundary. A failed page
+  discards the whole refresh rather than publishing a partial history.
+- Freshness lasts until the next candle can close (minimum 60s). A refresh never
+  re-stamps an unchanged latest candle or publishes stale historical data as
+  fresh. If all sources fail, the prior v2 record keeps its original `asOf` and
+  source; it may be `stale` or `dead`, which callers must check. No cache means
+  `404 no pool candles available`, not proof that the pool does not exist.
+- Old pre-v2 cache keys are deliberately not imported: they lacked an explicit
+  denomination contract. Initial v2 reads are cold; later outages use the v2
+  cache. Individual candles from different providers are never spliced together.
+
+Load controls apply to this route, not the separate token `/klines` chain:
+
+- Concurrent reads of the same chart share one refresh, including different
+  limits. At most **4 distinct refreshes per process** run at once; overflow
+  serves cache or returns unavailable, without an unbounded queue.
+- A shared 60s retry floor also covers empty responses and cold-cache failures.
+  Refresh leases use 4096 fixed hash stripes to bound control-table growth;
+  a collision can delay another chart, but cannot mix its data.
+- Fixed rolling slots cap upstream HTTP calls at **8/min Gecko** and **12/min
+  DexPaprika**, shared across replicas using the same Postgres store. MemoryStore
+  limits are process-local. These are conservative application budgets, not a
+  guarantee of either provider's quota; other clients sharing the IP/key count
+  against provider limits too. A cold Dex chart costs 3 requests, or 7 for `4h`.
+- 429 respects `Retry-After` with a 60s minimum cooldown; 5xx backs off 15s. A 402
+  quota response stops that provider until its reported reset, or next UTC month.
+  Cooldowns persist through restarts with Postgres. Calls are deadline-bounded,
+  with no immediate retry loop. One disconnected consumer does not abort work
+  shared by other consumers.
+- `/status` includes `data.poolOhlcv`: process-local cache/coalescing/admission
+  counters and per-provider request/failure/budget/cooldown/429 counters. Counters
+  reset on restart; admission budgets and cooldowns remain shared in Postgres.
+
+This bounds upstream load, not unlimited free coverage of every public chart.
+Keep the existing `x-dp-token` server-side authentication; apply per-user limits
+at the consumer-facing gateway. HTTP RPM limits also do not eliminate monthly
+credit exhaustion: the 402 path intentionally falls back to cache.
+
+Live diagnostic (read-only upstream calls; always an isolated MemoryStore):
+
+```bash
+node --import tsx scripts/pool-ohlcv-check.ts --compare --usage
+# --compare injects a local Gecko failure for a second run against real DexPaprika.
+# --usage prints only HTTP status, key presence and plan, never credentials.
+```
+
+Verified locally 2026-09-03 with the configured free key: primary Gecko 300 bars
+in ~1.34s; forced Dex fallback 300 bars in ~2.10s, 3 Dex calls; subsequent reads
+made no upstream calls. On 300 matching USDT/WBNB 1m timestamps, median close
+deviation after direction normalization was ~0.040%, maximum ~0.115%. This is a
+single local smoke, not a Railway latency or sustained-load guarantee.
+
+Provider references: [DexPaprika OHLCV](https://docs.dexpaprika.com/api-reference/pools/get-ohlcv-data-for-a-pool-pair),
+[official SDK authentication](https://github.com/coinpaprika/dexpaprika-sdk-ts),
+[GeckoTerminal API schema](https://api.geckoterminal.com/docs/v2/swagger.json).
 
 ## Commands
 
@@ -337,6 +419,12 @@ rather than failing when one is absent.
   Without them the kline chain simply starts at Sintral and `/security` loses its
   primary scanner.
 - `GMGN_API_KEY` — enables the secondary security scanner and holder enrichment.
+- `DEXPAPRIKA_API_KEY` — optional free key, sent only as the raw `Authorization`
+  header to `api.dexpaprika.com`. Existing local alias `DexPaprika` is accepted.
+  Without a key the same fallback attempts the public quota. `/usage` should
+  report the expected plan: a successful data request alone does not prove the
+  provider accepted a key. Copy the variable into deployment configuration when
+  deploying; a local `.env` is not automatically installed on Railway.
 - `BSC_RPC_URL`, `BSC_RPC_URL1..3` — BSC JSON-RPC, tried in that order and then
   falling back to keyless public endpoints. Public endpoints rate-limit and cap
   `eth_getLogs`, so configure at least one real endpoint for production.
