@@ -122,16 +122,21 @@ function extractRows(payload: unknown): unknown[] {
 }
 
 /**
- * Four.Meme quotes `price` and `cap` in the pool's quote asset (usually BNB),
- * while `day1Vol` is already USD. The USD multiplier is therefore derived from
- * the ratio of the two volume figures, which needs no external BNB price feed.
- * When it cannot be derived, price and market cap stay `null` rather than being
- * published in the wrong currency under a `*Usd` name.
+ * Before graduation Four.Meme quotes `price` and `cap` in the pool's quote
+ * asset (usually BNB), while `day1Vol` is already USD. The USD multiplier is
+ * therefore derived from the ratio of the two volume figures, which needs no
+ * external BNB price feed. Graduated `TRADE` rows change wire semantics: their
+ * `price` and `cap` are already USD even though `symbol` still names the old
+ * quote token. Multiplying those rows again inflated Mubarak by ~28x in the
+ * account portfolio. When neither rule can establish USD, the values stay
+ * `null` rather than being published in the wrong currency under a `*Usd` name.
  */
 function toSnapshot(address: string, symbol: string, row: Record<string, unknown>): TokenSnapshot {
   const usdVolume = parseNum(row["day1Vol"]);
   const quoteVolume = parseNum(row["volume"]);
-  const multiplier = resolveUsdMultiplier(parseStr(row["symbol"]), usdVolume, quoteVolume);
+  const multiplier = parseStr(row["status"])?.toUpperCase() === "TRADE"
+    ? 1
+    : resolveUsdMultiplier(parseStr(row["symbol"]), usdVolume, quoteVolume);
 
   const quotePrice = parseNum(row["price"]);
   const quoteCap = parseNum(row["cap"]) ?? parseNum(row["marketCap"]);

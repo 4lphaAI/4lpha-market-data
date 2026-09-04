@@ -88,6 +88,22 @@ describe("fetchFourMemeRanking", () => {
     assert.equal(result.snapshots[0]?.marketCapUsd, 1_000);
   });
 
+  it("does not convert a graduated TRADE row from USD a second time", async () => {
+    const fake = fakeFetch(() =>
+      jsonResponse({ code: "0", data: { list: [row({
+        status: "TRADE",
+        progress: "1",
+        price: "0.03075362627587370288",
+        cap: "30753626.27587370288",
+        volume: "235089.047624717259708335",
+        day1Vol: "6671094.49",
+      })] } }),
+    );
+    const snapshot = (await fetchFourMemeRanking({ type: "HOT", fetchFn: fake.fetch })).snapshots[0];
+    assert.equal(snapshot?.priceUsd, Number("0.03075362627587370288"));
+    assert.equal(snapshot?.marketCapUsd, Number("30753626.27587370288"));
+  });
+
   it("leaves price null rather than publishing a non-USD number", async () => {
     const fake = fakeFetch(() =>
       jsonResponse({ code: "0", data: { list: [row({ volume: null, day1Vol: null })] } }),
