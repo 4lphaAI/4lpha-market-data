@@ -21,7 +21,7 @@ export interface FeatureIndex {
 /** The operator store key is the only override; HTTP clients cannot mutate it. */
 export async function featureSelection(store: SnapshotStore): Promise<FeatureIndex> {
   const configured = await store.get<unknown>(FEATURE_WATCHLIST_KEY);
-  const raw = configured ? configured.data : (await readTrackedPools(store)).slice(0, MAX_POOLS).map((pool) => ({ pool, currency: "usd" }));
+  const raw = configured ? configured.data : (await readTrackedPools(store)).slice(0, MAX_POOLS).map((pool) => ({ pool, currency: "token" }));
   if (!Array.isArray(raw) || raw.length > MAX_POOLS) throw new Error("invalid trading feature watchlist (maximum 10 pools)");
   const pools: FeatureSelection[] = [];
   for (const value of raw) {
@@ -31,7 +31,7 @@ export async function featureSelection(store: SnapshotStore): Promise<FeatureInd
     const currency = row["currency"] ?? "usd";
     const tokenAddress = row["tokenAddress"] === undefined ? undefined : normalizeAddress(row["tokenAddress"]);
     if (!pool || (currency !== "usd" && currency !== "token") || pools.some((p) => p.pool === pool)) throw new Error("invalid trading feature watchlist identity");
-    if (tokenAddress === null || (tokenAddress !== undefined && currency !== "usd")) throw new Error("explicit feature token requires USD currency");
+    if (tokenAddress === null) throw new Error("invalid explicit feature token");
     pools.push({ pool, currency, ...(tokenAddress ? { tokenAddress } : {}) });
   }
   return { pools, intervals: Object.keys(FEATURE_INTERVALS) as FeatureInterval[], maxPools: MAX_POOLS,

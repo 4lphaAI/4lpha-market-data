@@ -14,6 +14,8 @@ Trading feature support: [implemented v1 contract](TRADING-FEATURES-SPEC.md).
 `/trading/features/v1` serves store-only ROC, EMA, Wilder ATR and relative volume
 over existing exact-pool OHLCV, with input provenance and per-feature availability.
 The bounded `trading-features` job reuses the existing providers and budgets.
+Its default seed series use token ratios with Gecko → DexPaprika fallback;
+explicit USD watchlists remain USD. The contract documents base-token selection.
 
 ```text
   adapters/              jobs/                     core/

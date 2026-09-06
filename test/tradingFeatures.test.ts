@@ -159,6 +159,52 @@ describe("deterministic closed trading features", () => {
 });
 
 describe("explicit trading target", () => {
+  it("keeps the same explicit ratio target across Gecko 429 and reversed Dex metadata", async () => {
+    const fetch = globalThis.fetch;
+    const end = Math.floor(Date.now() / STEP) * STEP;
+    const bars = Array.from({length: 500}, (_, i) => ({ timestamp: end - (500-i)*STEP, open: 2, high: 4, low: 1, close: 2, volume: 10 }));
+    let failGecko = false, dexCalls = 0;
+    globalThis.fetch = async (request) => {
+      const url = new URL(String(request));
+      if (url.hostname.includes("gecko")) {
+        assert.equal(url.searchParams.get("token"), "base");
+        if (failGecko) return new Response("{}", {status: 429});
+        return new Response(JSON.stringify({ data: { attributes: { ohlcv_list: bars.map(b=>[b.timestamp/1000,b.open,b.high,b.low,b.close,b.volume]) } },
+          meta: {base: {address: BASE}, quote: {address: QUOTE}} }));
+      }
+      dexCalls++;
+      if (!url.pathname.endsWith("ohlcv")) return new Response(JSON.stringify({id: POOL,chain:"bsc",base_token_id:QUOTE,quote_token_id:BASE,tokens:[]}));
+      const start = Number(url.searchParams.get("start"))*1000, finish=Number(url.searchParams.get("end"))*1000;
+      return new Response(JSON.stringify(bars.filter(b=>b.timestamp>=start&&b.timestamp<finish).map(b=>({time_open:new Date(b.timestamp).toISOString(),
+        open:1/b.open,high:1/b.low,low:1/b.high,close:1/b.close,volume:10}))));
+    };
+    try {
+      const params = {poolAddress:POOL,interval:"5m" as const,currency:"token" as const,tokenAddress:QUOTE,limit:500};
+      const primary = await getPoolOhlcv(new MemoryStore(), params);
+      failGecko = true;
+      const store = new MemoryStore();
+      const fallback = await getPoolOhlcv(store, params);
+      assert.equal(fallback!.source,"dexpaprika"); assert.equal(dexCalls,3);
+      assert.equal(fallback!.base.address,QUOTE); assert.equal(fallback!.quote.address,BASE);
+      assert.equal(fallback!.priceCurrency,"token"); assert.equal(fallback!.candles.at(-1)!.high,1);
+      const a=calculateFeatures(poolFeatureInput(primary!,"5m"),Date.now());
+      const b=calculateFeatures(poolFeatureInput(fallback!,"5m"),Date.now());
+      for (const name of ["roc10Pct","ema12","ema26","emaSpreadPct","atr14","atrPct"] as const) {
+        assert.equal(b.metrics[name].available,true); near(b.metrics[name].value,a.metrics[name].value!);
+      }
+      assert.equal(b.metrics.rvol20.reason,"unknown_volume_unit");
+      assert.notEqual(a.seriesId,b.seriesId);
+      await getPoolOhlcv(store,{...params,limit:10}); assert.equal(dexCalls,3);
+    } finally { globalThis.fetch=fetch; }
+  });
+  it("defaults seeds to ratios while preserving explicit USD selections", async () => {
+    const store = new MemoryStore();
+    assert.ok((await featureSelection(store)).pools.every(p=>p.currency==="token"));
+    await configure(store);
+    assert.ok((await featureSelection(store)).pools.every(p=>p.currency==="usd"));
+    await store.put(FEATURE_WATCHLIST_KEY,[{pool:POOL,currency:"token",tokenAddress:QUOTE}],{source:"test",freshForMs:60000,deadAfterMs:60000});
+    assert.equal((await featureSelection(store)).pools[0]!.tokenAddress,QUOTE);
+  });
   it("requests USD target without reciprocating USD or contaminating chart cache", async () => {
     const fetch = globalThis.fetch;
     const store = new MemoryStore();
@@ -181,7 +227,7 @@ describe("explicit trading target", () => {
       assert.equal(calls, 2);
       assert.notEqual(poolOhlcvKey(POOL, "5m"), poolOhlcvKey(POOL, "5m", 500, "usd", QUOTE));
       assert.equal(await getPoolOhlcv(store, { poolAddress: POOL, interval: "5m", limit: 20, tokenAddress: POOL }), null);
-      assert.equal(await getPoolOhlcv(store, { poolAddress: POOL, interval: "5m", limit: 20, currency: "token", tokenAddress: QUOTE }), null);
+      assert.equal(await getPoolOhlcv(store, { poolAddress: POOL, interval: "5m", limit: 20, currency: "token", tokenAddress: "invalid" }), null);
     } finally { globalThis.fetch = fetch; }
   });
 });

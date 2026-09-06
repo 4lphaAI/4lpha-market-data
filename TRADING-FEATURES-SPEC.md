@@ -15,11 +15,14 @@ the existing chart's provider base is retained unless the operator specifies
 `tokenAddress` in the watchlist. The same Gecko adapter then requests actual USD
 candles for that token and verifies pool membership; it does not reciprocate
 the other token's USD price. Separate token-address keys preserve old chart
-clients. For token ratios, the existing
-sorted-address orientation is retained. No automatic pool switching, USD
+clients. For token ratios, an explicit `tokenAddress` selects the base token;
+otherwise the existing sorted-address orientation is retained. Both providers
+are requested in their native ratio orientation and normalized locally to the
+same target (reciprocal OHLC with high/low exchanged when necessary). No automatic pool switching, USD
 conversion, cross-provider candle splicing or token-wide claim is made.
 
-The producer defaults to the existing tracked pool seeds, capped at 10. The
+The producer defaults to **token-ratio** history for the existing tracked pool
+seeds, capped at 10, enabling Gecko → DexPaprika fallback from the first read. The
 operator can set `trading:features:v1:watchlist` in SnapshotStore to an array of
 `{ "pool": "0x...", "currency": "usd" }` entries. `token` is the other allowed
 currency. One denomination per pool, at most 10 distinct pools; invalid config
@@ -28,15 +31,22 @@ disables this producer's watchlist. These are data coverage choices, never
 eligibility, safety or investment recommendations. HTTP has no registration or
 mutation route: arbitrary clients cannot allocate keys, queues or upstream work.
 
-Example explicit target (USD only):
+Example explicit ratio target with fallback:
 
 ```json
-[{"pool":"0x172fcd41e0913e95784454622d1c3724f546f849","currency":"usd","tokenAddress":"0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"}]
+[{"pool":"0x172fcd41e0913e95784454622d1c3724f546f849","currency":"token","tokenAddress":"0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"}]
 ```
 
-This requests WBNB/USD. Without `tokenAddress`, Gecko's native base on that pool
-is USDT, and the features describe USDT/USD. The index exposes the selection;
-each result reports the actual base contract.
+This requests WBNB/USDT from either provider. Setting `currency: usd` explicitly
+still requests WBNB/USD from Gecko and preserves USD cache fallback only.
+Existing operator watchlists retain their selected denomination (omitted
+currency in an explicit watchlist retains USD for compatibility). The automatic
+seed default changes to token ratios, using separate cache keys from old USD
+observations. The index exposes the selection; each result reports the actual
+base and quote contracts. Consumers must recheck denomination and series ID.
+Ratio returns and ATR% describe relative performance, not USD performance.
+Unknown Dex volume remains unavailable; six price metrics can continue when
+the fallback supplies sufficient valid closed history.
 
 This bounded initial subset deliberately does not cover every eligible token.
 Young pools need real history; sparse pools can fail contiguous warm-up. Tokens
@@ -220,6 +230,18 @@ Optional read-only live diagnostic (isolated MemoryStore, three USD requests,
 no dotenv or trading): `node --import tsx scripts/trading-features-check.ts`.
 An optional positional pool address overrides the existing USDT/WBNB reference.
 A second optional positional token address selects the actual USD base token.
+A third optional positional argument selects `usd` (default) or `token`.
+For an isolated fallback test append `token --simulate-gecko-429` after pool and
+token address: only Gecko requests are locally replaced by 429; Dex requests
+are real. Production cooldowns and stores are never changed by this probe.
+
+Fallback update validation: typecheck/build and **537 offline tests** pass,
+including opposite provider orientations, explicit ratio targets, forced 429,
+all six price metrics, unavailable RVOL, shared cache hits, and default/explicit
+watchlist compatibility.
+Live isolated fallback probe (2026-09-06): locally simulated Gecko 429, real
+DexPaprika WBNB/USDT responses, 120 contiguous bars on 5m/15m/1h. All six price
+metrics available; RVOL reports `unknown_volume_unit` as intended.
 
 Validated 2026-09-06: typecheck/build and all **535 offline tests** pass. A read-only
 probe of `0x172fcd41e0913e95784454622d1c3724f546f849` returned 120 contiguous valid

@@ -48,7 +48,7 @@ export interface GetPoolOhlcvParams {
   limit: number;
   /** USD retains the old denomination; token is sorted-address base/quote. */
   currency?: PoolPriceCurrency;
-  /** Optional explicit USD base for trading; old chart keys/contracts stay unchanged. */
+  /** Explicit base token in either denomination; old chart keys stay unchanged. */
   tokenAddress?: string;
   signal?: AbortSignal | undefined;
 }
@@ -82,7 +82,7 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
   const currency = params.currency ?? "usd";
   if (currency !== "usd" && currency !== "token") return null;
   const token = params.tokenAddress?.toLowerCase();
-  if (token !== undefined && (!isEvmAddress(token) || currency !== "usd")) return null;
+  if (token !== undefined && !isEvmAddress(token)) return null;
   const key = poolOhlcvKey(pool, params.interval, undefined, currency, token);
   const r = runtime(store);
   let record = await store.get<StoredPoolOhlcv>(key);
@@ -127,17 +127,17 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
       if (source === "geckoterminal") {
         const raw = await fetchGeckoPoolOhlcv({ poolAddress: pool, timeframe: mapping.timeframe,
           aggregate: mapping.aggregate, limit: HISTORY + 1, currency, signal,
-          ...(token ? { token } : currency === "usd" && cached ? { token: cached.data.base.address } : {}),
+          ...(currency === "usd" && (token || cached) ? { token: token ?? cached!.data.base.address } : {}),
           fetchFn: r.transport.fetch(source) });
         if (!raw.base?.address || !raw.quote?.address || raw.base.address === raw.quote.address) throw new Error("missing pair identity");
         let pair: DexPair = { base: { ...raw.base, address: raw.base.address }, quote: { ...raw.quote, address: raw.quote.address } };
-        if (token) {
+        if (token && currency === "usd") {
           if (token !== pair.base.address && token !== pair.quote.address) throw new Error("requested token is not in pool");
           // The provider prices the requested token in USD; metadata may retain
           // the native pool orientation. Swap identities only, never reciprocate USD.
           if (token === pair.quote.address) pair = { base: pair.quote, quote: pair.base };
         }
-        data = normalizeChart(raw.candles, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000);
+        data = normalizeChart(raw.candles, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000, token);
       } else {
         const pairKey = `pool:ohlcv:dexpair:${pool}`;
         const storedPair = await r.store.get<DexPair>(pairKey);
@@ -161,7 +161,7 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
           pageEnd = pageStart;
         }
         const bars = interval === "4h" ? aggregateCandles(all, mapping.seconds * 1000) : all;
-        data = normalizeChart(bars, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000);
+        data = normalizeChart(bars, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000, token);
       }
       if (data.candles.length === 0) continue;
       if (cached && (data.base.address !== cached.data.base.address || data.quote.address !== cached.data.quote.address)) {
@@ -183,8 +183,11 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
 }
 
 export function normalizeChart(candles: Candle[], pair: DexPair, currency: PoolPriceCurrency,
-  source: "geckoterminal" | "dexpaprika", start: number, end: number, intervalMs: number): StoredPoolOhlcv {
-  const invert = currency === "token" && pair.base.address > pair.quote.address;
+  source: "geckoterminal" | "dexpaprika", start: number, end: number, intervalMs: number, token?: string): StoredPoolOhlcv {
+  if (token && token !== pair.base.address && token !== pair.quote.address) throw new Error("requested token is not in pool");
+  // Both providers are requested in their native ratio orientation. Normalize
+  // locally to the same target, including reciprocal high/low, before caching.
+  const invert = currency === "token" && (token ? token !== pair.base.address : pair.base.address > pair.quote.address);
   const [base, quote] = invert ? [pair.quote, pair.base] : [pair.base, pair.quote];
   const unknownVolume = source === "dexpaprika" || invert;
   const byTime = new Map<number, PoolCandle>();
