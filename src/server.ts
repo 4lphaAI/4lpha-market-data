@@ -15,6 +15,9 @@ import {
 import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
 import { getPoolOhlcv, poolOhlcvDiagnostics } from "./query/poolOhlcv.js";
+import { FEATURE_INDEX_KEY, FEATURE_VERSION, featureKey, isFeatureInterval, readTradingFeatures,
+  type FeatureSnapshot } from "./query/tradingFeatures.js";
+import type { FeatureIndex } from "./jobs/tradingFeatures.js";
 import { getSecurity } from "./query/security.js";
 import { getHolders } from "./query/holders.js";
 import { getSocials } from "./query/socials.js";
@@ -112,6 +115,7 @@ const STATUS_SNAPSHOT_KEYS = [
   "universe:coins",
   "universe:pools",
   "pools:index",
+  FEATURE_INDEX_KEY,
   VENUS_CORE_MARKETS_KEY,
 ];
 
@@ -759,6 +763,67 @@ export function createServer(deps: ServerDeps): Hono {
       data: estimateRange(inputs, request, prices, basis),
       meta: { asOf: loaded.asOf, staleness: loaded.staleness, source: "pancake" },
     });
+  });
+
+  app.get("/trading/features/v1/pools", async (c) => {
+    const index = await deps.store.get<FeatureIndex>(FEATURE_INDEX_KEY);
+    return c.json({ data: index?.data ?? null, meta: { version: FEATURE_VERSION,
+      asOf: index?.asOf ?? null, staleness: index?.staleness ?? "dead" } });
+  });
+
+  // Strict store-only reads: batch size and identities cannot trigger upstream work.
+  app.get("/trading/features/v1/:pool/input", async (c) => {
+    const pool = normalizeAddress(c.req.param("pool"));
+    const interval = c.req.query("interval") ?? "5m";
+    const id = c.req.query("snapshotId") ?? "";
+    if (!pool || !isFeatureInterval(interval) || !/^[a-f0-9]{64}$/u.test(id)
+      || Object.keys(c.req.query()).some((key) => !["interval", "snapshotId"].includes(key))) {
+      return c.json({ data: null, error: { code: "invalid_request" } }, 400);
+    }
+    const index = await deps.store.get<FeatureIndex>(FEATURE_INDEX_KEY);
+    const selection = index?.data.pools.find((entry) => entry.pool === pool);
+    const snapshot = selection ? await deps.store.get<FeatureSnapshot>(featureKey(pool, interval, selection.currency, selection.tokenAddress)) : null;
+    if (!snapshot || snapshot.data.snapshotId !== id || snapshot.data.input.priceCurrency !== selection?.currency) {
+      return c.json({ data: null, error: { code: "snapshot_not_retained" } }, 404);
+    }
+    return c.json({ data: snapshot.data, meta: { version: FEATURE_VERSION, replayAt: snapshot.data.calculatedAt } });
+  });
+
+  app.get("/trading/features/v1/:pool", async (c) => {
+    const pool = normalizeAddress(c.req.param("pool"));
+    const interval = c.req.query("interval") ?? "5m";
+    if (!pool || !isFeatureInterval(interval) || Object.keys(c.req.query()).some((key) => key !== "interval")) {
+      return c.json({ data: null, error: { code: "invalid_request" } }, 400);
+    }
+    const index = await deps.store.get<FeatureIndex>(FEATURE_INDEX_KEY);
+    const selection = index?.data.pools.find((entry) => entry.pool === pool);
+    if (!selection) return c.json({ data: null, error: { code: "outside_feature_watchlist" } }, 404);
+    const result = await readTradingFeatures(deps.store, pool, interval, Date.now(), selection.currency, selection.tokenAddress);
+    if (!result || result.identity.priceCurrency !== selection.currency) {
+      return c.json({ data: null, error: { code: "features_pending" } }, 404);
+    }
+    return c.json({ data: result, meta: { version: FEATURE_VERSION } });
+  });
+
+  app.get("/trading/features/v1", async (c) => {
+    const raw = (c.req.query("pools") ?? "").split(",");
+    const interval = c.req.query("interval") ?? "5m";
+    const pools = raw.map((value) => normalizeAddress(value));
+    if (raw.length > 10 || pools.some((value) => value === null) || !isFeatureInterval(interval)
+      || Object.keys(c.req.query()).some((key) => !["pools", "interval"].includes(key))) {
+      return c.json({ data: null, error: { code: "invalid_request", message: "1..10 pool addresses and interval 5m, 15m or 1h required" } }, 400);
+    }
+    const index = await deps.store.get<FeatureIndex>(FEATURE_INDEX_KEY);
+    const entries = await Promise.all([...new Set(pools as string[])].map(async (pool) => {
+      const selection = index?.data.pools.find((entry) => entry.pool === pool);
+      if (!selection) return [pool, { data: null, error: { code: "outside_feature_watchlist" } }] as const;
+      try {
+        const result = await readTradingFeatures(deps.store, pool, interval, Date.now(), selection.currency, selection.tokenAddress);
+        return [pool, result && result.identity.priceCurrency === selection.currency ? { data: result }
+          : { data: null, error: { code: "features_pending" } }] as const;
+      } catch { return [pool, { data: null, error: { code: "store_unavailable" } }] as const; }
+    }));
+    return c.json({ data: Object.fromEntries(entries), meta: { version: FEATURE_VERSION, interval, count: entries.length } });
   });
 
   app.get("/pools/:address/ohlcv", async (c) => {

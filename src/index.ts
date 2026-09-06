@@ -9,6 +9,7 @@ import { flapLaunchesJob } from "./jobs/flapLaunches.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { majorsPricesJob } from "./jobs/majorsPrices.js";
 import { pancakePoolsJob } from "./jobs/pancakePools.js";
+import { tradingFeaturesJob } from "./jobs/tradingFeatures.js";
 import {
   venusCoreHotJob,
   venusCoreMarketsJob,
@@ -55,6 +56,7 @@ scheduler.register(flapLaunchesJob(store));
 scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
 scheduler.register(pancakePoolsJob(store));
+scheduler.register(tradingFeaturesJob(store));
 // USD prices for the majors every wallet holds; the lanes never carry them.
 scheduler.register(majorsPricesJob(store));
 // Venus Core v2: independent catalog, risk, hot-risk and reward producers.

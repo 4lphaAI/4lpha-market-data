@@ -54,6 +54,9 @@ export async function fetchDexCandles(params: DexParams & {
       throw new AdapterError(SOURCE, "invalid candle values");
     }
     if (timestamp >= params.start * 1000 && timestamp < params.end * 1000) {
+      const previous = result.get(timestamp);
+      if (previous && (previous.open !== open || previous.high !== high || previous.low !== low
+        || previous.close !== close || previous.volume !== volume)) throw new AdapterError(SOURCE, "conflicting candle revision");
       result.set(timestamp, { timestamp, open, high, low, close, volume });
     }
   }

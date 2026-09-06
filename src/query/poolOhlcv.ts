@@ -31,6 +31,8 @@ export interface StoredPoolOhlcv {
   priceCurrency: PoolPriceCurrency;
   volumeCurrency: "usd" | "quote_token";
   volumeUnavailableReason: string | null;
+  /** Optional additive quality evidence; conflicting revisions are never trading inputs. */
+  quality?: { conflictingTimestamps: number[] };
 }
 export interface PoolOhlcvResult extends StoredPoolOhlcv {
   poolAddress: string;
@@ -46,13 +48,15 @@ export interface GetPoolOhlcvParams {
   limit: number;
   /** USD retains the old denomination; token is sorted-address base/quote. */
   currency?: PoolPriceCurrency;
+  /** Optional explicit USD base for trading; old chart keys/contracts stay unchanged. */
+  tokenAddress?: string;
   signal?: AbortSignal | undefined;
 }
 
 // All limits share one history. Legacy charts have ambiguous denomination and
 // are intentionally not imported into this namespace.
-export function poolOhlcvKey(pool: string, interval: KlineInterval, _limit?: number, currency: PoolPriceCurrency = "usd"): string {
-  return `pool:ohlcv:v2:${pool.toLowerCase()}:${interval}:${currency}`;
+export function poolOhlcvKey(pool: string, interval: KlineInterval, _limit?: number, currency: PoolPriceCurrency = "usd", tokenAddress?: string): string {
+  return `pool:ohlcv:v2:${pool.toLowerCase()}:${interval}:${currency}${tokenAddress ? `:${tokenAddress.toLowerCase()}` : ""}`;
 }
 class Runtime {
   readonly transport: OhlcvTransport;
@@ -77,7 +81,9 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
     || !Object.hasOwn(INTERVALS, params.interval)) return null;
   const currency = params.currency ?? "usd";
   if (currency !== "usd" && currency !== "token") return null;
-  const key = poolOhlcvKey(pool, params.interval, undefined, currency);
+  const token = params.tokenAddress?.toLowerCase();
+  if (token !== undefined && (!isEvmAddress(token) || currency !== "usd")) return null;
+  const key = poolOhlcvKey(pool, params.interval, undefined, currency, token);
   const r = runtime(store);
   let record = await store.get<StoredPoolOhlcv>(key);
   if (record && record.data.schemaVersion !== 2) record = null;
@@ -87,7 +93,7 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
     let flight = r.inFlight.get(key);
     if (flight) r.stats.coalesced++;
     else if (r.inFlight.size < 4) {
-      flight = refresh(r, pool, params.interval, currency, key, record).finally(() => { r.inFlight.delete(key); });
+      flight = refresh(r, pool, params.interval, currency, key, record, token).finally(() => { r.inFlight.delete(key); });
       r.inFlight.set(key, flight);
     } else r.stats.admissionDenied++;
     if (flight) record = await flight;
@@ -100,7 +106,7 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
 }
 
 async function refresh(r: Runtime, pool: string, interval: KlineInterval, currency: PoolPriceCurrency,
-  key: string, cached: DataRecord<StoredPoolOhlcv> | null): Promise<DataRecord<StoredPoolOhlcv> | null> {
+  key: string, cached: DataRecord<StoredPoolOhlcv> | null, token?: string): Promise<DataRecord<StoredPoolOhlcv> | null> {
   // Shared 60s retry floor, including empty responses/failures. A client cannot
   // cause an unbounded retry loop on a cold or stale cache entry.
   // Fixed stripes bound control-table growth under arbitrary public addresses.
@@ -121,10 +127,16 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
       if (source === "geckoterminal") {
         const raw = await fetchGeckoPoolOhlcv({ poolAddress: pool, timeframe: mapping.timeframe,
           aggregate: mapping.aggregate, limit: HISTORY + 1, currency, signal,
-          ...(currency === "usd" && cached ? { token: cached.data.base.address } : {}),
+          ...(token ? { token } : currency === "usd" && cached ? { token: cached.data.base.address } : {}),
           fetchFn: r.transport.fetch(source) });
         if (!raw.base?.address || !raw.quote?.address || raw.base.address === raw.quote.address) throw new Error("missing pair identity");
-        const pair: DexPair = { base: { ...raw.base, address: raw.base.address }, quote: { ...raw.quote, address: raw.quote.address } };
+        let pair: DexPair = { base: { ...raw.base, address: raw.base.address }, quote: { ...raw.quote, address: raw.quote.address } };
+        if (token) {
+          if (token !== pair.base.address && token !== pair.quote.address) throw new Error("requested token is not in pool");
+          // The provider prices the requested token in USD; metadata may retain
+          // the native pool orientation. Swap identities only, never reciprocate USD.
+          if (token === pair.quote.address) pair = { base: pair.quote, quote: pair.base };
+        }
         data = normalizeChart(raw.candles, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000);
       } else {
         const pairKey = `pool:ohlcv:dexpair:${pool}`;
@@ -176,16 +188,21 @@ export function normalizeChart(candles: Candle[], pair: DexPair, currency: PoolP
   const [base, quote] = invert ? [pair.quote, pair.base] : [pair.base, pair.quote];
   const unknownVolume = source === "dexpaprika" || invert;
   const byTime = new Map<number, PoolCandle>();
+  const conflicts = new Set<number>();
   for (const candle of candles) {
     if (candle.timestamp < start || candle.timestamp >= end || candle.timestamp % intervalMs !== 0) continue;
     const bar: PoolCandle = { ...candle, volume: unknownVolume ? null : candle.volume };
     if (invert) Object.assign(bar, { open: 1 / candle.open, high: 1 / candle.low,
       low: 1 / candle.high, close: 1 / candle.close });
     if (![bar.open, bar.high, bar.low, bar.close].every((v) => Number.isFinite(v) && v > 0)) throw new Error("invalid normalized price");
+    const previous = byTime.get(bar.timestamp);
+    if (previous && ["open", "high", "low", "close", "volume"].some((field) =>
+      previous[field as keyof PoolCandle] !== bar[field as keyof PoolCandle])) conflicts.add(bar.timestamp);
     byTime.set(bar.timestamp, bar);
   }
   return { schemaVersion: 2, candles: [...byTime.values()].sort((a, b) => a.timestamp - b.timestamp).slice(-HISTORY),
-    base, quote, priceCurrency: currency, volumeCurrency: currency === "usd" ? "usd" : "quote_token",
+    base, quote, quality: { conflictingTimestamps: [...conflicts].sort((a, b) => a - b) },
+    priceCurrency: currency, volumeCurrency: currency === "usd" ? "usd" : "quote_token",
     volumeUnavailableReason: source === "dexpaprika" ? "provider_volume_unit_unverified"
       : invert ? "cannot_exactly_convert_volume_after_price_inversion" : null };
 }

@@ -83,6 +83,7 @@ export function normalizeGeckoPoolOhlcv(payload: unknown): GeckoPoolOhlcv {
   for (const row of asArray(attributes["ohlcv_list"])) {
     if (!Array.isArray(row)) continue;
     const timestamp = toEpochMs(row[0]);
+    const rawTimestamp = parseNum(row[0]);
     const open = parseNum(row[1]);
     const high = parseNum(row[2]);
     const low = parseNum(row[3]);
@@ -90,6 +91,7 @@ export function normalizeGeckoPoolOhlcv(payload: unknown): GeckoPoolOhlcv {
     const volume = parseNum(row[5]);
     if (
       timestamp === null ||
+      rawTimestamp === null || !Number.isSafeInteger(rawTimestamp) ||
       open === null ||
       high === null ||
       low === null ||
