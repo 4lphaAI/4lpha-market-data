@@ -10,11 +10,12 @@ and exact Venus Core Pool v2 observations read straight from BSC.
 
 ## Architecture
 
-Trading feature support: [implemented v1 contract](TRADING-FEATURES-SPEC.md).
+Trading feature support: [v2 contract and migration](TRADING-FEATURES-V2.md),
+[preserved v1 contract](TRADING-FEATURES-SPEC.md).
 `/trading/features/v1` serves store-only ROC, EMA, Wilder ATR and relative volume
 over existing exact-pool OHLCV, with input provenance and per-feature availability.
 The bounded `trading-features` job reuses the existing providers and budgets.
-Its default seed series use token ratios with Gecko → DexPaprika fallback;
+Its default major/equity reference series use token ratios with quality-aware Gecko → DexPaprika fallback;
 explicit USD watchlists remain USD. The contract documents base-token selection.
 
 ```text

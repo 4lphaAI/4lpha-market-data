@@ -1,7 +1,8 @@
 /** Optional read-only live probe. No dotenv, durable store, worker or transactions. */
 import { MemoryStore } from "../src/core/store.js";
 import { getPoolOhlcv } from "../src/query/poolOhlcv.js";
-import { calculateFeatures, poolFeatureInput, FEATURE_INTERVALS, type FeatureInterval } from "../src/query/tradingFeatures.js";
+import { calculateFeatures, poolFeatureInput, FEATURE_INTERVALS, FEATURE_VERSION, FEATURE_VERSION_V2, type FeatureInterval } from "../src/query/tradingFeatures.js";
+import type { OhlcvAttempt } from "../src/query/poolOhlcv.js";
 import { isEvmAddress } from "../src/adapters/http.js";
 
 // Existing majors-price reference: BSC Pancake V3 USDT/WBNB 0.01%.
@@ -12,6 +13,7 @@ if (tokenAddress && !isEvmAddress(tokenAddress)) throw new Error("expected a BSC
 const currency = process.argv[4] ?? "usd";
 if (currency !== "usd" && currency !== "token") throw new Error("expected usd or token currency");
 const simulate429 = process.argv[5] === "--simulate-gecko-429";
+const v2 = process.argv.includes("--v2");
 if (simulate429 && currency !== "token") throw new Error("fallback probe requires token currency");
 const originalFetch = globalThis.fetch;
 if (simulate429) globalThis.fetch = async (request, init) => {
@@ -21,11 +23,13 @@ if (simulate429) globalThis.fetch = async (request, init) => {
 const store = new MemoryStore();
 try {
   for (const interval of Object.keys(FEATURE_INTERVALS) as FeatureInterval[]) {
+    const attempts: OhlcvAttempt[] = [];
     const chart = await getPoolOhlcv(store, { poolAddress: pool, interval, currency, limit: 500,
+      ...(v2 ? {qualityPolicy: "trading-v2" as const, onAttempt: (a: OhlcvAttempt) => attempts.push(a)} : {}),
       ...(tokenAddress ? { tokenAddress } : {}) });
-    if (!chart) { console.log(JSON.stringify({ pool, interval, available: false, reason: "provider_unavailable" })); continue; }
-    const snapshot = calculateFeatures(poolFeatureInput(chart, interval), Date.now());
-    console.log(JSON.stringify({ pool, interval, currency, simulatedGecko429: simulate429, source: chart.source, observedAt: chart.asOf,
+    if (!chart) { console.log(JSON.stringify({ pool, interval, available: false, reason: "provider_unavailable", attempts })); continue; }
+    const snapshot = calculateFeatures(poolFeatureInput(chart, interval), Date.now(), v2 ? FEATURE_VERSION_V2 : FEATURE_VERSION);
+    console.log(JSON.stringify({ pool, interval, currency, version: snapshot.version, attempts, simulatedGecko429: simulate429, source: chart.source, observedAt: chart.asOf,
       base: chart.base.address, quote: chart.quote.address, evaluationClose: snapshot.evaluationClose,
       snapshotId: snapshot.snapshotId, coverage: snapshot.coverage, metrics: snapshot.metrics }));
   }

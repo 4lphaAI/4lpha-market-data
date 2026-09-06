@@ -1,5 +1,9 @@
 # Trading features v1 — implemented contract
 
+Update: [v2 quality fallback, per-indicator warm-up and producer diagnostics](TRADING-FEATURES-V2.md)
+is available additively. Its default marketplace watchlist supersedes the old
+automatic LP-seed default described below; explicit operator lists are preserved.
+
 Implements the data-plane scope of `TRADING-FEATURES-HANDOFF-2026-09-06.md`.
 Reuses exact-pool GeckoTerminal OHLCV, its store, refresh coalescing, replica
 leases, rate budgets and token-ratio DexPaprika fallback. No new provider,

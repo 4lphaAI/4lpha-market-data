@@ -8,6 +8,10 @@ import type { Candle } from "../core/models.js";
 import type { SnapshotStore } from "../core/store.js";
 import type { DataRecord, Staleness } from "../core/types.js";
 import type { KlineInterval } from "./klines.js";
+import { candleQuality } from "../core/candleQuality.js";
+import { AdapterError } from "../adapters/http.js";
+
+export interface OhlcvAttempt { source: string; reason: string; contiguousBars?: number }
 
 export type PoolPriceCurrency = "usd" | "token";
 export type PoolCandle = Omit<Candle, "volume"> & { volume: number | null };
@@ -50,13 +54,15 @@ export interface GetPoolOhlcvParams {
   currency?: PoolPriceCurrency;
   /** Explicit base token in either denomination; old chart keys stay unchanged. */
   tokenAddress?: string;
+  qualityPolicy?: "trading-v2";
+  onAttempt?: (attempt: OhlcvAttempt) => void;
   signal?: AbortSignal | undefined;
 }
 
 // All limits share one history. Legacy charts have ambiguous denomination and
 // are intentionally not imported into this namespace.
-export function poolOhlcvKey(pool: string, interval: KlineInterval, _limit?: number, currency: PoolPriceCurrency = "usd", tokenAddress?: string): string {
-  return `pool:ohlcv:v2:${pool.toLowerCase()}:${interval}:${currency}${tokenAddress ? `:${tokenAddress.toLowerCase()}` : ""}`;
+export function poolOhlcvKey(pool: string, interval: KlineInterval, _limit?: number, currency: PoolPriceCurrency = "usd", tokenAddress?: string, qualityPolicy?: "trading-v2"): string {
+  return `pool:ohlcv:v2:${pool.toLowerCase()}:${interval}:${currency}${tokenAddress ? `:${tokenAddress.toLowerCase()}` : ""}${qualityPolicy ? ":trading-v2" : ""}`;
 }
 class Runtime {
   readonly transport: OhlcvTransport;
@@ -83,19 +89,22 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
   if (currency !== "usd" && currency !== "token") return null;
   const token = params.tokenAddress?.toLowerCase();
   if (token !== undefined && !isEvmAddress(token)) return null;
-  const key = poolOhlcvKey(pool, params.interval, undefined, currency, token);
+  const key = poolOhlcvKey(pool, params.interval, undefined, currency, token, params.qualityPolicy);
   const r = runtime(store);
   let record = await store.get<StoredPoolOhlcv>(key);
+  if (!record && params.qualityPolicy) record = await store.get<StoredPoolOhlcv>(poolOhlcvKey(pool, params.interval, undefined, currency, token));
   if (record && record.data.schemaVersion !== 2) record = null;
-  if (record?.staleness === "fresh" && chartStaleness(record, params.interval) === "fresh") {
+  if (record?.staleness === "fresh" && chartStaleness(record, params.interval) === "fresh"
+    && (!params.qualityPolicy || quality(record, params.interval).sufficient)) {
     r.stats.cacheHits++;
+    params.onAttempt?.({source: record.source, reason: "cache_hit"});
   } else if (!params.signal?.aborted) {
     let flight = r.inFlight.get(key);
     if (flight) r.stats.coalesced++;
     else if (r.inFlight.size < 4) {
-      flight = refresh(r, pool, params.interval, currency, key, record, token).finally(() => { r.inFlight.delete(key); });
+      flight = refresh(r, pool, params.interval, currency, key, record, token, params.qualityPolicy, params.onAttempt).finally(() => { r.inFlight.delete(key); });
       r.inFlight.set(key, flight);
-    } else r.stats.admissionDenied++;
+    } else { r.stats.admissionDenied++; params.onAttempt?.({source: "cache", reason: "admission_limit"}); }
     if (flight) record = await flight;
   }
   if (!record) { r.stats.unavailable++; return null; }
@@ -106,13 +115,16 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
 }
 
 async function refresh(r: Runtime, pool: string, interval: KlineInterval, currency: PoolPriceCurrency,
-  key: string, cached: DataRecord<StoredPoolOhlcv> | null, token?: string): Promise<DataRecord<StoredPoolOhlcv> | null> {
+  key: string, cached: DataRecord<StoredPoolOhlcv> | null, token?: string, policy?: "trading-v2",
+  onAttempt?: (attempt: OhlcvAttempt) => void): Promise<DataRecord<StoredPoolOhlcv> | null> {
   // Shared 60s retry floor, including empty responses/failures. A client cannot
   // cause an unbounded retry loop on a cold or stale cache entry.
   // Fixed stripes bound control-table growth under arbitrary public addresses.
   // A rare collision defers a refresh; it can never return another pool's data.
   const stripe = createHash("sha256").update(key).digest().readUInt32BE(0) % 4096;
-  if (!await r.store.acquireSchedulerLease(`ohlcv-refresh:${stripe}`, randomUUID(), 60_000)) return cached;
+  if (!await r.store.acquireSchedulerLease(`ohlcv-refresh:${stripe}`, randomUUID(), 60_000)) {
+    onAttempt?.({source: "cache", reason: "refresh_lease"}); return cached;
+  }
   r.stats.refreshes++;
   // Shared work has its own deadline; one disconnected waiter cannot cancel it.
   const signal = AbortSignal.timeout(REFRESH_TIMEOUT_MS);
@@ -120,6 +132,7 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
   const end = Math.floor(Date.now() / 1000 / mapping.seconds) * mapping.seconds;
   const start = end - HISTORY * mapping.seconds;
   const sources = currency === "token" ? ["geckoterminal", "dexpaprika"] as const : ["geckoterminal"] as const;
+  let best = cached;
   for (const source of sources) {
     try {
       signal.throwIfAborted();
@@ -149,7 +162,7 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
         // Page by fixed time windows (not count of returned bars: inactive
         // periods are sparse). Failures discard the entire paging pass.
         const step = interval === "4h" ? 3600 : mapping.seconds;
-        const all: Candle[] = [];
+        const all: PoolCandle[] = [];
         for (let pageEnd = end; pageEnd > start;) {
           // The API also caps each window at one year; 366 daily bars can
           // cross that bound in a non-leap year. Reserve one response slot
@@ -163,9 +176,17 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
         const bars = interval === "4h" ? aggregateCandles(all, mapping.seconds * 1000) : all;
         data = normalizeChart(bars, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000, token);
       }
-      if (data.candles.length === 0) continue;
+      if (data.candles.length === 0) { onAttempt?.({source, reason: "empty"}); continue; }
       if (cached && (data.base.address !== cached.data.base.address || data.quote.address !== cached.data.quote.address)) {
         throw new Error("pair identity changed");
+      }
+      if (policy) {
+        const candidate: DataRecord<StoredPoolOhlcv> = {data, source, asOf: Date.now(), staleness: "fresh"};
+        const score = quality(candidate, interval);
+        onAttempt?.({source, reason: score.reason, contiguousBars: score.contiguous});
+        if (score.fresh && (!best || better(candidate, best, interval))) best = candidate;
+        if (best && quality(best, interval).sufficient) break;
+        continue;
       }
       const latest = data.candles.at(-1)!.timestamp;
       if (cached && latest <= cached.data.candles.at(-1)!.timestamp) continue;
@@ -176,13 +197,37 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
       await r.store.put(key, data, { source, freshForMs: Math.max(60_000, nextClose - Date.now()), deadAfterMs: DEAD_AFTER_MS });
       return await r.store.get<StoredPoolOhlcv>(key);
     } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      const reason = error instanceof AdapterError && error.status === 429 ? "rate_limited"
+        : error instanceof AdapterError && error.status === 402 ? "quota_exhausted"
+        : /cooling down/.test(message) ? "cooldown" : /budget exhausted/.test(message) ? "budget_exhausted"
+        : /invalid candle|conflicting candle|invalid normalized/.test(message) ? "invalid_candles"
+        : /identity|requested token/.test(message) ? "identity_mismatch" : "provider_error";
+      onAttempt?.({source, reason});
       console.warn(`[pool-ohlcv] source=${source} failed: ${sanitizeMessage(error)}`);
     }
+  }
+  if (policy && best && best !== cached) {
+    const latest = best.data.candles.at(-1)!.timestamp;
+    await r.store.put(key, best.data, {source: best.source,
+      freshForMs: Math.max(60_000, latest + mapping.seconds * 2000 - Date.now()), deadAfterMs: DEAD_AFTER_MS});
+    return r.store.get<StoredPoolOhlcv>(key);
   }
   return cached;
 }
 
-export function normalizeChart(candles: Candle[], pair: DexPair, currency: PoolPriceCurrency,
+function quality(record: DataRecord<StoredPoolOhlcv>, interval: KlineInterval) {
+  return candleQuality(record.data.candles, record.data.quality?.conflictingTimestamps ?? [], INTERVALS[interval].seconds * 1000, record.asOf, Date.now());
+}
+function better(candidate: DataRecord<StoredPoolOhlcv>, previous: DataRecord<StoredPoolOhlcv>, interval: KlineInterval): boolean {
+  const a = quality(candidate, interval), b = quality(previous, interval);
+  if (a.fresh !== b.fresh) return a.fresh;
+  if (a.supported !== b.supported) return a.supported > b.supported;
+  if (a.close !== b.close) return a.close > b.close;
+  return a.contiguous > b.contiguous;
+}
+
+export function normalizeChart(candles: PoolCandle[], pair: DexPair, currency: PoolPriceCurrency,
   source: "geckoterminal" | "dexpaprika", start: number, end: number, intervalMs: number, token?: string): StoredPoolOhlcv {
   if (token && token !== pair.base.address && token !== pair.quote.address) throw new Error("requested token is not in pool");
   // Both providers are requested in their native ratio orientation. Normalize
@@ -210,14 +255,15 @@ export function normalizeChart(candles: Candle[], pair: DexPair, currency: PoolP
       : invert ? "cannot_exactly_convert_volume_after_price_inversion" : null };
 }
 
-export function aggregateCandles(candles: Candle[], intervalMs: number): Candle[] {
-  const result = new Map<number, Candle>();
+export function aggregateCandles(candles: PoolCandle[], intervalMs: number): PoolCandle[] {
+  const result = new Map<number, PoolCandle>();
   for (const row of [...candles].sort((a, b) => a.timestamp - b.timestamp)) {
     const time = Math.floor(row.timestamp / intervalMs) * intervalMs;
     const existing = result.get(time);
     if (!existing) result.set(time, { ...row, timestamp: time });
     else { existing.high = Math.max(existing.high, row.high); existing.low = Math.min(existing.low, row.low);
-      existing.close = row.close; existing.volume += row.volume; }
+      existing.close = row.close;
+      existing.volume = existing.volume === null || row.volume === null ? null : existing.volume + row.volume; }
   }
   return [...result.values()];
 }

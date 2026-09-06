@@ -15,7 +15,7 @@ import {
 import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
 import { getPoolOhlcv, poolOhlcvDiagnostics } from "./query/poolOhlcv.js";
-import { FEATURE_INDEX_KEY, FEATURE_VERSION, featureKey, isFeatureInterval, readTradingFeatures,
+import { FEATURE_INDEX_KEY, FEATURE_INDEX_KEY_V2, FEATURE_VERSION, FEATURE_VERSION_V2, featureKey, isFeatureInterval, readTradingFeatures, readFeatureAttempt,
   type FeatureSnapshot } from "./query/tradingFeatures.js";
 import type { FeatureIndex } from "./jobs/tradingFeatures.js";
 import { getSecurity } from "./query/security.js";
@@ -116,6 +116,7 @@ const STATUS_SNAPSHOT_KEYS = [
   "universe:pools",
   "pools:index",
   FEATURE_INDEX_KEY,
+  FEATURE_INDEX_KEY_V2,
   VENUS_CORE_MARKETS_KEY,
 ];
 
@@ -765,14 +766,20 @@ export function createServer(deps: ServerDeps): Hono {
     });
   });
 
-  app.get("/trading/features/v1/pools", async (c) => {
-    const index = await deps.store.get<FeatureIndex>(FEATURE_INDEX_KEY);
-    return c.json({ data: index?.data ?? null, meta: { version: FEATURE_VERSION,
+  for (const version of [FEATURE_VERSION, FEATURE_VERSION_V2] as const) {
+  const prefix = version === FEATURE_VERSION ? "/trading/features/v1" : "/trading/features/v2";
+  const indexKey = version === FEATURE_VERSION ? FEATURE_INDEX_KEY : FEATURE_INDEX_KEY_V2;
+  app.get(`${prefix}/pools`, async (c) => {
+    const index = await deps.store.get<FeatureIndex>(indexKey);
+    const series = index ? await Promise.all(index.data.pools.flatMap(p => index.data.intervals.map(async interval => ({
+      pool: p.pool, interval, producer: await readFeatureAttempt(deps.store, p.pool, interval, p.currency, p.tokenAddress),
+    })))) : [];
+    return c.json({ data: index ? {...index.data, series} : null, meta: { version, preferredVersion: FEATURE_VERSION_V2,
       asOf: index?.asOf ?? null, staleness: index?.staleness ?? "dead" } });
   });
 
   // Strict store-only reads: batch size and identities cannot trigger upstream work.
-  app.get("/trading/features/v1/:pool/input", async (c) => {
+  app.get(`${prefix}/:pool/input`, async (c) => {
     const pool = normalizeAddress(c.req.param("pool"));
     const interval = c.req.query("interval") ?? "5m";
     const id = c.req.query("snapshotId") ?? "";
@@ -780,32 +787,33 @@ export function createServer(deps: ServerDeps): Hono {
       || Object.keys(c.req.query()).some((key) => !["interval", "snapshotId"].includes(key))) {
       return c.json({ data: null, error: { code: "invalid_request" } }, 400);
     }
-    const index = await deps.store.get<FeatureIndex>(FEATURE_INDEX_KEY);
+    const index = await deps.store.get<FeatureIndex>(indexKey);
     const selection = index?.data.pools.find((entry) => entry.pool === pool);
-    const snapshot = selection ? await deps.store.get<FeatureSnapshot>(featureKey(pool, interval, selection.currency, selection.tokenAddress)) : null;
+    const snapshot = selection ? await deps.store.get<FeatureSnapshot>(featureKey(pool, interval, selection.currency, selection.tokenAddress, version)) : null;
     if (!snapshot || snapshot.data.snapshotId !== id || snapshot.data.input.priceCurrency !== selection?.currency) {
       return c.json({ data: null, error: { code: "snapshot_not_retained" } }, 404);
     }
-    return c.json({ data: snapshot.data, meta: { version: FEATURE_VERSION, replayAt: snapshot.data.calculatedAt } });
+    return c.json({ data: snapshot.data, meta: { version, replayAt: snapshot.data.calculatedAt } });
   });
 
-  app.get("/trading/features/v1/:pool", async (c) => {
+  app.get(`${prefix}/:pool`, async (c) => {
     const pool = normalizeAddress(c.req.param("pool"));
     const interval = c.req.query("interval") ?? "5m";
     if (!pool || !isFeatureInterval(interval) || Object.keys(c.req.query()).some((key) => key !== "interval")) {
       return c.json({ data: null, error: { code: "invalid_request" } }, 400);
     }
-    const index = await deps.store.get<FeatureIndex>(FEATURE_INDEX_KEY);
+    const index = await deps.store.get<FeatureIndex>(indexKey);
     const selection = index?.data.pools.find((entry) => entry.pool === pool);
     if (!selection) return c.json({ data: null, error: { code: "outside_feature_watchlist" } }, 404);
-    const result = await readTradingFeatures(deps.store, pool, interval, Date.now(), selection.currency, selection.tokenAddress);
+    const producer = await readFeatureAttempt(deps.store, pool, interval, selection.currency, selection.tokenAddress);
+    const result = await readTradingFeatures(deps.store, pool, interval, Date.now(), selection.currency, selection.tokenAddress, version);
     if (!result || result.identity.priceCurrency !== selection.currency) {
-      return c.json({ data: null, error: { code: "features_pending" } }, 404);
+      return c.json({ data: null, error: { code: producer.state === "unavailable" ? "features_unavailable" : "features_pending", reason: producer.reason }, meta: {version, producer} }, 404);
     }
-    return c.json({ data: result, meta: { version: FEATURE_VERSION } });
+    return c.json({ data: result, meta: { version, producer } });
   });
 
-  app.get("/trading/features/v1", async (c) => {
+  app.get(prefix, async (c) => {
     const raw = (c.req.query("pools") ?? "").split(",");
     const interval = c.req.query("interval") ?? "5m";
     const pools = raw.map((value) => normalizeAddress(value));
@@ -813,18 +821,20 @@ export function createServer(deps: ServerDeps): Hono {
       || Object.keys(c.req.query()).some((key) => !["pools", "interval"].includes(key))) {
       return c.json({ data: null, error: { code: "invalid_request", message: "1..10 pool addresses and interval 5m, 15m or 1h required" } }, 400);
     }
-    const index = await deps.store.get<FeatureIndex>(FEATURE_INDEX_KEY);
+    const index = await deps.store.get<FeatureIndex>(indexKey);
     const entries = await Promise.all([...new Set(pools as string[])].map(async (pool) => {
       const selection = index?.data.pools.find((entry) => entry.pool === pool);
       if (!selection) return [pool, { data: null, error: { code: "outside_feature_watchlist" } }] as const;
       try {
-        const result = await readTradingFeatures(deps.store, pool, interval, Date.now(), selection.currency, selection.tokenAddress);
-        return [pool, result && result.identity.priceCurrency === selection.currency ? { data: result }
-          : { data: null, error: { code: "features_pending" } }] as const;
+        const producer = await readFeatureAttempt(deps.store, pool, interval, selection.currency, selection.tokenAddress);
+        const result = await readTradingFeatures(deps.store, pool, interval, Date.now(), selection.currency, selection.tokenAddress, version);
+        return [pool, result && result.identity.priceCurrency === selection.currency ? { data: result, meta: {version, producer} }
+          : { data: null, error: { code: producer.state === "unavailable" ? "features_unavailable" : "features_pending", reason: producer.reason }, meta: {version, producer} }] as const;
       } catch { return [pool, { data: null, error: { code: "store_unavailable" } }] as const; }
     }));
-    return c.json({ data: Object.fromEntries(entries), meta: { version: FEATURE_VERSION, interval, count: entries.length } });
+    return c.json({ data: Object.fromEntries(entries), meta: { version, interval, count: entries.length } });
   });
+  }
 
   app.get("/pools/:address/ohlcv", async (c) => {
     const poolAddress = c.req.param("address").toLowerCase();

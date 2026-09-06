@@ -4,6 +4,7 @@ import { AdapterError, fetchJson, isRecord, normalizeAddress, parseNum, parseStr
 import type { GeckoTokenRef } from "./geckoTerminal.js";
 
 const SOURCE = "dexpaprika";
+export type DexCandle = Omit<Candle, "volume"> & {volume: number | null};
 const BASE = "https://api.dexpaprika.com/networks/bsc/pools";
 /** The mixed-case alias supports the operator's existing .env without editing it. */
 function headers(): Record<string, string> {
@@ -37,20 +38,24 @@ export async function fetchDexPair(params: DexParams): Promise<DexPair> {
 /** One bounded request covers <=366 time buckets. Missing bars remain missing. */
 export async function fetchDexCandles(params: DexParams & {
   interval: string; start: number; end: number; limit: number;
-}): Promise<Candle[]> {
+}): Promise<DexCandle[]> {
   const query = new URLSearchParams({ interval: params.interval, start: String(params.start),
     end: String(params.end), limit: String(Math.min(366, params.limit)), inversed: "false" });
   const raw = await fetchJson({ source: SOURCE, url: `${BASE}/${params.poolAddress}/ohlcv?${query}`,
     signal: params.signal, fetchFn: params.fetchFn ?? globalThis.fetch, headers: headers() });
   if (!Array.isArray(raw)) throw new AdapterError(SOURCE, "invalid candle response");
-  const result = new Map<number, Candle>();
+  const result = new Map<number, DexCandle>();
   for (const value of raw) {
     if (!isRecord(value)) throw new AdapterError(SOURCE, "invalid candle");
     const timestamp = Date.parse(String(value["time_open"]));
     const open = parseNum(value["open"]), high = parseNum(value["high"]);
-    const low = parseNum(value["low"]), close = parseNum(value["close"]), volume = parseNum(value["volume"]);
-    if (!Number.isFinite(timestamp) || open === null || high === null || low === null || close === null || volume === null
-      || low <= 0 || volume < 0 || high < Math.max(open, close, low) || low > Math.min(open, close)) {
+    const low = parseNum(value["low"]), close = parseNum(value["close"]);
+    const rawVolume = parseNum(value["volume"]);
+    // Missing volume is observed on otherwise valid live OHLC rows. Preserve
+    // their prices, but never convert unknown volume into an observed zero.
+    const volume = rawVolume !== null && rawVolume >= 0 ? rawVolume : null;
+    if (!Number.isFinite(timestamp) || open === null || high === null || low === null || close === null
+      || low <= 0 || high < Math.max(open, close, low) || low > Math.min(open, close)) {
       throw new AdapterError(SOURCE, "invalid candle values");
     }
     if (timestamp >= params.start * 1000 && timestamp < params.end * 1000) {
