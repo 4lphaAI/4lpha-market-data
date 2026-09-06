@@ -30,6 +30,17 @@ function near(value:number|null,expected:number){assert.ok(value!==null&&Math.ab
 async function config(store:MemoryStore|PostgresStore){await store.put(FEATURE_WATCHLIST_KEY,[{pool:POOL,currency:"token"}],{source:"test",freshForMs:60_000,deadAfterMs:60_000});}
 
 describe("versioned feature warm-up",()=>{
+  it("reproduces IDs after PostgreSQL JSONB recursively reorders object keys",()=>{
+    const data=input(), snapshot=calculateFeatures(data,Date.now(),FEATURE_VERSION_V2);
+    function reordered(value:unknown):unknown {
+      if(Array.isArray(value))return value.map(reordered);
+      if(value!==null&&typeof value==="object")return Object.fromEntries(Object.entries(value).reverse().map(([key,entry])=>[key,reordered(entry)]));
+      return value;
+    }
+    const roundTrip=reordered(JSON.parse(JSON.stringify(snapshot))) as FeatureSnapshot;
+    const replay=calculateFeatures(roundTrip.input,roundTrip.calculatedAt,roundTrip.version);
+    assert.equal(replay.snapshotId,snapshot.snapshotId);assert.deepEqual(replay.metrics,snapshot.metrics);
+  });
   it("retains v1 and computes v2 from fixed per-indicator windows",()=>{
     const data=input(52), now=Date.now();
     assert.equal(calculateFeatures(data,now).metrics.ema26.reason,"insufficient_history");

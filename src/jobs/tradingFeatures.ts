@@ -60,7 +60,11 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
   // State is one bounded object, not one durable key per arbitrary input.
   for (const candidate of candidates) {
     const stateKey = `${candidate.key}:${candidate.currency}`;
-    state[stateKey] = previous[stateKey] ?? { attemptedAt: 0, nextAttempt: 0, state: "queued", reason: "not_attempted" };
+    const saved = previous[stateKey];
+    // Recompute v2 IDs once after canonical-hash rollout. Complete cached
+    // candles are reused; this does not force upstream refreshes.
+    state[stateKey] = saved?.revision === 2 ? saved : {revision: 2, attemptedAt: 0, nextAttempt: 0,
+      state: "queued", reason: saved ? "recompute_version" : "not_attempted"};
   }
   const due = candidates.filter((c) => state[`${c.key}:${c.currency}`]!.nextAttempt <= now())
     .sort((a, b) => state[`${a.key}:${a.currency}`]!.attemptedAt - state[`${b.key}:${b.currency}`]!.attemptedAt || a.key.localeCompare(b.key)).slice(0, 4);

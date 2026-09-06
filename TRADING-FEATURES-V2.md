@@ -28,6 +28,13 @@ Never assume a ratio is USD or that a symbol identifies the target contract.
 watchlist/source changes series identity. Input snapshots and versioned feature
 keys are separate; historical v1 snapshots are not relabeled v2.
 
+V2 input hashes recursively sort object keys by code-unit order, preserving array
+order, so PostgreSQL JSONB reordering does not alter replay IDs. An actual
+production replay exposed this limitation of the old JSON.stringify-only
+approach; it is pinned by a reordered-JSON regression fixture. The producer
+revision queues a bounded one-time recomputation of v2 IDs from available
+cached inputs after rollout. Existing v1 hash semantics remain unchanged.
+
 ## Fixed warm-up per indicator
 
 | Metric | v1 consecutive bars | v2 consecutive bars |
@@ -139,7 +146,7 @@ The optional live probe supports `--v2`; with
 `<pool> <token> token --simulate-gecko-429 --v2`, only Gecko failures are simulated,
 Dex responses are real, and all state stays in an isolated MemoryStore.
 
-Validated locally on 2026-09-06: typecheck/build and all 548 offline tests pass.
+Validated locally on 2026-09-06: typecheck/build and all 549 offline tests pass.
 The real TSLAB 5m probe tried both providers despite Gecko returning HTTP 200;
 both reported a latest 43-bar contiguous segment. v2 served ROC, EMA12, ATR14,
 ATR% and (on the selected Gecko observation) RVOL, while EMA26/spread remained

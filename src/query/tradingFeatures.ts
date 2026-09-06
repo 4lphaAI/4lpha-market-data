@@ -10,6 +10,7 @@ export type FeatureVersion = typeof FEATURE_VERSION | typeof FEATURE_VERSION_V2;
 export const FEATURE_INDEX_KEY_V2 = "trading:features:v2:index";
 export const FEATURE_STATE_KEY = "trading:features:v1:producer";
 export interface FeatureAttempt {
+  revision?: number;
   attemptedAt: number; nextAttempt: number; completedAt?: number; lastSuccessAt?: number;
   consecutiveFailures?: number; state?: "queued" | "refreshing" | "ready" | "partial" | "unavailable";
   reason?: string; sources?: OhlcvAttempt[];
@@ -76,8 +77,14 @@ export function featureKey(pool: string, interval: FeatureInterval, currency: "u
 export function isFeatureInterval(value: string): value is FeatureInterval {
   return Object.hasOwn(FEATURE_INTERVALS, value);
 }
-function hash(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value !== null && typeof value === "object") return Object.fromEntries(Object.entries(value)
+    .sort(([a],[b])=>a < b ? -1 : a > b ? 1 : 0).map(([key,entry])=>[key,canonical(entry)]));
+  return value;
+}
+function hash(value: unknown, stable = false): string {
+  return createHash("sha256").update(JSON.stringify(stable ? canonical(value) : value)).digest("hex");
 }
 function validPrice(c: PoolCandle): boolean {
   return [c.open, c.high, c.low, c.close].every((n) => Number.isFinite(n) && n > 0)
@@ -169,7 +176,7 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
   // Retain the exact bounded observation, including rejected rows, for reproducibility.
   const retainedInput = { ...input, candles: input.candles.map((bar) => ({ ...bar })) };
   return {
-    version, seriesId, snapshotId: hash({ version, input: retainedInput, cutoff }), input: retainedInput,
+    version, seriesId, snapshotId: hash({ version, input: retainedInput, cutoff }, version === FEATURE_VERSION_V2), input: retainedInput,
     calculatedAt: now, evaluationClose: closeTime,
     refreshAfter: closeTime === null ? now + 60_000 : closeTime + step + PUBLICATION_LAG_MS,
     expiresAt: closeTime === null ? now : closeTime + step + PUBLICATION_LAG_MS + SCHEDULING_GRACE_MS,
