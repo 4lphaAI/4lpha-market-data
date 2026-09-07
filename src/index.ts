@@ -17,7 +17,12 @@ import {
   venusCoreRiskJob,
 } from "./jobs/venusCore.js";
 
+import { studioConfig } from "./studio/config.js";
+import { studioJob } from "./studio/catalog.js";
+
 loadDotEnv();
+const studio = studioConfig(process.env);
+if (process.env["STUDIO_DISCOVERY_ENABLED"] === "true" && !studio) console.warn("[studio] invalid configuration; integration disabled" );
 
 const DEFAULT_PORT = 8080;
 
@@ -65,9 +70,11 @@ scheduler.register(venusCoreRiskJob(store));
 scheduler.register(venusCoreHotJob(store));
 scheduler.register(venusCoreRewardsJob(store));
 
+if (studio) scheduler.register(studioJob(store, studio));
+
 scheduler.start();
 
-const app = createServer({ scheduler, store });
+const app = createServer({ scheduler, store, studio });
 const port = resolvePort(process.env["PORT"]);
 const server = serve({ fetch: app.fetch, port });
 

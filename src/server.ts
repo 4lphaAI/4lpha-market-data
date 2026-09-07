@@ -1,3 +1,5 @@
+import { mountStudio } from "./studio/catalog.js";
+import type { StudioConfig } from "./studio/config.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Scheduler } from "./core/scheduler.js";
@@ -43,6 +45,7 @@ import {
 
 /** Collaborators the HTTP layer reads from. Injected so the app stays testable. */
 export interface ServerDeps {
+  studio?: StudioConfig | null;
   scheduler: Scheduler;
   store: SnapshotStore;
   refreshVenusRisk?: typeof refreshVenusRisk;
@@ -1114,5 +1117,6 @@ export function createServer(deps: ServerDeps): Hono {
     return c.json({ error: { code: "internal_error" } }, 500);
   });
 
+  mountStudio(app, deps.store, deps.studio ?? null);
   return app;
 }
