@@ -37,8 +37,7 @@ export const SECURITY_TTL: Record<Lane, SecurityTtl> = {
   meme: { freshForMs: 5 * MINUTE, deadAfterMs: 60 * MINUTE },
   coins: { freshForMs: 24 * HOUR, deadAfterMs: 7 * 24 * HOUR },
   bstocks: { freshForMs: 24 * HOUR, deadAfterMs: 7 * 24 * HOUR },
-  // Required by the widened lane union (ALLOWLIST-PRICE-SPEC §2b item 5); a
-  // frozen curated list changes as rarely as the other two curated lanes.
+  // A frozen curated list changes as rarely as the other two curated lanes.
   allowlist: { freshForMs: 24 * HOUR, deadAfterMs: 7 * 24 * HOUR },
 };
 

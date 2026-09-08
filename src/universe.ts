@@ -8,7 +8,7 @@
  *
  * A fourth lane, `allowlist`, is the frozen `data/eligible-tokens.json`
  * snapshot; it is reported and served on its own rather than merged into the
- * three (ALLOWLIST-PRICE-SPEC §2b item 5).
+ * three so the complete curated list remains enumerable.
  */
 
 import type { Lane, UniverseEntry } from "./core/models.js";
@@ -86,8 +86,8 @@ export function bstockAddresses(): string[] {
 }
 
 /**
- * The frozen allowlist as universe rows, read through the shared loader
- * (ALLOWLIST-PRICE-SPEC §2b item 5). Empty when the snapshot is unreadable —
+ * The frozen allowlist as universe rows, read through the shared loader. Empty
+ * when the snapshot is unreadable —
  * the same degradation the eligibility gate takes.
  */
 export function allowlistUniverse(): UniverseEntry[] {
@@ -114,8 +114,8 @@ export interface LaneStatus {
 export interface UniverseResult {
   entries: UniverseEntry[];
   /**
-   * The allowlist lane, kept beside `entries` rather than merged into them
-   * (ALLOWLIST-PRICE-SPEC §2b item 5): every bStock is also allowlisted, so a
+   * The allowlist lane, kept beside `entries` rather than merged into them:
+   * every bStock is also allowlisted, so a
    * merge would either relabel the bStocks lane or drop those rows from this
    * one, and this lane has to answer with the whole snapshot.
    */

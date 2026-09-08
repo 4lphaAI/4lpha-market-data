@@ -103,7 +103,7 @@ describe("GET /universe", () => {
     const data = body["data"];
     assert.ok(Array.isArray(data));
     // 221 of the snapshot's 222: the BNB row is the `"native"` sentinel, which
-    // has no contract address (ALLOWLIST-PRICE-SPEC §2b item 5).
+    // has no contract address.
     assert.equal(data.length, 221);
 
     const meta = body["meta"];

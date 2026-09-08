@@ -8,8 +8,7 @@
 
 /**
  * Which product surface a token belongs to. `allowlist` is the frozen
- * `data/eligible-tokens.json` snapshot, enumerable over `/universe`
- * (ALLOWLIST-PRICE-SPEC §2b item 5).
+ * `data/eligible-tokens.json` snapshot, enumerable over `/universe`.
  */
 export type Lane = "meme" | "coins" | "bstocks" | "allowlist";
 

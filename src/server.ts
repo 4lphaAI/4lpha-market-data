@@ -54,8 +54,7 @@ export interface ServerDeps {
   readTokenDecimals?: DecimalsReader;
 }
 
-// `allowlist` widens the closed set by exactly one member, so the execution
-// plane can enumerate the frozen snapshot (ALLOWLIST-PRICE-SPEC §2b item 5).
+// `allowlist` is kept as a separate enumerable lane for the execution plane.
 const LANES: Lane[] = ["meme", "coins", "bstocks", "allowlist"];
 
 /**
@@ -378,8 +377,8 @@ export function createServer(deps: ServerDeps): Hono {
 
     const universe = await buildUniverse(deps.store);
     // The allowlist lane is served from the frozen snapshot itself, not from the
-    // merged entries, so it answers with the whole list (ALLOWLIST-PRICE-SPEC
-    // §2b item 5). The other three keep filtering the merge unchanged.
+    // merged entries, so it answers with the whole list. The other three keep
+    // filtering the merge unchanged.
     const entries =
       laneParam === undefined
         ? universe.entries

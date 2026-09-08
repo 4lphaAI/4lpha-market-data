@@ -4,7 +4,7 @@
  * The set comes from the `tracked:addresses` snapshot, which another process
  * (or an operator) writes; with none present it defaults to the whole eligible
  * allowlist unioned with the bStocks list, so the lane is never dark and every
- * allowlisted token gets a price (ALLOWLIST-PRICE-SPEC §2 items 1-2).
+ * allowlisted token gets a price.
  * Concurrency is bounded inside the Binance adapter, and the fan-out is
  * additionally issued in batches here.
  */
@@ -27,7 +27,7 @@ export const TRACKED_ADDRESSES_KEY = "tracked:addresses";
  *
  * The tracked set went from 25 addresses to the 221-address allowlist, and one
  * `Promise.allSettled` over all of them is a different shape of load on an
- * undocumented upstream (ALLOWLIST-PRICE-SPEC §2 item 2).
+ * undocumented upstream.
  */
 export const PRICE_BATCH_SIZE = 25;
 
@@ -36,7 +36,7 @@ export const PRICE_BATCH_SIZE = 25;
  * the static bStocks list.
  *
  * The allowlist is the set the consumer filters by market cap, so anything left
- * out of it has no snapshot to filter (ALLOWLIST-PRICE-SPEC §2 item 1). An
+ * out of it has no snapshot to filter. An
  * unreadable allowlist falls back to bStocks alone rather than to nothing.
  */
 export async function readTrackedAddresses(store: SnapshotStore): Promise<string[]> {
@@ -76,7 +76,7 @@ export async function runBinancePrices(
   };
 
   // Batched rather than one fan-out over the whole set, and never retried: a
-  // miss is left for the next cycle (ALLOWLIST-PRICE-SPEC §2 item 2).
+  // miss is left for the next cycle.
   for (let start = 0; start < addresses.length; start += PRICE_BATCH_SIZE) {
     const batch = addresses.slice(start, start + PRICE_BATCH_SIZE);
     const outcomes = await Promise.allSettled(
@@ -104,7 +104,7 @@ export async function runBinancePrices(
 
   // The throw stays, and it is the job's status line: all four counts ride on
   // it so a dark cycle says how many addresses it even tried
-  // (ALLOWLIST-PRICE-SPEC §2 item 3).
+  // so a dark cycle says how many addresses it even tried.
   if (result.updated === 0 && result.attempted > 0) {
     throw new Error(
       `no tracked prices updated (attempted=${result.attempted} updated=${result.updated}` +

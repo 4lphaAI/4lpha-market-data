@@ -137,7 +137,7 @@ describe("binance-prices job", () => {
 
     // 221, not the snapshot's 222: the BNB row is the `"native"` sentinel and
     // carries no contract address. Every bStock is itself allowlisted, so the
-    // union dedupes back to the allowlist (ALLOWLIST-PRICE-SPEC §2 item 4).
+    // union dedupes back to the allowlist.
     assert.equal(tracked.length, 221);
     assert.equal(new Set(tracked).size, tracked.length);
     for (const address of allowlist!.keys()) assert.ok(tracked.includes(address), address);
@@ -207,7 +207,7 @@ describe("binance-prices job", () => {
   it("keeps quoting every other address when one bapi call misses", async () => {
     const store = new MemoryStore();
     // Two full batches and part of a third, so the miss also proves a later
-    // batch still ran (ALLOWLIST-PRICE-SPEC §2 item 4).
+    // batch still ran.
     assert.equal(PRICE_BATCH_SIZE, 25);
     const addresses = Array.from(
       { length: PRICE_BATCH_SIZE * 2 + 10 },

@@ -62,7 +62,7 @@ import { isEvmAddress, normalizeAddress, sanitizeMessage } from "../adapters/htt
 import type { SnapshotStore } from "../core/store.js";
 import { COINS_UNIVERSE_KEY } from "../universe.js";
 // The frozen-snapshot parser now lives in `src/allowlist.ts` so the price job
-// and the universe lane share it (ALLOWLIST-PRICE-SPEC §2 item 1); it is
+// and the universe lane share it; it is
 // re-exported here because this module has always been its public home.
 import { loadAllowlist, resetAllowlistCache } from "../allowlist.js";
 

@@ -2,8 +2,8 @@
  * The frozen `data/eligible-tokens.json` allowlist, loaded and indexed once.
  *
  * Extracted from `query/eligibility.ts` so the price-tracking job and the
- * universe lane read the snapshot through the same parser as the gate
- * (ALLOWLIST-PRICE-SPEC §2 item 1). Behaviour is unchanged: same file, same
+ * universe lane read the snapshot through the same parser as the gate.
+ * Behaviour is unchanged: same file, same
  * validation, same memoization, same log line.
  */
 
@@ -22,7 +22,7 @@ export interface AllowlistEntry {
   /**
    * First element of the entry's `sources` array — `bstocks`, `cmc-top200-bsc`
    * or `static` — carried so the allowlist universe lane can report where a row
-   * came from (ALLOWLIST-PRICE-SPEC §2b item 5).
+   * came from.
    */
   source: string;
 }

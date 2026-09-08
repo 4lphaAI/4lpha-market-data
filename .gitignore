@@ -7,3 +7,19 @@ dist/
 
 # One-off diagnostics kept locally, not part of the service.
 scripts/degen-probe.ts
+
+# Local-only agent notes and historical design documents. These stay available
+# in a developer checkout but are intentionally not published with the repo.
+.claude/
+AGENTS.md
+CLAUDE.md
+ALLOWLIST-PRICE-SPEC.md
+MAJORS-PRICE-SPEC.md
+STUDIO-A2A-DISCOVERY-RESULT.md
+STUDIO-A2A-DISCOVERY-SPEC.md
+STUDIO-DISCOVERY-PRODUCTION-DEPLOYMENT.md
+STUDIO-DISCOVERY-REVIEW.md
+STUDIO-DISCOVERY.md
+TRADING-FEATURES-HANDOFF-2026-09-06.md
+TRADING-FEATURES-SPEC.md
+TRADING-FEATURES-V2.md
