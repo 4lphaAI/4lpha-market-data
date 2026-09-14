@@ -260,8 +260,39 @@ describe("bounded feature producer and store-only delivery", () => {
     const store = new MemoryStore(() => NOW); await configure(store);
     const signal = new AbortController(); signal.abort();
     await assert.rejects(runTradingFeatures(store, signal.signal));
-    await assert.rejects(runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW, load: async () => ({ ...chart(), staleness: "stale" }) }), /unavailable/);
+    await assert.rejects(runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW, load: async () => null }), /unavailable/);
     assert.equal(await store.get(featureKey(POOL, "5m")), null);
+  });
+  it("treats a pass of only stale inputs as quiet, not as a job failure", async () => {
+    // bStocks outside US market hours: the provider answers, the last close is
+    // old. Nothing is written, the series is marked unavailable, the job is not.
+    const store = new MemoryStore(() => NOW); await configure(store);
+    const warnings: string[] = []; const warn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+    try {
+      const result = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW,
+        load: async (_s, p) => { p.onAttempt?.({ source: "geckoterminal", reason: "stale", contiguousBars: 15 }); return { ...chart(), staleness: "stale" }; } });
+      assert.deepEqual(result, { attempted: 3, updated: 0, failed: 3 });
+    } finally { console.warn = warn; }
+    assert.equal(await store.get(featureKey(POOL, "5m")), null);
+    const state = (await store.get<Record<string, { state: string; reason: string }>>(FEATURE_STATE_KEY))!.data;
+    assert.equal(state[`${featureKey(POOL, "5m")}:usd`]?.state, "unavailable");
+    assert.equal(state[`${featureKey(POOL, "5m")}:usd`]?.reason, "stale_input");
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /quiet, not failed \(stale_input×3\)/);
+  });
+  it("still fails the job when a provider is the reason, and names it", async () => {
+    const store = new MemoryStore(() => NOW); await configure(store);
+    await assert.rejects(runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW,
+      load: async (_s, p) => { p.onAttempt?.({ source: "geckoterminal", reason: "rate_limited" }); return null; } }),
+      /unavailable for every attempted series \(rate_limited×3\)/);
+    // One stale series in a batch does not hide the other two provider failures.
+    const mixed = new MemoryStore(() => NOW); await configure(mixed);
+    await assert.rejects(runTradingFeatures(mixed, AbortSignal.timeout(1000), { now: () => NOW,
+      load: async (_s, p) => {
+        if (p.interval === "5m") return { ...chart(), staleness: "stale" };
+        p.onAttempt?.({ source: "geckoterminal", reason: "provider_error" }); return null;
+      } }), /\(provider_error×2, stale_input\)/);
   });
   it("shares producer admission across replicas, persists replay evidence and expires by input age in Postgres", async () => {
     let time = NOW; const pg = new FakePg();

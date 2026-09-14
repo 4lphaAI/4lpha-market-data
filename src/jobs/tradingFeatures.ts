@@ -109,8 +109,28 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
   for (const outcome of outcomes) if (outcome.status === "rejected") failed++;
   signal.throwIfAborted();
   await store.put(FEATURE_STATE_KEY, state, { source: "trading-features", freshForMs: 60_000, deadAfterMs: RETENTION });
-  if (due.length > 0 && failed === due.length) throw new Error("trading feature inputs unavailable for every attempted series");
+  if (due.length > 0 && failed === due.length) {
+    // A pass is a job failure only when no provider answered. A batch of one
+    // bStock series outside US market hours fails with `stale_input` — the
+    // provider answered, the market is just closed — and marking the job
+    // failed for that put `lastError` on /status most of the day (66% of all
+    // error lines over the first week in production, with 17/18 series ready).
+    const reasons = due.map((c) => state[`${c.key}:${c.currency}`]!.reason ?? "unknown");
+    const summary = summarizeReasons(reasons);
+    if (reasons.every((reason) => QUIET_REASONS.has(reason))) {
+      console.warn(`[trading-features] no series advanced this pass; inputs quiet, not failed (${summary})`);
+    } else {
+      throw new Error(`trading feature inputs unavailable for every attempted series (${summary})`);
+    }
+  }
   return { attempted: due.length, updated, failed };
+}
+/** Reasons meaning the provider answered but had nothing new: not an outage. */
+const QUIET_REASONS: ReadonlySet<string> = new Set(["stale_input", "stale", "empty", "gap", "refresh_lease", "cache_hit"]);
+function summarizeReasons(reasons: string[]): string {
+  const counts = new Map<string, number>();
+  for (const reason of reasons) counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  return [...counts].map(([reason, n]) => (n > 1 ? `${reason}×${n}` : reason)).join(", ");
 }
 export function tradingFeaturesJob(store: SnapshotStore): JobSpec {
   return { name: "trading-features", intervalMs: 60_000, jitterMs: 2_000, timeoutMs: 30_000,

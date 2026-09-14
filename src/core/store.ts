@@ -78,6 +78,15 @@ function toDate(value: number | null): Date | null {
   return value === null ? null : new Date(value);
 }
 
+/**
+ * `JSON.stringify` replacer that drops U+0000 from string values. Works on the
+ * value, not the serialized text: a legitimate literal `0000` in a name is
+ * escaped to `\\u0000` on the wire and a textual replace would corrupt it.
+ */
+function stripNul(_key: string, value: unknown): unknown {
+  return typeof value === "string" && value.includes("\u0000") ? value.replaceAll("\u0000", "") : value;
+}
+
 interface MemoryEntry {
   payload: unknown;
   asOf: number;
@@ -331,7 +340,10 @@ export class PostgresStore implements SnapshotStore {
   }
 
   async put(key: string, payload: unknown, opts: PutOptions): Promise<void> {
-    const json = JSON.stringify(payload ?? null) ?? "null";
+    // jsonb has no representation for U+0000 and the cast rejects the escape
+    // rather than dropping it. Upstream names are user-typed, so one eventually
+    // carries a NUL; the lane must not fail to write for it (it did, 2026-09-12).
+    const json = JSON.stringify(payload ?? null, stripNul) ?? "null";
     await this.#pool.query(
       `insert into dp_snapshots (key, payload, as_of, source, fresh_for_ms, dead_after_ms, updated_at)
        values ($1, $2::jsonb, $3, $4, $5, $6, now())

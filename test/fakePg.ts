@@ -326,13 +326,29 @@ function assertBindable(column: string, type: ColumnType, value: unknown): void 
       if (typeof value !== "string") {
         throw new Error(`fake-pg: column "${column}" expects serialized JSON`);
       }
-      JSON.parse(value);
+      // jsonb cannot hold a NUL: Postgres rejects the escape at the cast, and
+      // did — a Four.Meme token name carrying one blanked the meme lane for
+      // eleven cycles (2026-09-12). Same wording as the server's. Checked on
+      // the decoded value, not the text: an escaped backslash before `u0000`
+      // is ordinary text and Postgres accepts it.
+      if (containsNul(JSON.parse(value))) {
+        throw new Error("unsupported Unicode escape sequence");
+      }
       return;
     default:
       if (typeof value !== "string") {
         throw new Error(`fake-pg: column "${column}" expects text`);
       }
   }
+}
+
+function containsNul(value: unknown): boolean {
+  if (typeof value === "string") return value.includes("\u0000");
+  if (Array.isArray(value)) return value.some(containsNul);
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value).some(([k, v]) => k.includes("\u0000") || containsNul(v));
+  }
+  return false;
 }
 
 /**

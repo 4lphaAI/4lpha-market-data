@@ -138,6 +138,34 @@ describe("PostgresStore snapshots", () => {
     assert.notEqual(record, null);
     assert.equal(record?.data, null);
   });
+
+  it("writes a payload whose string carries a NUL, which jsonb cannot hold", async () => {
+    // The write Postgres rejected in production on 2026-09-12: a Four.Meme
+    // token name with U+0000 in it failed the whole meme-lane write for eleven
+    // cycles. The character is dropped; nothing else about the name changes.
+    const { store, pg } = await build();
+    await store.put("universe:meme", [{ symbol: "AB\u0000C", name: "keep \\u0000 literal" }], TTL);
+    const record = await store.get<Array<{ symbol: string; name: string }>>("universe:meme");
+    assert.deepEqual(record?.data, [{ symbol: "ABC", name: "keep \\u0000 literal" }]);
+    assert.equal(pg.rowCount("dp_snapshots"), 1);
+  });
+
+  it("would have caught the bug: the fake rejects the escape the way Postgres does", async () => {
+    const pg = new FakePg();
+    await pg.query(
+      "create table if not exists dp_snapshots (key text primary key, payload jsonb not null," +
+        " as_of timestamptz not null, source text not null, fresh_for_ms bigint not null," +
+        " dead_after_ms bigint not null, updated_at timestamptz not null default now())",
+    );
+    await assert.rejects(
+      pg.query(
+        "insert into dp_snapshots (key, payload, as_of, source, fresh_for_ms, dead_after_ms, updated_at)" +
+          " values ($1, $2::jsonb, $3, $4, $5, $6, now())",
+        ["k", JSON.stringify({ symbol: "AB\u0000C" }), new Date(), "test", 1, 2],
+      ),
+      /unsupported Unicode escape sequence/u,
+    );
+  });
 });
 
 describe("PostgresStore job health", () => {
