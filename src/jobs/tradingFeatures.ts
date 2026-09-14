@@ -118,7 +118,7 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
     const reasons = due.map((c) => state[`${c.key}:${c.currency}`]!.reason ?? "unknown");
     const summary = summarizeReasons(reasons);
     if (reasons.every((reason) => QUIET_REASONS.has(reason))) {
-      console.warn(`[trading-features] no series advanced this pass; inputs quiet, not failed (${summary})`);
+      console.log(`[trading-features] no series advanced this pass; inputs quiet, not failed (${summary})`);
     } else {
       throw new Error(`trading feature inputs unavailable for every attempted series (${summary})`);
     }
