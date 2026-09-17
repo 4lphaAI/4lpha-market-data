@@ -49,7 +49,8 @@ make explicitly.**
 **D3. Verdict per member, in order.**
 1. snapshot missing, unreadable, or not `fresh` (5 min window against a 60 s job) → `rwa_stale`
 2. member not in the fresh snapshot (delisted since last seen) → `rwa_stale`
-3. `reasonCode === "UNSUPPORTED"` → `rwa_unsupported` (not on offer in this session — Ondo overnight/pre-market classes)
+3. platform not `bstock`/`ondo` → `rwa_unsupported` (no lane serves it — review finding; a third issuer or a row that lost its `platformId` cannot pass)
+3b. `reasonCode === "UNSUPPORTED"` → `rwa_unsupported` (not on offer in this session — Ondo overnight/pre-market classes)
 4. `openState !== true` or `reasonCode !== "TRADING"` (covers `ASSET_PAUSED`, unknown codes, nulls) → `rwa_halted`
 5. otherwise → passes the veto.
 
@@ -116,3 +117,17 @@ QUIRK-25 `marketCap` is the underlying's; the `=== 25` readiness incident on the
 execution plane (lane grew to 46, trade worker stood down; hotfix `afcfb65`);
 `nextCloseMs < nextOpenMs` while `overnight`; `tokenPriceUsd` is NAV not pool
 price; `UNSUPPORTED` vs `ASSET_PAUSED`.
+
+## 5. Review outcome (independent, high rigour — 2026-09-17)
+
+No blocking findings; D2 endorsed ("the acceptance naming a non-static bStock
+chooses the harder case, it does not exempt the easy one"). Fixed before deploy:
+(1) the positive admitted any platform — now only `bstock`/`ondo` pass the veto;
+(2) `/tokens` first pass back to one parallel fan-out; (3) a test that pins
+"member + cached positive, no list" → vetoed; (4) unknown share ratio → `premiumBps`
+null rather than the NAV number. Left as documented: `rwaContext` is an injectable
+seam (no production caller passes one); `rwa_stale` is also the answer for a member
+Binance delists (three reasons only, per contract); every single `/eligibility` call
+parses the 488-row snapshot (batch amortises); `marketCapUsd` on token rows alternates
+between the underlying's (this job) and Binance's token-level (`binance-prices`) for
+the 25 static bStocks — as ordered, recorded as QUIRK-25.

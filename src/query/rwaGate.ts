@@ -33,6 +33,13 @@ const SOURCE = "eligibility";
 export type RwaVeto = "rwa_stale" | "rwa_halted" | "rwa_unsupported" | null;
 
 /**
+ * The issuers the lanes serve. A row on any other platform — a third issuer
+ * Binance adds, or a row that lost its `platformId` in a shape change — has no
+ * lane row, no venues and no handoff decision behind it, so it cannot pass.
+ */
+const SERVED_PLATFORMS = new Set(["bstock", "ondo"]);
+
+/**
  * Everything rule 5 needs, loaded once per call or once per batch. Fifty
  * addresses in one batch must not read a 488-row snapshot fifty times.
  */
@@ -99,6 +106,7 @@ function parseRows(data: unknown): Map<string, RwaToken> {
     out.set(address, {
       ...(row as unknown as RwaToken),
       address,
+      platform: typeof row["platform"] === "string" ? row["platform"] : "unknown",
       openState: typeof row["openState"] === "boolean" ? row["openState"] : null,
       reasonCode: typeof row["reasonCode"] === "string" ? row["reasonCode"] : null,
     });
@@ -116,6 +124,7 @@ export function isRwaMember(context: RwaGateContext, address: string): boolean {
  *
  *   snapshot not fresh / unreadable        → rwa_stale
  *   member missing from the fresh snapshot → rwa_stale   (delisted since last seen)
+ *   platform not bstock / ondo             → rwa_unsupported (no lane serves it)
  *   reasonCode UNSUPPORTED                 → rwa_unsupported (not offered in this session)
  *   openState !== true or reasonCode !== TRADING → rwa_halted (ASSET_PAUSED, unknown codes, nulls)
  *   otherwise                              → null (passes)
@@ -127,6 +136,7 @@ export function decideRwaVeto(context: RwaGateContext, address: string): RwaVeto
   if (context.rows === null) return "rwa_stale";
   const row = context.rows.get(address);
   if (row === undefined) return "rwa_stale";
+  if (!SERVED_PLATFORMS.has(row.platform)) return "rwa_unsupported";
   if (row.reasonCode === "UNSUPPORTED") return "rwa_unsupported";
   if (row.openState !== true || row.reasonCode !== "TRADING") return "rwa_halted";
   return null;

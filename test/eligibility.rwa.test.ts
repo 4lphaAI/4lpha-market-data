@@ -156,6 +156,24 @@ describe("isEligible — rule 5", () => {
     assert.equal(r.reason, "rwa_halted");
   });
 
+  it("a member with only a cached positive — no list — is still vetoed (the cache is never consulted for a stock)", async () => {
+    const store = new MemoryStore(now);
+    await seed(store, [PAUSED_ROW]);
+    await store.put(eligibilityKey(PAUSED), { address: PAUSED, eligible: true, reason: "binance_rwa", source: "binance-rwa", venue: null, fourmeme: null, flap: null, checkedAt: now(), cached: false }, { source: "eligibility", ...ELIGIBILITY_TTL.eligible });
+    const r = await verdict(store, PAUSED);
+    assert.equal(r.eligible, false);
+    assert.equal(r.reason, "rwa_halted");
+    assert.equal(r.cached, false);
+  });
+
+  it("a member on a platform no lane serves cannot pass, even when open and trading", async () => {
+    const store = new MemoryStore(now);
+    await seed(store, [{ ...FXION_ROW, platformId: "xstocks" }, { ...FXION_ROW, tokenContractAddress: PAUSED, platformId: undefined }]);
+    assert.equal((await verdict(store, FXION)).reason, "rwa_unsupported");
+    assert.equal((await verdict(store, PAUSED)).reason, "rwa_unsupported");
+    assert.equal(await store.get(eligibilityKey(FXION)), null);
+  });
+
   it("does not touch non-members: USDT stays allowlist, an unknown address still reaches the chain", async () => {
     const store = new MemoryStore(now);
     await seed(store);
@@ -271,6 +289,7 @@ describe("premiumBps on the universe row", () => {
   it("is the deepest priced venue against reference × share ratio, null without a venue", async () => {
     assert.equal(venuePremiumBps(undefined, 100, 1), null);
     assert.equal(venuePremiumBps([{ dex: "pancakeswap", version: "v3", pool: "0x1", feeTier: 100, quote: { address: USDT, symbol: "USDT" }, priceUsd: 101, liquidityUsd: 1, volume24hUsd: 0, asOf: 1 }], 100, 1), 100);
+    assert.equal(venuePremiumBps([{ dex: "pancakeswap", version: "v3", pool: "0x1", feeTier: 100, quote: { address: USDT, symbol: "USDT" }, priceUsd: 101, liquidityUsd: 1, volume24hUsd: 0, asOf: 1 }], 100, null), null, "unknown ratio: null, never the NAV number");
     // EEMon-style: ratio 1.0137, pool at NAV → 0 bps, not 137.
     assert.equal(venuePremiumBps([{ dex: "pancakeswap", version: "v3", pool: "0x1", feeTier: 100, quote: { address: USDT, symbol: "USDT" }, priceUsd: 101.37, liquidityUsd: 1, volume24hUsd: 0, asOf: 1 }], 100, 1.0137), 0);
     assert.equal(venuePremiumBps([{ dex: "pancakeswap", version: "v3", pool: "0x1", feeTier: 100, quote: { address: USDT, symbol: "USDT" }, priceUsd: null, liquidityUsd: 9, volume24hUsd: 0, asOf: 1 }], 100, 1), null);

@@ -107,8 +107,9 @@ export interface UniverseEntry {
   tokenPriceUsd?: number | null;
   referencePriceUsd?: number | null;
   /**
-   * Deepest venue's `priceUsd / (referencePriceUsd × tokenToShareRatio) − 1`, in
-   * bps; `null` without a priced venue. The pool-vs-reference spread.
+   * Deepest *priced* venue's `priceUsd / (referencePriceUsd × tokenToShareRatio) − 1`,
+   * in bps; `null` without a priced venue, a reference price or a share ratio.
+   * The pool-vs-reference spread.
    */
   premiumBps?: number | null;
   openState?: boolean | null;

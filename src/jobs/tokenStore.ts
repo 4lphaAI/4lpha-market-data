@@ -62,11 +62,13 @@ export async function readTokenRecords(
 ): Promise<Map<string, DataRecord<TokenSnapshot>>> {
   const out = new Map<string, DataRecord<TokenSnapshot>>();
   const missing: string[] = [];
-  for (const address of addresses) {
-    const record = await store.get<TokenSnapshot>(tokenKey(address));
+  // One fan-out, as the route always did; the batch is capped at 50 upstream.
+  const records = await Promise.all(addresses.map((address) => store.get<TokenSnapshot>(tokenKey(address))));
+  addresses.forEach((address, i) => {
+    const record = records[i] ?? null;
     if (record === null) missing.push(address);
     else out.set(address, record);
-  }
+  });
   if (missing.length === 0) return out;
 
   const rwa = await store.get<unknown>(RWA_UNIVERSE_KEY);

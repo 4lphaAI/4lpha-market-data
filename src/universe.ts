@@ -435,8 +435,11 @@ export function venuePremiumBps(
   tokenToShareRatio: number | null,
 ): number | null {
   if (referencePriceUsd === null || !(referencePriceUsd > 0)) return null;
-  const ratio = tokenToShareRatio === null || !(tokenToShareRatio > 0) ? 1 : tokenToShareRatio;
+  // An unknown share ratio would silently turn this back into the NAV number
+  // the field exists to replace (EEMon would read +137 bps again), so it is null.
+  if (tokenToShareRatio === null || !(tokenToShareRatio > 0)) return null;
+  // Venues arrive sorted deepest-first; the deepest *priced* one is used.
   const priced = (venues ?? []).find((v) => v.priceUsd !== null && v.priceUsd > 0);
   if (priced === undefined) return null;
-  return Math.round((priced.priceUsd! / (referencePriceUsd * ratio) - 1) * 10_000);
+  return Math.round((priced.priceUsd! / (referencePriceUsd * tokenToShareRatio) - 1) * 10_000);
 }
