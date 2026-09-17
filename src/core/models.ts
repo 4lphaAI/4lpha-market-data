@@ -61,9 +61,16 @@ export interface RwaToken {
   tokenPriceUsd: number | null;
   /** The underlying equity's price. */
   referencePriceUsd: number | null;
-  /** `round((tokenPrice / referencePrice - 1) * 1e4)`; null unless both prices are > 0. */
-  premiumBps: number | null;
-  marketCapUsd: number | null;
+  /**
+   * `round((tokenPriceUsd / referencePriceUsd - 1) * 1e4)`; null unless both are > 0.
+   * Measured 2026-09-17: this equals `tokenToShareRatio - 1` (NVDAB 8 bps ↔ ratio
+   * 1.00078), i.e. `tokenPriceUsd` is the token's NAV, not a pool price. The
+   * pool-vs-reference premium the arb agent wants is computed from the venues on
+   * the universe row; this is kept as the raw observation.
+   */
+  navPremiumBps: number | null;
+  /** The *underlying equity's* market cap (NVDAB reports NVIDIA's ≈ $5T), not the token's. */
+  underlyingMarketCapUsd: number | null;
   underlyingVolume24hUsd: number | null;
   /** False when the issuer has the token halted or outside a supported session. */
   openState: boolean | null;
@@ -96,8 +103,13 @@ export interface UniverseEntry {
   // RWA fields, present on rows that came from the Binance Web3 RWA list.
   platform?: string;
   underlyingTicker?: string;
+  /** Binance's price for the token — its NAV, not a pool price. */
   tokenPriceUsd?: number | null;
   referencePriceUsd?: number | null;
+  /**
+   * Deepest venue's `priceUsd / (referencePriceUsd × tokenToShareRatio) − 1`, in
+   * bps; `null` without a priced venue. The pool-vs-reference spread.
+   */
   premiumBps?: number | null;
   openState?: boolean | null;
   marketStatus?: string | null;

@@ -41,6 +41,8 @@ export const COINS_UNIVERSE_KEY = "universe:coins";
 export const RWA_UNIVERSE_KEY = "universe:rwa";
 /** Store key holding per-token AMM venues for the RWA tokens, written by `stock-venues`. */
 export const RWA_VENUES_KEY = "venues:rwa";
+/** Store key remembering every address ever seen in an RWA list (see `jobs/binanceRwa.ts`). */
+export const RWA_MEMBERS_KEY = "rwa:members";
 
 interface StaticStock {
   symbol: string;
@@ -311,7 +313,7 @@ async function readRwaLanes(store: SnapshotStore): Promise<RwaLanes> {
       ...(row.underlyingTicker === null ? {} : { underlyingTicker: row.underlyingTicker }),
       tokenPriceUsd: row.tokenPriceUsd,
       referencePriceUsd: row.referencePriceUsd,
-      premiumBps: row.premiumBps,
+      premiumBps: venuePremiumBps(venues.get(row.address), row.referencePriceUsd, row.tokenToShareRatio),
       openState: row.openState,
       marketStatus: row.marketStatus,
       reasonCode: row.reasonCode,
@@ -368,8 +370,8 @@ function normalizeRwaRows(data: unknown): RwaToken[] {
       tokenToShareRatio: num(row["tokenToShareRatio"]),
       tokenPriceUsd: num(row["tokenPriceUsd"]),
       referencePriceUsd: num(row["referencePriceUsd"]),
-      premiumBps: num(row["premiumBps"]),
-      marketCapUsd: num(row["marketCapUsd"]),
+      navPremiumBps: num(row["navPremiumBps"]),
+      underlyingMarketCapUsd: num(row["underlyingMarketCapUsd"]),
       underlyingVolume24hUsd: num(row["underlyingVolume24hUsd"]),
       openState: typeof row["openState"] === "boolean" ? row["openState"] : null,
       marketStatus: str(row["marketStatus"]),
@@ -419,4 +421,22 @@ async function readVenues(store: SnapshotStore): Promise<Map<string, Venue[]>> {
     out.set(address, venues);
   }
   return out;
+}
+
+/**
+ * The pool-vs-reference premium: the deepest priced venue against the
+ * underlying's price scaled by the share ratio. Binance's own `tokenPriceUsd`
+ * is NAV and would always read ≈ 0 bps here, which is why the venue price is
+ * the one that goes into this number. Exported for tests.
+ */
+export function venuePremiumBps(
+  venues: Venue[] | undefined,
+  referencePriceUsd: number | null,
+  tokenToShareRatio: number | null,
+): number | null {
+  if (referencePriceUsd === null || !(referencePriceUsd > 0)) return null;
+  const ratio = tokenToShareRatio === null || !(tokenToShareRatio > 0) ? 1 : tokenToShareRatio;
+  const priced = (venues ?? []).find((v) => v.priceUsd !== null && v.priceUsd > 0);
+  if (priced === undefined) return null;
+  return Math.round((priced.priceUsd! / (referencePriceUsd * ratio) - 1) * 10_000);
 }

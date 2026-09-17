@@ -19,6 +19,12 @@
  *   4. The Flap Portal rule — the same problem on a second launchpad. A token is
  *      Flap-launched iff the Portal lens `getTokenV8Safe` answers at all, and
  *      tradable iff the status it reports is Tradable (curve) or DEX (graduated).
+ *   5. The RWA rule (`rwaGate.ts`) — tokenized stocks from the Binance Web3 RWA
+ *      list. Unlike the others it is a **veto first**: a known stock that is not
+ *      visibly open and `TRADING` in a fresh snapshot is refused before the
+ *      allowlist, the Alpha list or any cached verdict get a say, because its
+ *      issuer can halt it and the Ondo ones close per session. Only then is it
+ *      a positive rule, for the stocks no other list carries.
  *
  * Rules 2 and 3 are also the routing answer. Four.Meme's `liquidityAdded` and
  * Flap's `status` are both graduation flags, so the same call that proves
@@ -61,6 +67,7 @@ import {
 import { isEvmAddress, normalizeAddress, sanitizeMessage } from "../adapters/http.js";
 import type { SnapshotStore } from "../core/store.js";
 import { COINS_UNIVERSE_KEY } from "../universe.js";
+import { decideRwaVeto, isRwaMember, loadRwaGateContext, type RwaGateContext } from "./rwaGate.js";
 // The frozen-snapshot parser now lives in `src/allowlist.ts` so the price job
 // and the universe lane share it; it is
 // re-exported here because this module has always been its public home.
@@ -119,7 +126,7 @@ const helperAbi = [
 ] as const satisfies Abi;
 
 /** Which rule admitted the token. */
-export type EligibilitySource = "allowlist" | "binance-alpha" | "fourmeme" | "flap";
+export type EligibilitySource = "allowlist" | "binance-alpha" | "binance-rwa" | "fourmeme" | "flap";
 
 /**
  * A hit on one of the two enumerable lists, or none. The allowlist wins over
@@ -147,6 +154,14 @@ export type EligibilityReason =
   | "allowlist"
   /** Listed in a fresh `universe:coins` snapshot of the Binance Alpha list. */
   | "binance_alpha"
+  /** A tokenized stock, open and trading in a fresh `universe:rwa` snapshot. */
+  | "binance_rwa"
+  /** A known stock, but the RWA snapshot is absent, unreadable or not fresh. Fail-closed. */
+  | "rwa_stale"
+  /** A known stock whose issuer reports it not open / not trading (halted, paused, unknown state). */
+  | "rwa_halted"
+  /** A known stock not offered in the current session (Ondo `UNSUPPORTED`). */
+  | "rwa_unsupported"
   /** `getTokenInfo` reported a supported Four.Meme TokenManager version. */
   | "fourmeme_factory"
   /** The Flap Portal lens answered with a tradable status. */
@@ -575,6 +590,11 @@ export interface IsEligibleParams {
   address: string;
   signal?: AbortSignal | undefined;
   /**
+   * The RWA snapshot/membership, loaded once by a batch caller. A single call
+   * loads its own.
+   */
+  rwaContext?: RwaGateContext | undefined;
+  /**
    * Overrides the chain read. Injected the same way adapters take `fetchFn`, so
    * the fail-closed paths — outage denies, stale is never served — can be tested
    * without a chain.
@@ -600,6 +620,19 @@ export async function isEligible(
     return { ...decideEligibility(address, null, null), checkedAt: now, cached: false };
   }
 
+  const base = { address, source: null, venue: null, fourmeme: null, flap: null, checkedAt: now, cached: false } as const;
+
+  // Rule 5's veto comes before everything that could say yes — the allowlist,
+  // the Alpha list and the cache included. A stock that is halted, closed for
+  // the session, or simply not visible in a fresh snapshot is refused here, and
+  // the refusal is never cached: it is decided from the live snapshot every time.
+  const rwa = params.rwaContext ?? (await loadRwaGateContext(store));
+  const rwaMember = isRwaMember(rwa, address);
+  if (rwaMember) {
+    const veto = decideRwaVeto(rwa, address);
+    if (veto !== null) return { ...base, eligible: false, reason: veto };
+  }
+
   const allowlist = loadAllowlist();
 
   // Checked before the cache: a snapshot hit is a local map lookup, and it must
@@ -615,6 +648,13 @@ export async function isEligible(
   const alpha = await readAlphaSet(store);
   if (alpha !== null && alpha.has(address)) {
     return { ...decideEligibility(address, "binance-alpha", null), checkedAt: now, cached: false };
+  }
+
+  // A stock that passed the veto and is on no other list. Like Alpha, decided
+  // live and not cached; unlike the launchpads, it never reaches the chain —
+  // an established BEP-20 routes by venue discovery, so `venue` stays null.
+  if (rwaMember) {
+    return { ...base, eligible: true, reason: "binance_rwa", source: "binance-rwa" };
   }
 
   // Fresh only. A stale verdict is discarded rather than served — see the
@@ -663,6 +703,8 @@ export async function isEligibleBatch(
 ): Promise<EligibilityResult[]> {
   const results: EligibilityResult[] = new Array<EligibilityResult>(addresses.length);
   let next = 0;
+  // One snapshot read for the whole batch, not one per address.
+  const rwaContext = options.rwaContext ?? (await loadRwaGateContext(store));
 
   const worker = async (): Promise<void> => {
     for (;;) {
@@ -670,7 +712,7 @@ export async function isEligibleBatch(
       next += 1;
       const address = addresses[index];
       if (address === undefined) return;
-      results[index] = await isEligible(store, { ...options, address });
+      results[index] = await isEligible(store, { ...options, address, rwaContext });
     }
   };
 

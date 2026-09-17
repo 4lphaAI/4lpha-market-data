@@ -62,7 +62,7 @@ describe("binance-rwa job", () => {
       assert.equal(record.source, "binance-rwa");
       assert.equal(record.staleness, "fresh");
       assert.equal(record.data.rows.length, 3);
-      assert.equal(record.data.rows[0]!.premiumBps, 10);
+      assert.equal(record.data.rows[0]!.navPremiumBps, 10);
 
       const nvda = await readTokenSnapshot(store, NVDAB);
       assert.equal(nvda?.priceUsd, 215.84);
@@ -271,7 +271,8 @@ describe("buildUniverse with the RWA lanes", () => {
     assert.equal(nvda.marketHours, "us-equities", "kept for the execution plane until the joint schema change");
     assert.equal(nvda.platform, "bstock");
     assert.equal(nvda.underlyingTicker, "NVDA");
-    assert.equal(nvda.premiumBps, 10);
+    assert.equal(nvda.premiumBps, null, "no venue yet: the pool-vs-reference premium is unknown, not NAV-vs-reference");
+    assert.equal(nvda.tokenPriceUsd, 215.84);
     assert.equal(nvda.openState, true);
     assert.equal(nvda.staleness, "fresh");
     assert.equal(nvda.venues, undefined, "never swept");
@@ -323,9 +324,9 @@ describe("GET /universe with the RWA lanes", () => {
     assert.equal(ondoBody.meta.lanes["ondo"]?.count, 1);
 
     const bstocks = await app.request("/universe?lane=bstocks");
-    const bstocksBody = (await bstocks.json()) as { data: Array<{ address: string; premiumBps?: number }> };
+    const bstocksBody = (await bstocks.json()) as { data: Array<{ address: string; tokenPriceUsd?: number }> };
     assert.equal(bstocksBody.data.length, 26);
-    assert.equal(bstocksBody.data.find((e) => e.address === NVDAB)?.premiumBps, 10);
+    assert.equal(bstocksBody.data.find((e) => e.address === NVDAB)?.tokenPriceUsd, 215.84);
 
     const bad = await app.request("/universe?lane=xstock");
     assert.equal(bad.status, 400);

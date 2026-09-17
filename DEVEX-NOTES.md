@@ -229,6 +229,38 @@ friction · **OK**: something that worked first time and deserves credit.
   Onboarding note for the report: the API gives no way to validate a key without a
   signed call, so the first real request is the test.
 
+## 2026-09-17 — TradFi work order (eligibility rule 5, /tokens rows)
+
+### QUIRK-25 · `/rwa/tokens` `marketCap` is the underlying's too, and `tokenPrice` is NAV
+- NVDAB and NVDAon both report `marketCap` ≈ $5.16T — NVIDIA's — and ARQQon $330M,
+  Arqit's. Nothing on the page says whose cap it is. Renamed internally to
+  `underlyingMarketCapUsd` beside `underlyingVolume24hUsd` (QUIRK-15).
+- `tokenPrice` is the token's NAV, not a pool price: the naive premium
+  `tokenPrice / referencePrice − 1` equals `tokenToShareRatio − 1` on every row
+  (EEMon 137 bps ↔ ratio 1.0137, NVDAB 8 bps ↔ 1.00078 — the execution plane's
+  finding). A premium/discount monitor built on these two fields alone measures the
+  share ratio. The pool-vs-reference spread needs a venue price; the plane now
+  publishes `premiumBps` from the deepest venue and keeps the NAV number as
+  `navPremiumBps`.
+
+### QUIRK-26 · Ondo session fields: `UNSUPPORTED` vs `ASSET_PAUSED`, and `nextCloseMs < nextOpenMs` while `overnight`
+- `openState:false, reasonCode:UNSUPPORTED` on 177 of 442 rows overnight means "this
+  asset is not offered in the current session", not a halt — it flips to `TRADING`
+  at 08:01 or 13:31 UTC by asset class. `ASSET_PAUSED` (1 row) is the real halt.
+  The gate maps them to `rwa_unsupported` and `rwa_halted` respectively.
+- While `overnight`, a TRADING row carries `nextCloseTime` (07:55 UTC) *earlier*
+  than `nextOpenTime` (08:01 UTC): "next close" is the end of the current session,
+  "next open" the start of the following one. Read as a pair they describe the
+  6-minute gap; read as "opens at X, closes at Y" they look inverted.
+
+### ONBOARD-27 · Readiness incident on the execution plane: `=== 25` bStocks
+- The execution plane's readiness check required exactly the 25 static bStocks;
+  when this plane's lane grew to 46 after the RWA union deployed (06:18 UTC) the
+  trade worker stood down for a few hours until hotfix `afcfb65` made it `>= 25`.
+  Not a Binance fault, but a tokenized-stock onboarding fact: the bStock list grows
+  weekly (25 pinned 2026-09-03 → 46 by 2026-09-17), so nothing downstream may pin
+  its size.
+
 ## Open items to measure next
 - Rate ceiling after the limit increase is granted (re-run the ramp, update PITFALL-6).
 - Whether the 5 rps bucket is per key or per IP (needs a second key or a second host).

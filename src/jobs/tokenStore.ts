@@ -5,8 +5,11 @@
  * price cannot blank out the holder count a richer source already wrote.
  */
 
-import { emptyTokenSnapshot, mergeTokenSnapshot, type TokenSnapshot } from "../core/models.js";
+import { emptyTokenSnapshot, mergeTokenSnapshot, type RwaToken, type TokenSnapshot } from "../core/models.js";
 import type { SnapshotStore } from "../core/store.js";
+import type { DataRecord } from "../core/types.js";
+import { normalizeAddress } from "../adapters/http.js";
+import { RWA_UNIVERSE_KEY } from "../universe.js";
 
 export const TOKEN_FRESH_FOR_MS = 60_000;
 export const TOKEN_DEAD_AFTER_MS = 15 * 60_000;
@@ -43,4 +46,56 @@ export async function mergeTokenIntoStore(
     deadAfterMs: TOKEN_DEAD_AFTER_MS,
   });
   return merged;
+}
+
+/**
+ * Reads token records for the `/tokens` surfaces, synthesising a row from the
+ * RWA snapshot for any address that has no stored snapshot yet but is a
+ * tokenized stock. The `binance-rwa` job writes the real record within a
+ * minute of the snapshot, so this covers only that window and a restart — but
+ * the execution plane aborts a whole cycle on a missing row, so the window
+ * has to be closed. Nothing is written back. Staleness follows the snapshot.
+ */
+export async function readTokenRecords(
+  store: SnapshotStore,
+  addresses: string[],
+): Promise<Map<string, DataRecord<TokenSnapshot>>> {
+  const out = new Map<string, DataRecord<TokenSnapshot>>();
+  const missing: string[] = [];
+  for (const address of addresses) {
+    const record = await store.get<TokenSnapshot>(tokenKey(address));
+    if (record === null) missing.push(address);
+    else out.set(address, record);
+  }
+  if (missing.length === 0) return out;
+
+  const rwa = await store.get<unknown>(RWA_UNIVERSE_KEY);
+  if (rwa === null || typeof rwa.data !== "object" || rwa.data === null) return out;
+  const rows = (rwa.data as Record<string, unknown>)["rows"];
+  if (!Array.isArray(rows)) return out;
+  const byAddress = new Map<string, RwaToken>();
+  for (const raw of rows) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const address = normalizeAddress((raw as Record<string, unknown>)["address"]);
+    if (address !== null) byAddress.set(address, raw as RwaToken);
+  }
+  const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  for (const address of missing) {
+    const row = byAddress.get(address);
+    if (row === undefined) continue;
+    const data: TokenSnapshot = {
+      address,
+      priceUsd: num(row.tokenPriceUsd),
+      marketCapUsd: num(row.underlyingMarketCapUsd),
+      // On-chain volume comes from the venues sweep via the job's merge; a
+      // synthesised row has none and never reports the underlying's.
+      volume24hUsd: null,
+      holders: null,
+      priceChange24hPct: null,
+      ...(typeof row.symbol === "string" ? { symbol: row.symbol } : {}),
+      updatedFields: [],
+    };
+    out.set(address, { data, asOf: rwa.asOf, source: rwa.source, staleness: rwa.staleness });
+  }
+  return out;
 }

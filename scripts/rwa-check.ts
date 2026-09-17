@@ -60,3 +60,16 @@ for (const lane of ["bstocks", "ondo"]) {
 const status = await app.request("/status", { headers });
 const snapshots = ((await status.json()) as { data: { snapshots: Array<{ key: string; staleness?: string; missing?: boolean }> } }).data.snapshots;
 console.log("\n/status snapshots:", snapshots.filter((s) => s.key.endsWith(":rwa")));
+
+// Rule 5 through the HTTP surface: a bStock, an Ondo row, an UNSUPPORTED Ondo row, a non-stock.
+const rwaLane = (await (await app.request("/universe?lane=ondo", { headers })).json()) as { data: UniverseEntry[] };
+const unsupported = rwaLane.data.find((r) => r.reasonCode === "UNSUPPORTED")?.address;
+const open = rwaLane.data.find((r) => r.openState === true && (r.venues?.length ?? 0) > 0)?.address ?? rwaLane.data.find((r) => r.openState === true)?.address;
+const sample = ["0x02fca66c1d1afb4e2a7884261eb00f63598a7436", open, unsupported, "0x55d398326f99059ff775485246999027b3197955"].filter((a): a is string => a !== undefined);
+const elig = await app.request(`/eligibility?addresses=${sample.join(",")}`, { headers });
+const verdicts = (await elig.json()) as { data: Array<{ address: string; eligible: boolean; reason: string; source: string | null }> };
+console.log("\n/eligibility batch:");
+for (const v of verdicts.data) {
+  const row = [...rwaLane.data, ...((await (await app.request("/universe?lane=bstocks", { headers })).json()) as { data: UniverseEntry[] }).data].find((r) => r.address === v.address);
+  console.log(`  ${(row?.symbol ?? "USDT").padEnd(8)} eligible=${v.eligible} reason=${v.reason} source=${v.source}`);
+}

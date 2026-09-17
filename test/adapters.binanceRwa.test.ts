@@ -96,7 +96,7 @@ describe("normalizeRwaTokens", () => {
     assert.equal(nvda!.decimals, 18);
     assert.equal(nvda!.tokenPriceUsd, 215.84);
     assert.equal(nvda!.referencePriceUsd, 215.62);
-    assert.equal(nvda!.premiumBps, 10);
+    assert.equal(nvda!.navPremiumBps, 10);
     assert.equal(nvda!.openState, true);
     assert.equal(nvda!.marketStatus, null);
     assert.equal(nvda!.nextOpenMs, null);
@@ -106,7 +106,7 @@ describe("normalizeRwaTokens", () => {
     assert.equal(arqq!.marketStatus, "overnight");
     assert.equal(arqq!.reasonCode, "UNSUPPORTED");
     assert.equal(arqq!.nextOpenMs, 1789651860000);
-    assert.equal(arqq!.premiumBps, 0);
+    assert.equal(arqq!.navPremiumBps, 0);
   });
 
   it("drops rows without an address or symbol and counts them; keeps unknown platforms", () => {

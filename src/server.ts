@@ -4,7 +4,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import type { Scheduler } from "./core/scheduler.js";
 import type { SnapshotStore } from "./core/store.js";
-import type { Lane, PoolStats, PoolTier, TokenSnapshot, VenusHealth } from "./core/models.js";
+import type { Lane, PoolStats, PoolTier, VenusHealth } from "./core/models.js";
 import {
   VENUS_CORE_MARKETS_KEY,
   VENUS_TRACKING_NAMESPACE,
@@ -26,7 +26,7 @@ import { getSocials } from "./query/socials.js";
 import { getTokenDecimals, type DecimalsReader } from "./query/decimals.js";
 import { isEligible, isEligibleBatch } from "./query/eligibility.js";
 import { buildUniverse } from "./universe.js";
-import { tokenKey } from "./jobs/tokenStore.js";
+import { readTokenRecords } from "./jobs/tokenStore.js";
 import { fetchPancakePoolStats, poolKey } from "./adapters/pancake.js";
 import { type RangeRequest, estimateRange, loadRangeSnapshot } from "./query/poolRange.js";
 import {
@@ -429,16 +429,13 @@ export function createServer(deps: ServerDeps): Hono {
     }
     const unique = [...new Set(addresses)];
 
-    const records = await Promise.all(
-      unique.map(async (address) => ({
-        address,
-        record: await deps.store.get<TokenSnapshot>(tokenKey(address)),
-      })),
-    );
-    const found = records.filter(
-      (entry): entry is { address: string; record: NonNullable<typeof entry.record> } =>
-        entry.record !== null,
-    );
+    // A tokenized stock with no stored snapshot yet is answered from the RWA
+    // snapshot rather than reported missing — see `readTokenRecords`.
+    const records = await readTokenRecords(deps.store, unique);
+    const found = unique.flatMap((address) => {
+      const record = records.get(address);
+      return record === undefined ? [] : [{ address, record }];
+    });
 
     return c.json({
       data: found.map((entry) => ({
@@ -462,7 +459,7 @@ export function createServer(deps: ServerDeps): Hono {
       return c.json({ error: { code: "invalid_address" } }, 400);
     }
 
-    const record = await deps.store.get<TokenSnapshot>(tokenKey(address));
+    const record = (await readTokenRecords(deps.store, [address])).get(address) ?? null;
     if (record === null) {
       return c.json({ error: { code: "not_found", message: "no snapshot for this token" } }, 404);
     }
