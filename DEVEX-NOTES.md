@@ -191,6 +191,31 @@ friction · **OK**: something that worked first time and deserves credit.
 - Ondo: 457 tokens on Ethereum, 458 on BSC, 451 on Solana (`CT_501`) — three calls, no auth
   beyond the key, ~150 ms each.
 
+## 2026-09-17 — build pass (adapter + jobs)
+
+### OK-21 · The full adapter + job went live against the API on the first run
+- `binance-rwa` cycle: 538 ms for 488 rows (46 bstock, 442 ondo), 0 rows dropped by the
+  normalizer, 488 token prices merged. Nonce + one shared 5 rps bucket: no 40103, no 429.
+- What the build had to encode that the docs did not say: `/build` in the signed path
+  (documented, good), nonce falling back to the signature (schema only), the bucket
+  being per key (measured), the `/price` 414 at ~80 (measured), `volume24H` being the
+  underlying's volume (measured). Five facts, one of them on the page.
+
+### QUIRK-22 · Pancake v3 fee tiers on stock pools are all over the map; Uniswap v3 pools read the same ABI
+- Read `fee()` on chain for every v3 pool the sweep found: NVDAB's main Pancake pool
+  is **2500** (0.25%), its second $489k pool **10000** (1%), QQQB's Pancake pool **100**
+  (0.01%) while its larger Uniswap v3/USDC pool is **3000** (0.3%). A router that
+  assumes one fee tier per pair will quote the wrong pool. The tier has to travel
+  with the pool address, which is why `Venue.feeTier` comes from the chain and is
+  never defaulted.
+- Uniswap v3 pools on BSC answered the Pancake v3 `fee()` selector unchanged, so
+  one ABI covers both venues.
+
+### QUIRK-23 · DexScreener `token-pairs` is ~300 ms per call, not the 210 ms rate floor
+- 100 tokens sequentially: 31.7 s. The 300/min limit is not the binding constraint
+  from a residential connection; per-call latency is. Sweep lowered to 75 tokens per
+  60 s cycle. Not a Binance item, but it is what the venue data costs.
+
 ## Open items to measure next
 - Rate ceiling after the limit increase is granted (re-run the ramp, update PITFALL-6).
 - Whether the 5 rps bucket is per key or per IP (needs a second key or a second host).

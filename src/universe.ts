@@ -1,17 +1,18 @@
 /**
- * The three-lane token universe.
+ * The token universe, one lane per product surface.
  *
  * `meme` and `coins` are discovered by background jobs and read back out of the
- * store; `bstocks` is a fixed, verified list of tokenized US equities that only
- * changes with a code change. Assembly is read-only: a lane whose job has never
- * run simply contributes nothing.
+ * store. `bstocks` is a fixed, verified list of tokenized US equities — the
+ * floor that a provider outage can never shrink — unioned with the Binance Web3
+ * RWA list, which also supplies the `ondo` lane. Assembly is read-only: a lane
+ * whose job has never run simply contributes nothing.
  *
  * A fourth lane, `allowlist`, is the frozen `data/eligible-tokens.json`
  * snapshot; it is reported and served on its own rather than merged into the
  * three so the complete curated list remains enumerable.
  */
 
-import type { Lane, UniverseEntry } from "./core/models.js";
+import type { Lane, RwaToken, UniverseEntry, Venue } from "./core/models.js";
 import type { SnapshotStore } from "./core/store.js";
 import type { Staleness } from "./core/types.js";
 import { normalizeAddress } from "./adapters/http.js";
@@ -31,6 +32,15 @@ export const MEME_UNIVERSE_KEY = "universe:meme";
 export const FLAP_UNIVERSE_KEY = "universe:flap";
 /** Store key holding the Binance-Alpha-discovered lane. */
 export const COINS_UNIVERSE_KEY = "universe:coins";
+/**
+ * Store key holding the Binance Web3 RWA token list (bStocks + Ondo), written
+ * by `binance-rwa`. Read into two lanes — `bstocks` (over the static floor)
+ * and `ondo` — because the issuer is the product distinction the execution
+ * plane routes on.
+ */
+export const RWA_UNIVERSE_KEY = "universe:rwa";
+/** Store key holding per-token AMM venues for the RWA tokens, written by `stock-venues`. */
+export const RWA_VENUES_KEY = "venues:rwa";
 
 interface StaticStock {
   symbol: string;
@@ -138,15 +148,16 @@ export async function buildUniverse(store: SnapshotStore): Promise<UniverseResul
   const fourmeme = await readLane(store, MEME_UNIVERSE_KEY, "meme");
   const flap = await readLane(store, FLAP_UNIVERSE_KEY, "meme");
   const coins = await readLane(store, COINS_UNIVERSE_KEY, "coins");
-  const bstocks = bstocksUniverse();
+  const rwa = await readRwaLanes(store);
   const allowlist = allowlistUniverse();
 
   const memeEntries = new Map<string, UniverseEntry>();
   for (const entry of [...fourmeme.entries, ...flap.entries]) memeEntries.set(entry.address, entry);
 
   const byAddress = new Map<string, UniverseEntry>();
-  // Lowest precedence first, so later lanes overwrite earlier ones.
-  for (const entry of [...memeEntries.values(), ...coins.entries, ...bstocks]) {
+  // Lowest precedence first, so later lanes overwrite earlier ones. An issuer's
+  // own list (ondo) beats an Alpha listing; the bStocks lane beats everything.
+  for (const entry of [...memeEntries.values(), ...coins.entries, ...rwa.ondo, ...rwa.bstocks]) {
     byAddress.set(entry.address, entry);
   }
 
@@ -161,7 +172,15 @@ export async function buildUniverse(store: SnapshotStore): Promise<UniverseResul
         { name: "flap", read: flap },
       ]),
       coins: { count: coins.entries.length, staleness: coins.staleness, asOf: coins.asOf, source: "binance" },
-      bstocks: { count: bstocks.length, staleness: "fresh", asOf: null, source: "static" },
+      // The static floor is always fresh; with the RWA snapshot present the
+      // lane is only as fresh as that snapshot, since most rows come from it.
+      bstocks: {
+        count: rwa.bstocks.length,
+        staleness: rwa.staleness ?? "fresh",
+        asOf: rwa.asOf,
+        source: rwa.staleness === null ? "static" : "static+binance-rwa",
+      },
+      ondo: { count: rwa.ondo.length, staleness: rwa.staleness, asOf: rwa.asOf, source: "binance-rwa" },
       // Static like bStocks, so always fresh with no `asOf` — except when the
       // file could not be read, where a count of 0 with no staleness says the
       // lane has nothing rather than that it is empty.
@@ -252,4 +271,152 @@ function normalizeEntries(data: unknown, lane: Lane): UniverseEntry[] {
   }
 
   return entries;
+}
+
+interface RwaLanes {
+  bstocks: UniverseEntry[];
+  ondo: UniverseEntry[];
+  staleness: Staleness | null;
+  asOf: number | null;
+}
+
+/**
+ * The two issuer lanes from one snapshot. The static bStocks list is the
+ * floor: an API row with the same address overwrites it (gaining the RWA
+ * fields), API-only bStocks are added, and with the snapshot missing or
+ * unreadable the lane is exactly the static 25. Venues, when swept, are
+ * attached to every RWA row.
+ */
+async function readRwaLanes(store: SnapshotStore): Promise<RwaLanes> {
+  const record = await store.get<unknown>(RWA_UNIVERSE_KEY);
+  const rows = record === null ? [] : normalizeRwaRows(record.data);
+  const venues = await readVenues(store);
+
+  const bstocks = new Map<string, UniverseEntry>();
+  for (const entry of bstocksUniverse()) bstocks.set(entry.address, entry);
+  const ondo: UniverseEntry[] = [];
+
+  for (const row of rows) {
+    const lane: Lane | null = row.platform === "bstock" ? "bstocks" : row.platform === "ondo" ? "ondo" : null;
+    if (lane === null) continue;
+    const entry: UniverseEntry = {
+      address: row.address,
+      symbol: row.symbol,
+      ...(row.name === null ? {} : { name: row.name }),
+      lane,
+      source: "binance-rwa",
+      // Kept on bStocks for the execution plane's benefit (see models.ts).
+      ...(lane === "bstocks" ? { marketHours: "us-equities" as const } : {}),
+      platform: row.platform,
+      ...(row.underlyingTicker === null ? {} : { underlyingTicker: row.underlyingTicker }),
+      tokenPriceUsd: row.tokenPriceUsd,
+      referencePriceUsd: row.referencePriceUsd,
+      premiumBps: row.premiumBps,
+      openState: row.openState,
+      marketStatus: row.marketStatus,
+      reasonCode: row.reasonCode,
+      nextOpenMs: row.nextOpenMs,
+      nextCloseMs: row.nextCloseMs,
+      decimals: row.decimals,
+      tokenToShareRatio: row.tokenToShareRatio,
+      ...(record === null ? {} : { staleness: record.staleness }),
+      ...(venues.has(row.address) ? { venues: venues.get(row.address)! } : {}),
+    };
+    if (lane === "bstocks") bstocks.set(entry.address, entry);
+    else ondo.push(entry);
+  }
+  // Static rows that the snapshot did not cover still get venues when swept.
+  for (const entry of bstocks.values()) {
+    if (entry.venues === undefined && venues.has(entry.address)) entry.venues = venues.get(entry.address)!;
+  }
+
+  return {
+    bstocks: [...bstocks.values()],
+    ondo,
+    staleness: record === null ? null : record.staleness,
+    asOf: record === null ? null : record.asOf,
+  };
+}
+
+/**
+ * Re-validates the stored RWA rows on read: the store is durable across code
+ * versions, so an older shape must not reach the API. Only the fields the
+ * lane needs are checked; anything unparseable becomes `null`.
+ */
+function normalizeRwaRows(data: unknown): RwaToken[] {
+  if (typeof data !== "object" || data === null) return [];
+  const rows = (data as Record<string, unknown>)["rows"];
+  if (!Array.isArray(rows)) return [];
+  const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const out: RwaToken[] = [];
+  for (const raw of rows) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const row = raw as Record<string, unknown>;
+    const address = normalizeAddress(row["address"]);
+    const symbol = str(row["symbol"]);
+    const platform = str(row["platform"]);
+    if (address === null || symbol === null || platform === null) continue;
+    out.push({
+      address,
+      symbol,
+      name: str(row["name"]),
+      platform,
+      underlyingTicker: str(row["underlyingTicker"]),
+      underlyingName: str(row["underlyingName"]),
+      decimals: num(row["decimals"]),
+      tokenToShareRatio: num(row["tokenToShareRatio"]),
+      tokenPriceUsd: num(row["tokenPriceUsd"]),
+      referencePriceUsd: num(row["referencePriceUsd"]),
+      premiumBps: num(row["premiumBps"]),
+      marketCapUsd: num(row["marketCapUsd"]),
+      underlyingVolume24hUsd: num(row["underlyingVolume24hUsd"]),
+      openState: typeof row["openState"] === "boolean" ? row["openState"] : null,
+      marketStatus: str(row["marketStatus"]),
+      reasonCode: str(row["reasonCode"]),
+      nextOpenMs: num(row["nextOpenMs"]),
+      nextCloseMs: num(row["nextCloseMs"]),
+    });
+  }
+  return out;
+}
+
+/** Per-token venues from the `stock-venues` snapshot, deepest first; empty when never swept. */
+async function readVenues(store: SnapshotStore): Promise<Map<string, Venue[]>> {
+  const record = await store.get<unknown>(RWA_VENUES_KEY);
+  const out = new Map<string, Venue[]>();
+  if (record === null || typeof record.data !== "object" || record.data === null) return out;
+  const byAddress = (record.data as Record<string, unknown>)["byAddress"];
+  if (typeof byAddress !== "object" || byAddress === null) return out;
+  const num = (x: unknown): number | null => (typeof x === "number" && Number.isFinite(x) ? x : null);
+  for (const [rawAddress, rawVenues] of Object.entries(byAddress as Record<string, unknown>)) {
+    const address = normalizeAddress(rawAddress);
+    if (address === null || !Array.isArray(rawVenues)) continue;
+    const venues: Venue[] = [];
+    for (const raw of rawVenues) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const v = raw as Record<string, unknown>;
+      const pool = normalizeAddress(v["pool"]);
+      const quote = typeof v["quote"] === "object" && v["quote"] !== null ? (v["quote"] as Record<string, unknown>) : null;
+      const quoteAddress = quote === null ? null : normalizeAddress(quote["address"]);
+      if (pool === null || quote === null || quoteAddress === null) continue;
+      const dex = v["dex"];
+      const version = v["version"];
+      if ((dex !== "pancakeswap" && dex !== "uniswap") || (version !== "v2" && version !== "v3")) continue;
+      venues.push({
+        dex,
+        version,
+        pool,
+        feeTier: num(v["feeTier"]),
+        quote: { address: quoteAddress, symbol: typeof quote["symbol"] === "string" ? quote["symbol"] : "" },
+        priceUsd: num(v["priceUsd"]),
+        liquidityUsd: num(v["liquidityUsd"]),
+        volume24hUsd: num(v["volume24hUsd"]),
+        asOf: num(v["asOf"]) ?? 0,
+      });
+    }
+    venues.sort((a, b) => (b.liquidityUsd ?? 0) - (a.liquidityUsd ?? 0));
+    out.set(address, venues);
+  }
+  return out;
 }

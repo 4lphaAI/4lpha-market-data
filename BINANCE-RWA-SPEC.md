@@ -310,3 +310,112 @@ Railway can be 5× slower than local on some hosts; measure, do not assume).
 - Joint `UniverseLane` change with the execution plane (`ondo`, `platform`, dropping `marketHours`).
 - Per-row `poolAddress`/`feeTier` for the execution plane's v3 route — belongs
   with the pool dataset, next spec.
+
+---
+
+## 9. Addendum (2026-09-17, operator): venues — Pancake v3 **and Uniswap v3** per stock token
+
+Measured (research §6): bStocks hold $3.5M on Uniswap v3 on BSC (16% of their AMM
+liquidity; QQQB's Uniswap v3/USDC pool at $2.64M is *larger* than its Pancake pool),
+Ondo holds $40k there. Cross-venue spreads on the same token reached 24 bps on QQQB
+with >$2M on each side — the deepest arb in the dataset. So each stock row must carry
+its venues, and the arb agent must not have to discover them.
+
+### 9.1 `src/adapters/dexScreener.ts` — keyless pair discovery
+
+`fetchDexScreenerTokenPairs({ address, signal?, fetchFn? })` →
+`GET https://api.dexscreener.com/token-pairs/v1/bsc/{address}` (documented public
+API, 300 req/min, no key). Normalized `DexPair`: `dex` (`dexId`), `version` (first
+label, `"v2"|"v3"|null`), `pool` (`pairAddress`, lowercased), `base`/`quote`
+`{address, symbol}`, `priceUsd`, `liquidityUsd`, `volume24hUsd`, `txns24h`. A
+non-array payload is an `AdapterError("dexscreener")`; a row without both token
+addresses is dropped.
+
+Why DexScreener and not the chain: Uniswap has no explorer API on BSC, and factory
+`getPool` over 4 fee tiers × 3 quotes × 2 factories is 24 `eth_call`s per token
+before any pool is priced in USD. DexScreener answers "which pools, how deep" in one
+call; the chain is then used only for what DexScreener does not carry (fee tier).
+
+### 9.2 Filtering — what counts as a venue
+
+Keep a pair iff: the stock token is the **base**; `dex ∈ {pancakeswap, uniswap}`;
+`quote ∈` the majors set (`USDT, USDC, WBNB, BTCB, ETH` from `majorsPrices.ts`) or
+another RWA token. Pairs where the stock token is the *quote* of a memecoin are not
+venues for the stock. v2 rows are **kept, labelled** — the plane sets no
+thresholds; the research says v2 is 10–100× thinner and the consumer filters on
+`version`/`liquidityUsd`.
+
+### 9.3 Fee tier and verification from the chain
+
+For every v3 pool not yet in the cache, `fee()` (`0xddca3f43`) is read through
+`withBscClient` in one tick so viem multicall folds the batch. Pancake v3 and
+Uniswap v3 pools share the ABI. A **contract-level** failure (`0x`, revert — no
+such function) drops the row: DexScreener called it v3 and the chain says it is not
+a v3 pool. A **transport** failure keeps the row with `feeTier: null` (the split is
+`isContractLevelFailure`, same as the gate and `flap-launches`). Fee tiers are
+immutable, so a resolved tier is cached for the pool's life.
+
+### 9.4 Job — `src/jobs/stockVenues.ts`
+
+```
+name       stock-venues
+interval   60 s, jitter 5 s, timeout 60 s
+input      universe:rwa rows (bstock + ondo addresses, sorted)
+per cycle  next 75 addresses after the stored cursor (wraps) → 75 sequential
+           DexScreener calls, ≥ 210 ms apart (≤ 285/min against the 300 limit)
+           (built as 100 / 45 s; measured 31.7 s per 100 locally — DexScreener
+           answers in ~300 ms — so lowered to 75 / 60 s)
+           → filter (9.2) → fee reads for new v3 pools (9.3)
+output     venues:rwa = { byAddress: Record<address, Venue[]>, cursor, sweptAt: Record<address, ms> }
+           merged over the previous snapshot; freshForMs 15 min, deadAfterMs 24 h
+```
+
+- A full sweep of 488 tokens takes 7 cycles (~7 min); each token is re-read every
+  ~7 min, which is the cadence `liquidityUsd` needs (venue *existence* changes on
+  the order of weeks). Pools the chain rejected as not-v3 are remembered in the
+  snapshot (`rejected`) so a dud is asked once, ever.
+- Fails **open**: a DexScreener error on one token keeps that token's previous
+  venues (its `sweptAt` does not advance, so its age is visible); a cycle that
+  reads nothing throws without republishing. Missing `universe:rwa` → the job is a
+  no-op with a log line, not a failure.
+- Runs whether or not Binance credentials exist? **No** — without `universe:rwa`
+  there is no address list; the static 25 bStocks are swept when the snapshot is
+  absent so the job is still useful on a box without the key.
+
+### 9.5 `Venue` on the row
+
+```ts
+interface Venue {
+  dex: "pancakeswap" | "uniswap";
+  version: "v2" | "v3";
+  pool: string;                       // lowercased pool/pair address
+  feeTier: number | null;             // v3 only; null = unresolved (transport) — never guessed
+  quote: { address: string; symbol: string };
+  priceUsd: number | null;
+  liquidityUsd: number | null;
+  volume24hUsd: number | null;
+  asOf: number;                       // when this pool was last read
+}
+```
+
+`UniverseEntry.venues?: Venue[]`, sorted by `liquidityUsd` desc, attached in
+`buildUniverse` to every `bstocks`/`ondo` row from `venues:rwa`; absent when the
+token has never been swept. `STATUS_SNAPSHOT_KEYS` gains `venues:rwa`.
+
+### 9.6 Tests added
+
+`test/adapters.dexScreener.test.ts` — normalizer on real QQQB/NVDAB fixtures (v3
+and v2 rows, a memecoin-quoted-in-NVDAB row that must be dropped by the job
+filter), non-array → `AdapterError`.
+`test/jobs.stockVenues.test.ts` — rotation cursor (100 per cycle, wraps), pacing
+(≥ 210 ms between calls with an injected sleep), filter rules, fee read via an
+injected `readFees` (contract failure drops, transport keeps with `null`),
+per-token failure keeps previous venues, merge over previous snapshot on
+`MemoryStore` and `FakePg`; `buildUniverse` attaches `venues` sorted by liquidity.
+
+### 9.7 Review checklist additions
+
+- [ ] No `Promise.all` over DexScreener; ≥ 210 ms spacing.
+- [ ] Stock-as-quote pairs excluded; Topaz/others excluded; v2 kept and labelled.
+- [ ] `feeTier` only from the chain; contract-level failure drops, transport keeps `null`.
+- [ ] A token whose DexScreener read failed keeps its old venues and old `sweptAt`.

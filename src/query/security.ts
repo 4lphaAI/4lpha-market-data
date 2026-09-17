@@ -37,6 +37,8 @@ export const SECURITY_TTL: Record<Lane, SecurityTtl> = {
   meme: { freshForMs: 5 * MINUTE, deadAfterMs: 60 * MINUTE },
   coins: { freshForMs: 24 * HOUR, deadAfterMs: 7 * 24 * HOUR },
   bstocks: { freshForMs: 24 * HOUR, deadAfterMs: 7 * 24 * HOUR },
+  // An issuer-curated list, as static in composition as bStocks.
+  ondo: { freshForMs: 24 * HOUR, deadAfterMs: 7 * 24 * HOUR },
   // A frozen curated list changes as rarely as the other two curated lanes.
   allowlist: { freshForMs: 24 * HOUR, deadAfterMs: 7 * 24 * HOUR },
 };

@@ -4,7 +4,10 @@ import { createScheduler } from "./core/scheduler.js";
 import { createStore } from "./core/store.js";
 import { createServer } from "./server.js";
 import { binancePricesJob } from "./jobs/binancePrices.js";
+import { binanceRwaJob } from "./jobs/binanceRwa.js";
 import { binanceUniverseJob } from "./jobs/binanceUniverse.js";
+import { hasBinanceRwaCredentials } from "./adapters/binanceRwa.js";
+import { stockVenuesJob } from "./jobs/stockVenues.js";
 import { flapLaunchesJob } from "./jobs/flapLaunches.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { majorsPricesJob } from "./jobs/majorsPrices.js";
@@ -60,6 +63,11 @@ scheduler.register(fourmemeRankingJob(store));
 scheduler.register(flapLaunchesJob(store));
 scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
+// Tokenized stocks: the Binance Web3 RWA list (needs the signed key) and the
+// per-token AMM venues (keyless; sweeps the static bStocks without the key).
+if (hasBinanceRwaCredentials()) scheduler.register(binanceRwaJob(store));
+else console.warn("[binance-rwa] BINANCE_WEB3_API_KEY/SECRET_KEY not set; bstocks lane is static only, ondo lane empty");
+scheduler.register(stockVenuesJob(store));
 scheduler.register(pancakePoolsJob(store));
 scheduler.register(tradingFeaturesJob(store));
 // USD prices for the majors every wallet holds; the lanes never carry them.

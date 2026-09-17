@@ -55,7 +55,7 @@ export interface ServerDeps {
 }
 
 // `allowlist` is kept as a separate enumerable lane for the execution plane.
-const LANES: Lane[] = ["meme", "coins", "bstocks", "allowlist"];
+const LANES: Lane[] = ["meme", "coins", "bstocks", "allowlist", "ondo"];
 
 /**
  * Debug reads are limited to these key prefixes so `/snapshots/:key` can never
@@ -115,6 +115,8 @@ const STATUS_SNAPSHOT_KEYS = [
   "heartbeat",
   "universe:meme",
   "universe:coins",
+  "universe:rwa",
+  "venues:rwa",
   "universe:pools",
   "pools:index",
   FEATURE_INDEX_KEY,

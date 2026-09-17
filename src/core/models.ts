@@ -8,9 +8,74 @@
 
 /**
  * Which product surface a token belongs to. `allowlist` is the frozen
- * `data/eligible-tokens.json` snapshot, enumerable over `/universe`.
+ * `data/eligible-tokens.json` snapshot, enumerable over `/universe`. `ondo`
+ * is the Ondo tokenized-stock list from the Binance Web3 RWA API; `bstocks` is
+ * the static Binance bStocks list unioned with the same API's bStock rows.
  */
-export type Lane = "meme" | "coins" | "bstocks" | "allowlist";
+export type Lane = "meme" | "coins" | "bstocks" | "allowlist" | "ondo";
+
+/**
+ * One AMM pool a tokenized stock trades in, discovered per token so an agent
+ * never has to. Uniswap v3 on BSC is a real venue for bStocks — measured
+ * 2026-09-17, QQQB's Uniswap v3/USDC pool was larger than its PancakeSwap
+ * pool — which is why the venue is named rather than assumed to be Pancake.
+ */
+export interface Venue {
+  dex: "pancakeswap" | "uniswap";
+  version: "v2" | "v3";
+  /** Pool (pair) contract address, lowercased. */
+  pool: string;
+  /**
+   * v3 fee tier in hundredths of a bip (500 = 0.05%), read from the pool
+   * contract itself. `null` for v2, or when the chain read failed at the
+   * transport level — never guessed from the DEX's defaults.
+   */
+  feeTier: number | null;
+  quote: { address: string; symbol: string };
+  priceUsd: number | null;
+  liquidityUsd: number | null;
+  volume24hUsd: number | null;
+  /** Epoch milliseconds when this pool was last read. */
+  asOf: number;
+}
+
+/**
+ * One tokenized-stock row from the Binance Web3 RWA token list. Numerics arrive
+ * as strings upstream and are parsed here; a missing or unparseable field is
+ * `null`. `underlyingVolume24hUsd` is the *underlying equity's* exchange
+ * volume (SPYB reports SPY's ~$44B), not the token's — named so it is never
+ * mistaken for on-chain volume.
+ */
+export interface RwaToken {
+  /** Contract address, always lowercased. */
+  address: string;
+  symbol: string;
+  name: string | null;
+  /** `bstock` | `ondo`; unknown values pass through rather than fail the row. */
+  platform: string;
+  underlyingTicker: string | null;
+  underlyingName: string | null;
+  decimals: number | null;
+  tokenToShareRatio: number | null;
+  /** The token's on-chain price as Binance observes it. */
+  tokenPriceUsd: number | null;
+  /** The underlying equity's price. */
+  referencePriceUsd: number | null;
+  /** `round((tokenPrice / referencePrice - 1) * 1e4)`; null unless both prices are > 0. */
+  premiumBps: number | null;
+  marketCapUsd: number | null;
+  underlyingVolume24hUsd: number | null;
+  /** False when the issuer has the token halted or outside a supported session. */
+  openState: boolean | null;
+  /** bStocks: null (24/7). Ondo: the current session, e.g. `overnight` / `regular`. */
+  marketStatus: string | null;
+  /** `TRADING` | `UNSUPPORTED` (asset not in this session) | `ASSET_PAUSED` ... */
+  reasonCode: string | null;
+  nextOpenMs: number | null;
+  nextCloseMs: number | null;
+}
+
+import type { Staleness } from "./types.js";
 
 /** A token that the data plane tracks, with the lane it was discovered in. */
 export interface UniverseEntry {
@@ -21,8 +86,30 @@ export interface UniverseEntry {
   lane: Lane;
   /** Adapter/job that produced the entry, e.g. `fourmeme` or `static`. */
   source: string;
-  /** Set for tokenized equities, which only trade during US market hours. */
+  /**
+   * Set on the static bStocks rows. Measured 2026-09-17 to be wrong for them
+   * (bStocks trade 24/7; the session model is Ondo's) but kept until the
+   * execution plane's schema changes with it — a false "closed" is the safe
+   * direction. The per-row `openState` / `marketStatus` below are the truth.
+   */
   marketHours?: "us-equities";
+  // RWA fields, present on rows that came from the Binance Web3 RWA list.
+  platform?: string;
+  underlyingTicker?: string;
+  tokenPriceUsd?: number | null;
+  referencePriceUsd?: number | null;
+  premiumBps?: number | null;
+  openState?: boolean | null;
+  marketStatus?: string | null;
+  reasonCode?: string | null;
+  nextOpenMs?: number | null;
+  nextCloseMs?: number | null;
+  decimals?: number | null;
+  tokenToShareRatio?: number | null;
+  /** Staleness of the RWA snapshot the row's fields came from. */
+  staleness?: Staleness;
+  /** AMM pools the token trades in, deepest first; absent until swept. */
+  venues?: Venue[];
 }
 
 /**
