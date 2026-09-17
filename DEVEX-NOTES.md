@@ -261,6 +261,28 @@ friction · **OK**: something that worked first time and deserves credit.
   weekly (25 pinned 2026-09-03 → 46 by 2026-09-17), so nothing downstream may pin
   its size.
 
+### QUIRK-28 · One endpoint, two clocks: bStocks and Ondo answer `statusInfo` under different models, and the buyable Ondo set breathes with the session
+- Same call, `GET /rwa/tokens?binanceChainId=56`, same `statusInfo` shape. bStocks fill it
+  as `{openState:true, marketStatus:null, reasonCode:"TRADING", nextOpenTime:null,
+  nextCloseTime:null}` — every row, every hour we looked (00:00 ET, 06:00, 10:05) — i.e.
+  no session concept at all, 24/7. Ondo fills the same fields as a session machine:
+  `marketStatus` ∈ `overnight | regular | …`, `nextOpenTime`/`nextCloseTime` set, and
+  `openState` flipping per asset class.
+- Measured: overnight (00:00 ET) **264 of 442** Ondo rows `TRADING`, **177**
+  `openState:false / UNSUPPORTED`, 1 `ASSET_PAUSED`; regular session (10:05 ET)
+  **442 of 442** `TRADING`. So "which Ondo tokens can I buy" is not a list, it is a
+  function of the clock — 255 all-session, 9 overnight+regular, 93 pre-market+regular,
+  84 regular-only (inferred from `nextOpenTime` clustering; no page documents the
+  classes). A client that snapshots the list once a day gets it wrong for ~40% of Ondo
+  for most of the day.
+- Nothing on the RWA Data page says the two issuers use the field differently, that
+  `marketStatus` can be `null`, or what `null` means (it means "always open", not
+  "unknown"). We learned it by diffing the same call at three times of day.
+- Consequence built here: the eligibility gate re-reads the live snapshot on every call
+  and never caches a stock verdict (`rwa_unsupported` overnight → `binance_rwa` at 08:01
+  or 13:31 UTC for the same address); the execution plane must not pin the "open"
+  set at startup.
+
 ## Open items to measure next
 - Rate ceiling after the limit increase is granted (re-run the ramp, update PITFALL-6).
 - Whether the 5 rps bucket is per key or per IP (needs a second key or a second host).
