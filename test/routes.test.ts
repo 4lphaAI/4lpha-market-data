@@ -102,18 +102,18 @@ describe("GET /universe", () => {
     const body = envelope(await res.json());
     const data = body["data"];
     assert.ok(Array.isArray(data));
-    // 221 of the snapshot's 222: the BNB row is the `"native"` sentinel, which
+    // 224 of the snapshot's 225: the BNB row is the `"native"` sentinel, which
     // has no contract address.
-    assert.equal(data.length, 221);
+    assert.equal(data.length, 224);
 
     const meta = body["meta"];
     assert.ok(isRecord(meta));
-    assert.equal(meta["total"], 221);
+    assert.equal(meta["total"], 224);
     assert.equal(meta["lane"], "allowlist");
     const lanes = meta["lanes"];
     assert.ok(isRecord(lanes));
     assert.ok(isRecord(lanes["allowlist"]));
-    assert.equal(lanes["allowlist"]["count"], 221);
+    assert.equal(lanes["allowlist"]["count"], 224);
     assert.equal(lanes["allowlist"]["staleness"], "fresh");
     assert.equal(lanes["allowlist"]["asOf"], null);
 
@@ -123,9 +123,12 @@ describe("GET /universe", () => {
       data.find((entry) => isRecord(entry) && entry["address"] === USDT),
       { address: USDT, symbol: "USDT", lane: "allowlist", source: "static" },
     );
+    // AMDB (the old fixture) left the allowlist in the 2026-09-17 revision — no
+    // AMM pool — and NVDAB now names its tier as its first source.
+    assert.equal(data.find((entry) => isRecord(entry) && entry["address"] === ADDRESS), undefined);
     assert.deepEqual(
-      data.find((entry) => isRecord(entry) && entry["address"] === ADDRESS),
-      { address: ADDRESS, symbol: "AMDB", lane: "allowlist", source: "bstocks" },
+      data.find((entry) => isRecord(entry) && entry["address"] === "0x02fca66c1d1afb4e2a7884261eb00f63598a7436"),
+      { address: "0x02fca66c1d1afb4e2a7884261eb00f63598a7436", symbol: "NVDAB", lane: "allowlist", source: "stocks-tier-a" },
     );
     await store.close();
   });

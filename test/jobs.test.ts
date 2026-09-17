@@ -135,10 +135,10 @@ describe("binance-prices job", () => {
     const allowlist = loadAllowlist();
     assert.notEqual(allowlist, null);
 
-    // 221, not the snapshot's 222: the BNB row is the `"native"` sentinel and
-    // carries no contract address. Every bStock is itself allowlisted, so the
-    // union dedupes back to the allowlist.
-    assert.equal(tracked.length, 221);
+    // 224 allowlisted addresses (the BNB row is the `"native"` sentinel and
+    // carries none) plus the 11 static bStocks the 2026-09-17 revision removed
+    // from the allowlist — still priced, since the static lane still serves them.
+    assert.equal(tracked.length, 235);
     assert.equal(new Set(tracked).size, tracked.length);
     for (const address of allowlist!.keys()) assert.ok(tracked.includes(address), address);
     for (const address of bstockAddresses()) assert.ok(tracked.includes(address), address);
