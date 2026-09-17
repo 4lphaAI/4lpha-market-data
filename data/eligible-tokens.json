@@ -757,7 +757,8 @@
       "onChainSymbol": "CRCLB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "CRCL"
     },
     {
       "address": "0x992879cd8ce0c312d98648875b5a8d6d042cbf34",
@@ -1185,7 +1186,8 @@
       "onChainSymbol": "GOOGLB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "GOOGL"
     },
     {
       "address": "0x9a4a67721573f2c9209dfff972c52be4e3f6642e",
@@ -1350,7 +1352,8 @@
       "onChainSymbol": "INTCB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "INTC"
     },
     {
       "address": "0x91152b4ef635403efbae860edd0f8c321d7c035d",
@@ -1572,7 +1575,8 @@
       "onChainSymbol": "METAB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "META"
     },
     {
       "address": "0xac246674dd88dd08f9c6dd0ab5e2115988bff34a",
@@ -1612,7 +1616,8 @@
       "onChainSymbol": "MSFTB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "MSFT"
     },
     {
       "address": "0xe87afb3076aeb0f9b14e368de8145ae6a2826a14",
@@ -1626,7 +1631,8 @@
       "onChainSymbol": "MSTRB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "MSTR"
     },
     {
       "address": "0xae2f842ef90c0d5213259ab82639d5bbf649b08e",
@@ -1656,7 +1662,8 @@
       "onChainSymbol": "MUB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "MU"
     },
     {
       "address": "0x8b6acf6041a81567f012ff6a4c6d96d5818d74bf",
@@ -1795,7 +1802,8 @@
       "onChainSymbol": "NVDAB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "NVDA"
     },
     {
       "address": "0xa9ee28c80f960b889dfbd1902055218cba016f75",
@@ -2016,7 +2024,8 @@
       "onChainSymbol": "QQQB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "QQQ"
     },
     {
       "address": "0x97693439ea2f0ecdeb9135881e49f354656a911c",
@@ -2192,7 +2201,8 @@
       "onChainSymbol": "SNDKB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "SNDK"
     },
     {
       "address": "0x9e82e3da8f1115b73d24bb24113ab836ffdab6b6",
@@ -2253,7 +2263,8 @@
       "onChainSymbol": "SOXLB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "SOXL"
     },
     {
       "address": "0xbe9d156892e55e7154bcd3cb0fea677f9d3103e1",
@@ -2270,7 +2281,8 @@
       "onChainSymbol": "SPCXB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "SPCX"
     },
     {
       "address": "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8",
@@ -2284,7 +2296,8 @@
       "onChainSymbol": "SPYB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "SPY"
     },
     {
       "address": "0x6a708ead771238919d85930b5a0f10454e1c331a",
@@ -2470,7 +2483,8 @@
       "onChainSymbol": "TSLAB",
       "verifiedOnChain": true,
       "tier": "A",
-      "platform": "bstock"
+      "platform": "bstock",
+      "underlyingTicker": "TSLA"
     },
     {
       "address": "0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0",
