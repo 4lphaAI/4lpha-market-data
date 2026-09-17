@@ -257,3 +257,55 @@ volume — real flow, not dust.
 - Execution-plane consequence (not this repo): a Uniswap v3 router path on BSC in
   addition to Pancake v3. Interfaces are the same family (`exactInputSingle` with
   a fee tier), different router address.
+
+---
+
+## 7. US-hours re-measure (2026-09-17 14:05 UTC = 10:05 ET, regular session) vs §1–§6 (00:00 ET)
+
+Same scripts, same filters. Dataset: `data/research/rwa-bsc-venues-2026-09-17-us-hours.json`.
+
+**Structure did not move.** bStocks 21 pools ≥ $10k (16 ≥ $100k), Ondo 8, xStocks 0 — identical
+counts. Venue split identical to the percent: bStocks Pancake v3 84% / Uniswap v3 15%, Ondo
+Pancake v3 88%. Big-pool liquidity within ±10% except NVDAB's Uniswap v3 pool ($325k → $147k,
+someone pulled) and GOOGLB's second Pancake pool. Volume and txns rose on most pools with the
+session open (QQQB Pancake $16.0M → $17.1M / 34.8k → 44.1k txns; BABAB $274k → $745k).
+
+**Sessions.** Ondo: all **442 `TRADING` / `regular`** (from 264 open / 177 `UNSUPPORTED` / 1
+paused overnight). bStocks: 46/46 `TRADING`, `marketStatus: null`, as always.
+
+**Pool-vs-reference premium** (deepest priced venue ≥ $10k, vs `referencePrice × ratio`):
+
+| | n | min | p10 | p50 | p90 | max |
+|---|---|---|---|---|---|---|
+| bStocks 00:00 ET | 21 | −62 | −30 | −7 | 9 | 90 |
+| bStocks 10:05 ET | 21 | −55 | −30 | −8 | 9 | 18 |
+| Ondo 00:00 ET | 8 | −198 | −198 | −45 | 36 | 36 |
+| Ondo 10:05 ET | 8 | −158 | −158 | −70 | 19 | 19 |
+
+bStocks sit within ±30 bps of NAV around the clock (NVDAB −22, SPCXB −16, QQQB −16, GOOGLB −15,
+MSFTB −30); the only ≥ 50 bps readings are the $23–37k pools (MUB, SNXXB). **Ondo pools trade at
+a persistent discount to NAV even in regular hours** — GMEon −158, SQQQon −121, SLVon −102,
+DISon −72, FXIon −70 bps — which is the mint/redeem arb (buy the pool below NAV, redeem at NAV
+through Ondo) sitting open for lack of an RFQ leg on BSC. That leg is the execution plane's.
+
+**Cross-venue spreads narrowed with the session open**: QQQB Uni/Pcs 24 → 12 bps, NVDAB 14 → 14,
+SPCXB 3 → 17, TSLAB 11 → 16. Same order of magnitude as the pool-vs-NAV premium, on pools ten
+times deeper than any Ondo pool.
+
+### Allowlist decision (operator, 2026-09-17 evening)
+
+The tiers from §5 of the first pass hold unchanged after the US-hours read:
+
+- **Tier A — 21 bStocks with a pool ≥ $10k**: NVDAB SPCXB QQQB GOOGLB SKHYB INTCB MSTRB BABAB
+  TSLAB SPYB HOODB MSFTB CRCLB SOXLB SNDKB METAB TSMB TQQQB NOKB SNXXB MUB. Eligible today via
+  allowlist (14) or `binance_rwa` (7: SKHYB BABAB HOODB TSMB TQQQB NOKB SNXXB); all pass the
+  rule-5 veto 24/7.
+- **Tier B — 8 Ondo with a pool ≥ $10k**: FXIon PDDon BILIon DISon GMEon SQQQon SLVon NVDAon.
+  Eligible via `binance_rwa` only while `TRADING` in a supported session (SQQQon and others
+  close overnight). Conditional on the execution plane's tiny live trade proving a 7702 wallet
+  can hold Ondo tokens.
+- **Not allowed for AMM trading**: 25 bStocks and 434 Ondo with no pool ≥ $10k (RFQ-only
+  venues), 808 xStocks.
+
+The plane sets no threshold itself: the `$10k` line is the consumer's, applied to
+`venues[0].liquidityUsd` on the lane row; the gate only answers open/trading/known.
