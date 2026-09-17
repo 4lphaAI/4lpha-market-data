@@ -195,3 +195,65 @@ replacement is the per-token `statusInfo` from `/tokens` (bulk, 1 call) refreshe
    state — all derivable from `/tokens` + the pool dataset. The RFQ leg (`/quote`) stays on
    the execution plane.
 4. Counts: 77 bStocks in `/platforms` vs 46 in `/tokens` is still unexplained; ask Binance.
+
+---
+
+## 6. Venue split — is Ondo liquidity on Uniswap? (measured 2026-09-17 ~06:30 UTC)
+
+Operator hypothesis: bStocks live on PancakeSwap, Ondo on Uniswap, so the arb agent
+should support both venues. Re-measured with **every** pair per token (488
+DexScreener `token-pairs` calls, one per token — §1 had used `tokens/v1`, which
+returns only the best pair per token, so its liquidity figures are best-pool, not
+total), keeping only pairs against a major (USDT/USDC/WBNB/BTCB/ETH) or another
+stock token. Dataset: `data/research/rwa-bsc-venues-2026-09-17.json` (173 pairs).
+Every `uniswap` row was checked on chain: all are Uniswap **v3** pool contracts
+(`slot0()` and `fee()` answer; fees 500/3000/10000).
+
+| Issuer | Pairs | Total liq | Pancake v3 | Uniswap v3 | Pancake v2 | Other |
+|---|---|---|---|---|---|---|
+| **bStocks** | 113 | $22.4M | **$18.65M (83%)**, 59 pools, 24 tokens, 93% of volume | **$3.52M (16%)**, 14 pools, 8 tokens, 7% of volume | $0.24M (1%) | Topaz $0.02M |
+| **Ondo** | 60 | $0.80M | **$0.71M (89%)**, 20 pools, 16 tokens, 98% of volume | $0.04M (5%), 8 pools | $0.05M (6%) | — |
+
+**The hypothesis is inverted.** Ondo on BSC is Pancake v3 almost entirely; Uniswap
+carries $40k of Ondo across 8 tokens. It is *bStocks* that have a real second venue:
+Uniswap v3 holds $3.5M of bStocks, and for **QQQB the Uniswap v3 USDC pool ($2.64M)
+is larger than the Pancake v3 USDT pool ($2.03M)**. NVDAB ($325k), SPCXB ($294k +
+$100k), TSLAB ($63k) also have Uniswap v3 depth.
+
+### Same token, two venues ≥ $10k — the cross-DEX spread at one instant
+
+| Token | Venue A | Venue B | Spread |
+|---|---|---|---|
+| QQQB | Uni v3 $2,643k/USDC @707.99 | Pcs v3 $2,026k/USDT @709.72 | **24 bps** |
+| NVDAB | Pcs v3 $2,730k/USDT @215.66 | Uni v3 $325k/USDT @215.97 | 14 bps |
+| SPYB | Pcs v3 $398k/USDT @758.77 | Uni v3 $18k/WBNB @760.08 | 17 bps |
+| TSLAB | Pcs v3 $428k/USDT @360.78 | Uni v3 $63k/USDT @361.16 | 11 bps |
+| GOOGLB | Pcs v3 $2,050k/USDT @345.27 | Uni v3 $28k/USDT @345.04 | 7 bps |
+| SPCXB | Pcs v3 $2,763k/USDT @152.19 | Uni v3 $294k/USDT @152.24 | 3 bps |
+| SLVon | Pcs v3 $36k/USDT @57.29 | Uni v3 $26k/USDC @57.14 | 26 bps |
+| MUB | Pcs v3 $22k/ETH @944.3 | Uni v3 $13k/USDT @929.22 | 162 bps (thin) |
+| PDDon / BILIon / FXIon | Pcs v3 | Pcs v2 $10–21k | 36 / 20 / 0 bps |
+
+QQQB is the case that matters: two pools above $2M each, 24 bps apart, quoted in
+USDC vs USDT (the USDC/USDT 0.01% leg costs ~1 bp). That is a larger and deeper
+spread than any cross-issuer pair (§2) and than the bStocks pool-vs-reference
+median (0 bps). Uniswap v3 volume on NVDAB ($1.14M/24h) is 70% of its Pancake
+volume — real flow, not dust.
+
+### Decision input
+
+- **Support Uniswap v3 as a second venue for bStocks — not for Ondo.** Concretely
+  the 8 bStocks with a Uniswap v3 pool (QQQB, NVDAB, SPCXB, TSLAB, GOOGLB, SPYB,
+  MUB, and NVDAB/USDC), of which 4 have ≥ $60k there.
+- **Pancake v2 stays out**: ≤ $22k per pool on any stock token; every v2 pool is
+  10–100× thinner than the same token's v3 pool.
+- Data-plane consequence: the pool lane (`/pools/top`) is Pancake v3 only because it
+  reads Pancake's explorer API. Uniswap v3 pools on BSC have the same contract ABI
+  (`slot0`, `liquidity`, `fee`) as Pancake v3, so per-pool chain reads already in
+  `pancake.ts` (`fetchPancakePoolOnchain`) work unchanged; discovery is the missing
+  piece (DexScreener `token-pairs`, keyless, 300 rpm, or the Uniswap v3 factory
+  `getPool` for the known fee tiers). A per-token `venues[]` — `{dex, version,
+  pool, feeTier, quote, liquidityUsd}` — is what the arb agent needs from this plane.
+- Execution-plane consequence (not this repo): a Uniswap v3 router path on BSC in
+  addition to Pancake v3. Interfaces are the same family (`exactInputSingle` with
+  a fee tier), different router address.
