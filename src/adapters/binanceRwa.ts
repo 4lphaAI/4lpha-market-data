@@ -49,6 +49,8 @@ export const BSC_CHAIN_ID = "56";
 export const RWA_PRICE_BATCH_MAX = 80;
 /** Binance's per-key ceiling, shared by every endpoint. */
 export const BINANCE_RWA_RPS = 5;
+/** Longest a 429 retry will wait, whatever `Retry-After` says. */
+export const RETRY_AFTER_CAP_S = 5;
 
 /**
  * One bucket per process. Every future caller of this adapter — candles,
@@ -157,8 +159,11 @@ export async function signedRequest(options: SignedRequestOptions): Promise<unkn
 
     if (response.status === 429) {
       if (attempt === 0) {
+        // Measured Retry-After is 1; the cap keeps an upstream that says 3600
+        // from parking a run long past the job's own timeout.
         const retryAfter = parseNum(response.headers.get("retry-after")) ?? 1;
-        await sleep(Math.max(1, retryAfter) * 1000);
+        await sleep(Math.min(RETRY_AFTER_CAP_S, Math.max(1, retryAfter)) * 1000);
+        if (options.signal?.aborted) throw new AdapterError(SOURCE, "aborted while waiting to retry", 429);
         continue;
       }
       throw new AdapterError(SOURCE, "rate limited", 429);
@@ -169,7 +174,7 @@ export async function signedRequest(options: SignedRequestOptions): Promise<unkn
       const blockedBy = response.headers.get("x-oc-blocked-by");
       throw new AdapterError(
         SOURCE,
-        blockedBy === null ? "authentication rejected" : `authentication rejected (${blockedBy})`,
+        blockedBy === null ? "authentication rejected" : `authentication rejected (${sanitizeMessage(blockedBy).slice(0, 64)})`,
         response.status,
       );
     }

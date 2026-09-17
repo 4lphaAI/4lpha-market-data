@@ -52,6 +52,22 @@ describe("createRateLimiter", () => {
     assert.deepEqual(clock.sleeps, [100, 100]);
   });
 
+  it("rejects a waiter that is mid-sleep when its signal aborts (real timers)", async () => {
+    const limiter = createRateLimiter({ capacity: 1, refillPerSecond: 10 }); // next token in 100 ms
+    await limiter.acquire();
+    const controller = new AbortController();
+    const waiting = limiter.acquire(controller.signal);
+    setTimeout(() => controller.abort(), 10);
+    const started = Date.now();
+    await assert.rejects(waiting, (error: Error) => error.name === "AbortError");
+    assert.ok(Date.now() - started < 90, "rejected on abort, not after the refill wait");
+  });
+
+  it("refuses a configuration that could never refill", () => {
+    assert.throws(() => createRateLimiter({ capacity: 5, refillPerSecond: 0 }), RangeError);
+    assert.throws(() => createRateLimiter({ capacity: 0, refillPerSecond: 5 }), RangeError);
+  });
+
   it("rejects a waiter whose signal aborts, and keeps serving the next caller", async () => {
     const clock = fakeClock();
     const limiter = createRateLimiter({ capacity: 1, refillPerSecond: 1, now: clock.now, sleep: clock.sleep });

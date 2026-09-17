@@ -54,10 +54,13 @@ function abortError(): Error {
 }
 
 export function createRateLimiter(options: RateLimiterOptions): RateLimiter {
+  if (!(options.capacity >= 1) || !(options.refillPerSecond > 0)) {
+    throw new RangeError("rate limiter needs capacity >= 1 and refillPerSecond > 0");
+  }
   const now = options.now ?? (() => Date.now());
   const sleep = options.sleep ?? defaultSleep;
-  const capacity = Math.max(1, options.capacity);
-  const refillPerMs = Math.max(0, options.refillPerSecond) / 1000;
+  const capacity = options.capacity;
+  const refillPerMs = options.refillPerSecond / 1000;
 
   let tokens = capacity;
   let lastRefill = now();
@@ -80,8 +83,7 @@ export function createRateLimiter(options: RateLimiterOptions): RateLimiter {
         tokens -= 1;
         return;
       }
-      const deficit = 1 - tokens;
-      const waitMs = refillPerMs === 0 ? 1000 : Math.ceil(deficit / refillPerMs);
+      const waitMs = Math.ceil((1 - tokens) / refillPerMs);
       await sleep(waitMs, signal);
     }
   }

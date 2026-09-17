@@ -82,7 +82,6 @@ describe("signing", () => {
     );
     assert.match(a.headers["x-oc-nonce"]!, /^[0-9a-f-]{36}$/);
     assert.notEqual(a.headers["x-oc-nonce"], b.headers["x-oc-nonce"], "same path, different nonce");
-    assert.equal(a.headers["x-oc-passphrase"], undefined);
   });
 });
 

@@ -112,6 +112,9 @@ describe("stock-venues job", () => {
     const store = new MemoryStore();
     await seedRwa(store);
     const addresses = [NVDAB, ARQQON, HOODB].sort();
+    // HOODB was swept before and will fail this time: its old venues must survive untouched.
+    const hoodVenue = { dex: "pancakeswap", version: "v3", pool: "0x5000000000000000000000000000000000000005", feeTier: 2500, quote: { address: USDT, symbol: "USDT" }, priceUsd: 120, liquidityUsd: 289000, volume24hUsd: 184000, asOf: 999 };
+    await store.put(RWA_VENUES_KEY, { byAddress: { [HOODB]: [hoodVenue] }, sweptAt: { [HOODB]: 999 }, cursor: null }, { ...TTL, source: "previous" });
 
     const sleeps: number[] = [];
     let t = 1_000_000;
@@ -142,7 +145,6 @@ describe("stock-venues job", () => {
     assert.equal(c1.swept, 2);
     assert.deepEqual(fake.calls.map((c) => c.url.split("/").pop()), addresses.slice(0, 2));
     assert.deepEqual(sleeps, [VENUES_MIN_SPACING_MS], "one gap between two calls");
-    assert.ok(sleeps[0]! >= VENUES_MIN_SPACING_MS - 1);
 
     // Cycle 2: continues after the cursor, wraps, and hits the failing token.
     const c2 = await runStockVenues(store, signal(), { fetchFn: fake.fetch, sleep, now, readFees, perCycle: 2 });
@@ -160,13 +162,55 @@ describe("stock-venues job", () => {
       ],
       "deepest first; the 'uniswap' pool that is not a v3 contract is dropped",
     );
-    assert.equal(snap.byAddress[HOODB], undefined, "a failed read never fabricates an empty venue list");
-    assert.equal(snap.sweptAt[HOODB], undefined);
+    assert.deepEqual(snap.byAddress[HOODB], [hoodVenue], "a failed read keeps the previous venues byte for byte");
+    assert.equal(snap.sweptAt[HOODB], 999, "and does not advance the token's sweptAt");
     assert.equal(snap.byAddress[ARQQON]!.length, 0, "a token with no pools is recorded as swept with none");
     // Fee tiers are immutable: the second read of NVDAB asked the chain for nothing new.
     assert.equal(feeCalls.length, 1);
     assert.deepEqual(feeCalls[0]!.sort(), ["0x8fb4243b553ac29ba088acf00b9b7da24bd6690c", "0xdd9d5164ccbc57be377a964fc064135b03d06177"]);
     assert.equal(c2.feesRead, 0);
+  });
+
+  it("keeps feeTier null on a transport failure and asks the chain again next sweep", async () => {
+    const store = new MemoryStore();
+    await seedRwa(store, [NVDAB_ROW]);
+    const feeCalls: string[][] = [];
+    let chainUp = false;
+    const readFees = async (pools: string[]): Promise<Map<string, FeeOutcome>> => {
+      feeCalls.push([...pools].sort());
+      return chainUp ? new Map(pools.map((p) => [p, 500 as FeeOutcome])) : new Map();
+    };
+    const fake = fakeFetch(() => jsonResponse(NVDAB_PAIRS));
+    const opts = { fetchFn: fake.fetch, sleep: async () => undefined, readFees };
+
+    await runStockVenues(store, signal(), opts);
+    let nvda = (await store.get<VenuesSnapshot>(RWA_VENUES_KEY))!.data.byAddress[NVDAB]!;
+    assert.deepEqual(nvda.map((v) => [v.version, v.feeTier]), [["v3", null], ["v3", null], ["v2", null]], "unanswered v3 pools stay, with no guessed tier");
+
+    chainUp = true;
+    await runStockVenues(store, signal(), opts);
+    nvda = (await store.get<VenuesSnapshot>(RWA_VENUES_KEY))!.data.byAddress[NVDAB]!;
+    assert.deepEqual(nvda.map((v) => [v.version, v.feeTier]), [["v3", 500], ["v3", 500], ["v2", null]]);
+    assert.equal(feeCalls.length, 2, "the null pools were re-asked");
+    assert.deepEqual(feeCalls[0], feeCalls[1]);
+  });
+
+  it("advances the cursor only past what was attempted when aborted mid-batch", async () => {
+    const store = new MemoryStore();
+    await seedRwa(store);
+    const addresses = [NVDAB, ARQQON, HOODB].sort();
+    const controller = new AbortController();
+    const fake = fakeFetch(() => {
+      controller.abort(); // abort after the first read completes
+      return jsonResponse([]);
+    });
+    const c = await runStockVenues(store, controller.signal, { fetchFn: fake.fetch, sleep: async () => undefined, readFees: async () => new Map(), perCycle: 3 });
+    assert.equal(c.swept, 1);
+    assert.equal(c.cursor, addresses[0], "not the last planned address");
+    assert.equal(fake.calls.length, 1);
+    // The next cycle resumes at the second address rather than skipping the unread tail.
+    const c2 = await runStockVenues(store, signal(), { fetchFn: fakeFetch(() => jsonResponse([])).fetch, sleep: async () => undefined, readFees: async () => new Map(), perCycle: 1 });
+    assert.equal(c2.cursor, addresses[1]);
   });
 
   it("throws without republishing when every read fails", async () => {

@@ -65,8 +65,10 @@ scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
 // Tokenized stocks: the Binance Web3 RWA list (needs the signed key) and the
 // per-token AMM venues (keyless; sweeps the static bStocks without the key).
-if (hasBinanceRwaCredentials()) scheduler.register(binanceRwaJob(store));
-else console.warn("[binance-rwa] BINANCE_WEB3_API_KEY/SECRET_KEY not set; bstocks lane is static only, ondo lane empty");
+if (hasBinanceRwaCredentials()) {
+  scheduler.register(binanceRwaJob(store));
+  console.log("[binance-rwa] credentials present; tokenized-stock lanes armed");
+} else console.warn("[binance-rwa] BINANCE_WEB3_API_KEY/SECRET_KEY not set; bstocks lane is static only, ondo lane empty");
 scheduler.register(stockVenuesJob(store));
 scheduler.register(pancakePoolsJob(store));
 scheduler.register(tradingFeaturesJob(store));

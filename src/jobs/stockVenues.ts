@@ -203,8 +203,12 @@ export async function runStockVenues(
   const pairsByToken = new Map<string, DexPair[]>();
   let failed = 0;
   let lastAt = 0;
+  // The cursor must follow what was *attempted*, not what was planned: an
+  // abort mid-batch otherwise skips the unread tail for a whole rotation.
+  let lastAttempted: string | null = null;
   for (const address of batch) {
     if (signal.aborted) break;
+    lastAttempted = address;
     const wait = VENUES_MIN_SPACING_MS - (now() - lastAt);
     if (lastAt !== 0 && wait > 0) await sleep(wait);
     lastAt = now();
@@ -267,7 +271,7 @@ export async function runStockVenues(
     sweptAt[address] = readAt;
   }
 
-  const snapshot: VenuesSnapshot = { byAddress, sweptAt, cursor: batch[batch.length - 1] ?? cursor, rejected };
+  const snapshot: VenuesSnapshot = { byAddress, sweptAt, cursor: lastAttempted ?? cursor, rejected };
   await store.put(RWA_VENUES_KEY, snapshot, {
     source: STOCK_VENUES_SOURCE,
     freshForMs: VENUES_FRESH_FOR_MS,
@@ -275,7 +279,7 @@ export async function runStockVenues(
   });
 
   return {
-    swept: batch.length,
+    swept: pairsByToken.size + failed,
     failed,
     venues: Object.values(byAddress).reduce((n, v) => n + v.length, 0),
     feesRead,

@@ -215,7 +215,9 @@ Additive only. Existing consumers see the same fields they see today.
 
 `type Lane = "meme" | "coins" | "bstocks" | "allowlist" | "ondo"`. `LANES` in
 `server.ts` gains it; `isLane` follows. `lookupLane()` (used for security TTL)
-treats unknown/`ondo` like `coins` — a curated-list token, not a meme.
+resolves `ondo` rows to their lane; an address in no lane keeps the existing
+`meme` default (shortest TTL, so an unclassified token is re-scanned rather
+than trusted for a day).
 
 ### 4.3 `buildUniverse`
 

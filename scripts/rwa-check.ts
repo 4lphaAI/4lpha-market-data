@@ -3,8 +3,8 @@
  * real `stock-venues` cycle, then the reads a consumer would make. Diagnostic
  * only — not part of the test suite. Numbers it prints are DevEx material.
  *
- *   node --import tsx scripts/rwa-check.ts            # one venues cycle (100 tokens)
- *   node --import tsx scripts/rwa-check.ts --full     # sweep every token (5 cycles)
+ *   node --import tsx scripts/rwa-check.ts            # one venues cycle (VENUES_PER_CYCLE tokens)
+ *   node --import tsx scripts/rwa-check.ts --full     # sweep every token
  */
 
 import { loadDotEnv } from "../src/config/env.js";
@@ -13,7 +13,7 @@ import { MemoryStore } from "../src/core/store.js";
 import { createServer } from "../src/server.js";
 import { hasBinanceRwaCredentials } from "../src/adapters/binanceRwa.js";
 import { runBinanceRwa } from "../src/jobs/binanceRwa.js";
-import { runStockVenues } from "../src/jobs/stockVenues.js";
+import { VENUES_PER_CYCLE, runStockVenues } from "../src/jobs/stockVenues.js";
 import type { UniverseEntry } from "../src/core/models.js";
 
 loadDotEnv();
@@ -30,7 +30,7 @@ if (!hasBinanceRwaCredentials()) {
   console.log(`binance-rwa ${Date.now() - t0}ms`, rwa);
 }
 
-const cycles = full ? 5 : 1;
+const cycles = full ? Math.ceil(500 / VENUES_PER_CYCLE) : 1;
 for (let i = 0; i < cycles; i++) {
   const t0 = Date.now();
   const venues = await runStockVenues(store, AbortSignal.timeout(45_000));
