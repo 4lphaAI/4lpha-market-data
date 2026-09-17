@@ -216,6 +216,19 @@ friction · **OK**: something that worked first time and deserves credit.
   from a residential connection; per-call latency is. Sweep lowered to 75 tokens per
   60 s cycle. Not a Binance item, but it is what the venue data costs.
 
+### OK-24 · Production numbers from Railway (2026-09-17 06:18 UTC, first boot with the key)
+- `binance-rwa`: 2.6 s per cycle end to end (one signed `/tokens` call + 488 rows written
+  to Postgres), 0 failures. `stock-venues`: 6.3 s per 75-token cycle from Railway against
+  31.7 s per 100 locally — DexScreener is ~5× faster from Railway's egress, the opposite
+  of the `eth_getLogs` finding for `flap-launches`. Lanes served: `bstocks` 46 rows
+  (from 25 static), `ondo` 442 rows, 264 open during the overnight session.
+- First error seen in production was `401 40101 (AuthenticationFilter/40101)`: the
+  variables had been set from `cmd.exe`, which passed the literal text
+  `$(grep ...)` as the key. The `x-oc-blocked-by` header the adapter surfaces
+  named the filter, which is what made it a config error rather than a code hunt.
+  Onboarding note for the report: the API gives no way to validate a key without a
+  signed call, so the first real request is the test.
+
 ## Open items to measure next
 - Rate ceiling after the limit increase is granted (re-run the ramp, update PITFALL-6).
 - Whether the 5 rps bucket is per key or per IP (needs a second key or a second host).
