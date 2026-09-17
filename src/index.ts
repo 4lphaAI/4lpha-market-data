@@ -8,6 +8,7 @@ import { binanceRwaJob } from "./jobs/binanceRwa.js";
 import { binanceUniverseJob } from "./jobs/binanceUniverse.js";
 import { hasBinanceRwaCredentials } from "./adapters/binanceRwa.js";
 import { stockVenuesJob } from "./jobs/stockVenues.js";
+import { spreadHistoryJob } from "./jobs/spreadHistory.js";
 import { flapLaunchesJob } from "./jobs/flapLaunches.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { majorsPricesJob } from "./jobs/majorsPrices.js";
@@ -70,6 +71,8 @@ if (hasBinanceRwaCredentials()) {
   console.log("[binance-rwa] credentials present; tokenized-stock lanes armed");
 } else console.warn("[binance-rwa] BINANCE_WEB3_API_KEY/SECRET_KEY not set; bstocks lane is static only, ondo lane empty");
 scheduler.register(stockVenuesJob(store));
+// Minute-by-minute arb spreads on the watched stock pools (telemetry only).
+scheduler.register(spreadHistoryJob(store));
 scheduler.register(pancakePoolsJob(store));
 scheduler.register(tradingFeaturesJob(store));
 // USD prices for the majors every wallet holds; the lanes never carry them.

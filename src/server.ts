@@ -27,6 +27,13 @@ import { getTokenDecimals, type DecimalsReader } from "./query/decimals.js";
 import { isEligible, isEligibleBatch } from "./query/eligibility.js";
 import { buildUniverse } from "./universe.js";
 import { readTokenRecords } from "./jobs/tokenStore.js";
+import {
+  SPREAD_HISTORY_KEY,
+  SPREAD_MIN_LIQUIDITY_USD,
+  SPREAD_RETENTION_MS,
+  normalizeSpreadHistory,
+  summarizeSeries,
+} from "./jobs/spreadHistory.js";
 import { fetchPancakePoolStats, poolKey } from "./adapters/pancake.js";
 import { type RangeRequest, estimateRange, loadRangeSnapshot } from "./query/poolRange.js";
 import {
@@ -86,6 +93,14 @@ function isAllowedSnapshotKey(key: string): boolean {
     /^venus:core:(?:account|rewards):v2:0x[0-9a-f]{40}$/u.test(key);
 }
 
+/** `hours` for the spread routes: default 24, integer 1..48. */
+function parseHours(raw: string | undefined): number | null {
+  if (raw === undefined || raw === "") return 24;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > SPREAD_RETENTION_MS / 3_600_000) return null;
+  return n;
+}
+
 function isLane(value: string): value is Lane {
   return (LANES as string[]).includes(value);
 }
@@ -117,6 +132,7 @@ const STATUS_SNAPSHOT_KEYS = [
   "universe:coins",
   "universe:rwa",
   "venues:rwa",
+  SPREAD_HISTORY_KEY,
   "universe:pools",
   "pools:index",
   FEATURE_INDEX_KEY,
@@ -1054,6 +1070,58 @@ export function createServer(deps: ServerDeps): Hono {
         removed: removed.removed,
         referenceCount: removed.referenceCount,
         tracked: removed.referenceCount > 0,
+      },
+    });
+  });
+
+  /**
+   * Arb-spread telemetry for tokenized stocks: a window summary per watched
+   * token, or one token's raw minute points. History, not a verdict — the
+   * record is served whatever its staleness, and `meta.staleness` says whether
+   * the writer is alive.
+   */
+  app.get("/spreads", async (c) => {
+    const hours = parseHours(c.req.query("hours"));
+    if (hours === null) {
+      return c.json({ error: { code: "invalid_hours", message: `hours must be 1..${SPREAD_RETENTION_MS / 3_600_000}` } }, 400);
+    }
+    const record = await deps.store.get<unknown>(SPREAD_HISTORY_KEY);
+    const history = normalizeSpreadHistory(record?.data);
+    const sinceTs = Date.now() - hours * 3_600_000;
+    const data = Object.entries(history.byAddress)
+      .map(([address, series]) => summarizeSeries(address, series, sinceTs))
+      .sort((a, b) => (b.venues[0]?.liquidityUsd ?? 0) - (a.venues[0]?.liquidityUsd ?? 0));
+    return c.json({
+      data,
+      meta: {
+        hours,
+        watched: data.length,
+        minLiquidityUsd: SPREAD_MIN_LIQUIDITY_USD,
+        asOf: record?.asOf ?? null,
+        staleness: record?.staleness ?? null,
+      },
+    });
+  });
+
+  app.get("/spreads/:address", async (c) => {
+    const address = c.req.param("address").toLowerCase();
+    if (!isEvmAddress(address)) return c.json({ error: { code: "invalid_address" } }, 400);
+    const hours = parseHours(c.req.query("hours"));
+    if (hours === null) {
+      return c.json({ error: { code: "invalid_hours", message: `hours must be 1..${SPREAD_RETENTION_MS / 3_600_000}` } }, 400);
+    }
+    const record = await deps.store.get<unknown>(SPREAD_HISTORY_KEY);
+    const series = normalizeSpreadHistory(record?.data).byAddress[address];
+    if (series === undefined) return c.json({ error: { code: "not_found", message: "token is not watched" } }, 404);
+    const sinceTs = Date.now() - hours * 3_600_000;
+    const points = series.points.filter((p) => p[0] >= sinceTs);
+    return c.json({
+      data: { ...summarizeSeries(address, series, sinceTs), points },
+      meta: {
+        hours,
+        pointShape: ["tsMs", "navBps", "crossBps", "feeBps", "liqA", "liqB"],
+        asOf: record?.asOf ?? null,
+        staleness: record?.staleness ?? null,
       },
     });
   });
