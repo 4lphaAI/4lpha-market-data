@@ -309,3 +309,57 @@ The tiers from §5 of the first pass hold unchanged after the US-hours read:
 
 The plane sets no threshold itself: the `$10k` line is the consumer's, applied to
 `venues[0].liquidityUsd` on the lane row; the gate only answers open/trading/known.
+
+---
+
+## 8. Spread history, first ~10 hours (2026-09-17 14:58 → 2026-09-18 00:57 UTC; 585 one-minute samples)
+
+Source: production `GET /spreads?hours=24` from the `spread-history` job (`SPREAD-HISTORY-SPEC.md`):
+`slot0` on the deepest two stable-quoted v3 pools per stock, every minute, NAV = `referencePrice ×
+tokenToShareRatio`. Window covers 11:00–21:00 ET — end of the regular session, after-hours, start of
+overnight. **Interim: the 24 h and 48 h reads follow.**
+
+### Cross-venue (same token, two pools) — effectively dead
+
+| Token | cross p50 / max (bps) | fee round trip | minutes > fee / 585 |
+|---|---|---|---|
+| QQQB (Uni 0.3% ↔ Pcs 0.01%, $2.7M / $2.0M) | 24 / 36 | 31 | **88** (15%), by 1–5 bps |
+| SPCXB (Pcs 0.25% ↔ Uni 0.05%) | 8 / 23 | 30 | 0 |
+| NVDAB, GOOGLB, TSLAB, MSFTB (Pcs 0.25% ↔ Pcs 1%) | 10–59 / 39–75 | 125 | 0 |
+| SLVon, MUB | 28–36 / 43–52 | 125–200 | 0 |
+
+Only QQQB ever clears the fee, and by less than gas + slippage. Not worth an agent at today's
+liquidity; at most a watcher on QQQB.
+
+### Pool vs NAV — real, and persistent through the regular session
+
+| Token | NAV min / p50 / max (bps) | minutes \|NAV\| > pool fee | deepest pool |
+|---|---|---|---|
+| GMEon | −222 / **−188** / −103 | 585 / 585 | $46k @ 0.25% |
+| SQQQon | −209 / **−177** / −119 | 585 / 585 | $41k @ 0.25% |
+| DISon | −134 / **−70** / −27 | 585 / 585 | $47k @ 0.25% |
+| **FXIon** | −184 / **−61** / −17 | 583 / 585 | **$253k** @ 0.25% |
+| SGOVon (entered the watch set mid-window) | −127 flat | 104 / 104 | $104k @ 0.25% |
+| NVDAon | −103 / −71 / 9 | 5 (pool fee is 1%) | $13k @ 1% |
+| **NOKB** (bStock) | −89 / **−39** / 34 | 403 / 585 | $49k @ 0.25% |
+| **QQQB** (bStock) | −37 / **−25** / −11 | 166 | Pcs **$2.0M @ 0.01%** |
+| other bStocks | within ±30, p50 ≈ 0 | — | — |
+
+- The Ondo discount is **not an after-hours artefact**: it held through 11:00–16:00 ET and after.
+  FXIon is the actionable one — $253k of depth at −61 bps takes tens of thousands of dollars per
+  fill; GME/SQQQ/DIS are deeper discounts on $40–50k pools.
+- Two bStocks surprised: NOKB sits 39 bps under NAV 70% of the time, and QQQB sits 25 bps under NAV
+  all day on a 0.01%-fee, $2M pool — buying under NAV there is nearly free; the question is whether
+  a sell-at-NAV leg exists (Binance LiquidMesh RFQ for bStocks).
+- Reading note: "minutes beyond fee" uses the deepest pool's own fee tier, so on 0.01% pools (SPYB,
+  QQQB) it counts 2 bps deviations; read it with the p50.
+
+### What this decides
+
+1. Pool-vs-pool arb: **drop** (keep QQQB as a watcher at most).
+2. Pool-vs-NAV arb is the real one and needs a **redeem/RFQ leg**, which this plane does not
+   provide: Ondo redeem for FXIon / DISon / GMEon / SQQQon (60–190 bps, 100% of the window),
+   Binance RFQ for QQQB / NOKB (25–40 bps on deep pools). This series is the evidence for the
+   execution plane's decision to build that leg.
+3. Open until the 48 h read: how the discounts behave across the Ondo weekend close (Fri 20:00 ET)
+   — the risk of holding a position over the weekend.
