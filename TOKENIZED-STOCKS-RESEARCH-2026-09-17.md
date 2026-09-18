@@ -312,54 +312,105 @@ The plane sets no threshold itself: the `$10k` line is the consumer's, applied t
 
 ---
 
-## 8. Spread history, first ~10 hours (2026-09-17 14:58 → 2026-09-18 00:57 UTC; 585 one-minute samples)
+## 8. Spread history — 24 hours (2026-09-17 14:58 → 2026-09-18 14:21 UTC; 1,369 one-minute samples)
 
 Source: production `GET /spreads?hours=24` from the `spread-history` job (`SPREAD-HISTORY-SPEC.md`):
-`slot0` on the deepest two stable-quoted v3 pools per stock, every minute, NAV = `referencePrice ×
-tokenToShareRatio`. Window covers 11:00–21:00 ET — end of the regular session, after-hours, start of
-overnight. **Interim: the 24 h and 48 h reads follow.**
+`slot0` on the deepest two stable-quoted v3 pools per stock, every minute, 0 failed cycles, ~0.45 s
+per cycle. The watch set grew from 29 to 33 as the venue sweep found new pools ≥ $10k (SGOVon,
+TLTon, GLDon, MRVLB). Interim reads at 10 h and 15 h agreed with the full window. Percentages
+throughout; 1% = 100 bps.
 
-### Cross-venue (same token, two pools) — effectively dead
+### 8.1 Cross-venue (same token, two pools) — closed question: no
 
-| Token | cross p50 / max (bps) | fee round trip | minutes > fee / 585 |
+| Token | spread p50 / max | fee round trip | minutes > fee / 1,369 |
 |---|---|---|---|
-| QQQB (Uni 0.3% ↔ Pcs 0.01%, $2.7M / $2.0M) | 24 / 36 | 31 | **88** (15%), by 1–5 bps |
-| SPCXB (Pcs 0.25% ↔ Uni 0.05%) | 8 / 23 | 30 | 0 |
-| NVDAB, GOOGLB, TSLAB, MSFTB (Pcs 0.25% ↔ Pcs 1%) | 10–59 / 39–75 | 125 | 0 |
-| SLVon, MUB | 28–36 / 43–52 | 125–200 | 0 |
+| QQQB (Uni 0.3% ↔ Pcs 0.01%, $2.7M / $1.9M) | 0.22% / 0.38% | 0.31% | **353 (26%)**, by ≤ 0.07% |
+| SPCXB, NVDAB, GOOGLB, TSLAB, MSFTB, SLVon, MUB | 0.10–0.61% / 0.23–1.90% | 0.30–2.00% | **0** |
 
-Only QQQB ever clears the fee, and by less than gas + slippage. Not worth an agent at today's
-liquidity; at most a watcher on QQQB.
+QQQB clears the fee a quarter of the time, mostly during the US night, never by more than 0.07% —
+below gas and slippage on any real size. Every other pair never clears it. **Not worth an agent;
+QQQB stays a watcher at most.**
 
-### Pool vs NAV — real, and persistent through the regular session
+### 8.2 Pool vs NAV — the discount is real, persistent, and it is the reinvested dividend
 
-| Token | NAV min / p50 / max (bps) | minutes \|NAV\| > pool fee | deepest pool |
+24 h summary (NAV = Binance `referencePrice × tokenToShareRatio`, deepest pool):
+
+| Token | pool vs NAV min / **p50** / max | minutes \|pool−NAV\| > pool fee | pool |
 |---|---|---|---|
-| GMEon | −222 / **−188** / −103 | 585 / 585 | $46k @ 0.25% |
-| SQQQon | −209 / **−177** / −119 | 585 / 585 | $41k @ 0.25% |
-| DISon | −134 / **−70** / −27 | 585 / 585 | $47k @ 0.25% |
-| **FXIon** | −184 / **−61** / −17 | 583 / 585 | **$253k** @ 0.25% |
-| SGOVon (entered the watch set mid-window) | −127 flat | 104 / 104 | $104k @ 0.25% |
-| NVDAon | −103 / −71 / 9 | 5 (pool fee is 1%) | $13k @ 1% |
-| **NOKB** (bStock) | −89 / **−39** / 34 | 403 / 585 | $49k @ 0.25% |
-| **QQQB** (bStock) | −37 / **−25** / −11 | 166 | Pcs **$2.0M @ 0.01%** |
-| other bStocks | within ±30, p50 ≈ 0 | — | — |
+| TLTon | −8.82% / **−4.51%** / −1.90% | 715 / 715 (100%) | $104k |
+| GMEon | −2.24% / **−1.86%** / −0.99% | 1,369 / 1,369 | $46k |
+| SQQQon | −2.12% / **−1.87%** / +0.40% | 1,369 / 1,369 | $41k |
+| SGOVon | −2.03% / **−1.43%** / (+15.6% = one bad tick) | 888 / 888 | $196k |
+| NVDAon | −1.23% / **−0.73%** / +0.42% | 261 (pool fee 1%) | $13k |
+| DISon | −1.34% / **−0.70%** / +0.02% | 1,368 / 1,369 | $47k |
+| FXIon | −1.84% / **−0.56%** / −0.02% | 1,019 / 1,369 (74%) | $242k |
+| NOKB (bStock) | −0.89% / **−0.39%** / +0.37% | 891 / 1,369 | $49k |
+| QQQB (bStock, 0.01% pool) | −0.39% / **−0.22%** / +0.25% | 447 | $1.9M |
+| the other 19 bStocks | p50 −0.09% … +0.07% | — | — |
 
-- The Ondo discount is **not an after-hours artefact**: it held through 11:00–16:00 ET and after.
-  FXIon is the actionable one — $253k of depth at −61 bps takes tens of thousands of dollars per
-  fill; GME/SQQQ/DIS are deeper discounts on $40–50k pools.
-- Two bStocks surprised: NOKB sits 39 bps under NAV 70% of the time, and QQQB sits 25 bps under NAV
-  all day on a 0.01%-fee, $2M pool — buying under NAV there is nearly free; the question is whether
-  a sell-at-NAV leg exists (Binance LiquidMesh RFQ for bStocks).
-- Reading note: "minutes beyond fee" uses the deepest pool's own fee tier, so on 0.01% pools (SPYB,
-  QQQB) it counts 2 bps deviations; read it with the p50.
+**What the discount actually is.** Checked the same instant three ways for the six deepest Ondo
+discounts (pool price from `slot0`, Binance `tokenPriceUsd`, Binance `referencePrice × ratio`):
 
-### What this decides
+| Token | pool | 1 share (reference) | ratio | NAV = ref × ratio | pool vs **1 share** | pool vs NAV |
+|---|---|---|---|---|---|---|
+| TLTon | $84.86 | $84.81 | 1.044 | $88.56 | **+0.06%** | −4.17% |
+| SGOVon | $102.25 | $102.44 | 1.018 | $104.33 | −0.19% | −2.00% |
+| GMEon | $22.83 | $22.81 | 1.017 | $23.20 | +0.09% | −1.60% |
+| SQQQon | $39.26 | $39.26 | 1.018 | $39.94 | 0.00% | −1.71% |
+| DISon | $104.24 | $104.00 | 1.010 | $105.05 | +0.23% | −0.77% |
+| FXIon | $34.42 | $34.46 | 1.005 | $34.64 | −0.11% | −0.63% |
 
-1. Pool-vs-pool arb: **drop** (keep QQQB as a watcher at most).
-2. Pool-vs-NAV arb is the real one and needs a **redeem/RFQ leg**, which this plane does not
-   provide: Ondo redeem for FXIon / DISon / GMEon / SQQQon (60–190 bps, 100% of the window),
-   Binance RFQ for QQQB / NOKB (25–40 bps on deep pools). This series is the evidence for the
-   execution plane's decision to build that leg.
-3. Open until the 48 h read: how the discounts behave across the Ondo weekend close (Fri 20:00 ET)
-   — the risk of holding a position over the weekend.
+Every pool prices **one token as exactly one share** (±0.2%); the "discount" equals `ratio − 1` to
+the basis point. Ondo tokens are total-return trackers — dividends and bond interest are
+reinvested, so one token grows to represent more than one share (TLT pays monthly, hence the
+largest ratio; PDD/BILI pay nothing, ratio 1.000, no discount). bStocks have ratios of 1.000–1.002,
+so the effect is invisible there; NOKB's −0.39% is mostly its 1.0023 ratio plus noise.
+
+Why the market ignores the ratio (Ondo docs, *Corporate Actions*): "On Solana and BNB Chain, in
+wallets and explorers that have integrated Scaled UI, the effect of the dividends being invested
+back into the referenced stock is reflected in the **displayed token balance, rather than the
+price**." Binance Wallet shows a scaled balance at the one-share price; PancakeSwap trades the raw
+token. A pool trader sees $84.86 ≈ TLT's price and calls it fair; a raw TLTon is worth 1.044 TLT.
+
+### 8.3 Does redemption pay the ratio? Yes — per Ondo's docs
+
+- *Corporate Actions*: "Dividends are automatically invested back into the referenced stock and
+  reflected in token pricing. **Minting and redemption quotes reflect both price changes and
+  reinvested dividends.**"
+- *Overview*: "you can redeem your Tokens for cash or stablecoins for the **then-value of the
+  underlying assets**"; "over time, a given token may provide economic exposure to **more than one
+  share**."
+- *Investing & Redeeming*: redemption is **on-chain and instant** to USDon (always) or USDC (when
+  the "stablecoin swapper" has liquidity); the swapper **has no UI — direct contract interaction**;
+  minimum $1, no maximum (≥ $10M via support).
+- *Fees & Taxes*: the redeem quote "may be slightly less" than the price Ondo sells the underlying
+  at; spread is "proprietary", quotes hold ~30 s; reinvested dividends are net of 30% US
+  withholding (Treasury income exempt — SGOV/TLT partly).
+- *Eligibility* / *Secondary Market Restrictions*: redemption requires **KYC onboarding with Ondo
+  Global Markets (BVI)**; **US persons prohibited** plus a sanctions list (Vietnam not on it);
+  tokens bought on a DEX can be redeemed, but "there is a risk that a person acquiring Tokens on
+  secondary markets will not meet such due diligence requirements" and Ondo may refuse.
+- Trading halts ~7:50–8:10 pm ET around ex-dividend; fixed-income ETFs may halt up to 24 h until
+  the distribution amount is known.
+
+### 8.4 What this decides
+
+1. **Pool-vs-pool arb: drop.** 24 h of data, one marginal pair, nothing above cost.
+2. **Pool-vs-NAV is a real, structural mispricing on Ondo dividend/interest-bearing tokens**, not a
+   transient: buy the raw token on PancakeSwap at ~one-share price, redeem on-chain at ratio ×
+   share price. Gross today: TLTon ~4.2%, SGOVon ~2.0%, GMEon/SQQQon ~1.7%, DISon ~0.8%, FXIon
+   ~0.6%, less Ondo's undisclosed redeem spread (assume 0.1–0.5%). Capacity is the pool: ~$20–40k
+   per fill before price impact eats 1% (TLTon $104k, SGOVon $196k, FXIon $242k). It persists
+   because the exit is a KYC'd, contract-level redemption that few on BSC have set up, and it
+   **grows** with every dividend.
+3. Requirements for the execution plane, if it is pursued: a non-US entity onboarded with Ondo GM
+   (BVI); the swapper contract call for redemption (no API, no UI); awareness of ex-dividend halts;
+   acceptance that Ondo can refuse a DEX-sourced redemption.
+4. One residual check, cheap to close: confirm on chain that the BSC token's **raw** balance does
+   not rebase (public RPC serves no history; BscScan needs a key). Docs and the fact that a v3 pool
+   cannot safely hold a rebasing token both say it does not; recording `balanceOf(pool)` daily in
+   `spread-history` would settle it at the next ex-dividend date.
+5. For bStocks the same mechanism is worth 0.0–0.2% — nothing — and a sell-at-NAV leg would be
+   Binance's RFQ, which is a different question.
+6. Open until the 48 h read: behaviour across the Ondo weekend close (Fri 20:00 ET) — whether the
+   pool discount widens when mint/redeem is shut.
