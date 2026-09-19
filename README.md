@@ -57,6 +57,22 @@ credentials never reach the marketplace or browser.
 | Venus Core | `/venus/core/*` | Venus contracts on BSC |
 | Optional agent catalog | `/studio/agents` | BNB Chain Studio registry, MCP/A2A endpoints |
 
+Trading features v2 (`/trading/features/v2/:pool?interval=5m`, also `15m` and `1h`)
+includes `rsi14`, `macd`, `signal9`, `histogram`, and `momentum10` in `metrics`.
+`momentum10` is close minus the close ten bars ago (11 closed bars), whereas
+`roc10Pct` remains the percentage change. RSI uses a 29-bar window: the first
+14 changes seed average gains/losses, then Wilder smoothing; a flat window
+returns 50, gain-only 100, loss-only 0.
+MACD is the published EMA12 minus EMA26, retaining their SMA seeds and fixed
+24/52-bar windows. Signal9 uses 18 consecutive such MACD values, seeded with
+their first nine-value SMA then nine EMA9 updates (69 closed bars total).
+Histogram is MACD minus signal9. This bounded, replayable convention can differ
+from chart providers that seed from longer histories. The price differences use
+the series price unit; RSI uses a 0–100 index. Each metric reports its required
+bars and returns null with a reason when unavailable. These additions are marked
+`parameters.indicatorRevision: 1`; existing stored v2 snapshots acquire them on
+the next successful worker refresh. V1 outputs remain unchanged.
+
 All market data is BSC-focused (`chainId: 56`). Social data is creator-declared
 links, not social sentiment. The smart-money field is the GMGN holder/tag count;
 wallet-level tracking is outside this service.

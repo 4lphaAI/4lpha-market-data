@@ -66,8 +66,13 @@ export interface FeatureSnapshot {
     atrPeriod: 14; emaSeed: "sma"; atrSmoothing: "wilder";
     publicationLagMs: number; schedulingGraceMs: number; bucketConvention: "UTC-open-ms";
     warmupBars: { ema12: number; ema26: number; atr14: number };
+    indicatorRevision?: 1;
+    rsiPeriod?: 14; rsiSmoothing?: "wilder"; rsiFlatValue?: 50;
+    momentumPeriod?: 10; macdPeriods?: readonly [12, 26, 9]; signalSeed?: "sma";
+    indicatorWarmupBars?: { rsi14: 29; macd: 52; signal9: 69; histogram: 69; momentum10: 11 };
   };
-  metrics: { roc10Pct: Metric; ema12: Metric; ema26: Metric; emaSpreadPct: Metric; atr14: Metric; atrPct: Metric; rvol20: Metric };
+  metrics: { roc10Pct: Metric; ema12: Metric; ema26: Metric; emaSpreadPct: Metric; atr14: Metric; atrPct: Metric; rvol20: Metric }
+    & Partial<Record<"rsi14" | "macd" | "signal9" | "histogram" | "momentum10", Metric>>;
   volume: { baseline: number | null; latest: number | null; usableBaselineBars: number };
   lineage: { scope: "exact_pool"; transformation: "native"; correctionPolicy: string };
 }
@@ -146,12 +151,30 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
     return { value: reason ? null : value, available: reason === null, reason, requiredBars: required, usableBars: Math.min(contiguous, required), unit };
   };
   const priceUnit = input.priceCurrency === "usd" ? "usd_per_base_token" : "quote_token_per_base_token";
-  const ema = (period: number): number => {
-    const prices = bars.slice(-(period === 12 ? warmup.ema12 : warmup.ema26)).map((b) => b.close);
+  const smoothEma = (prices: number[], period: number): number => {
     let result = prices.slice(0, period).reduce((sum, p) => sum + p / period, 0);
     const alpha = 2 / (period + 1);
     for (const price of prices.slice(period)) result = alpha * price + (1 - alpha) * result;
     return result;
+  };
+  const ema = (period: number, end = bars.length): number => smoothEma(
+    bars.slice(Math.max(0, end - (period === 12 ? warmup.ema12 : warmup.ema26)), end).map(b => b.close), period);
+  const macd = (end = bars.length): number => ema(12, end) - ema(26, end);
+  // Eighteen consecutive bounded MACD observations: SMA9 seed + nine EMA updates.
+  // Each observation uses the same 24/52-bar EMA windows as the published v2 line.
+  const signal9 = (): number => smoothEma(Array.from({ length: 18 }, (_, i) => macd(bars.length - 17 + i)), 9);
+  const rsi14 = (): number => {
+    const window = bars.slice(-29);
+    let gain = 0, loss = 0;
+    for (let i = 1; i < window.length; i++) {
+      const delta = window[i]!.close - window[i - 1]!.close;
+      const up = Math.max(delta, 0), down = Math.max(-delta, 0);
+      if (i <= 14) { gain += up / 14; loss += down / 14; }
+      else { gain = gain * (13 / 14) + up / 14; loss = loss * (13 / 14) + down / 14; }
+    }
+    if (gain === 0 && loss === 0) return 50;
+    if (loss === 0) return 100;
+    return 100 - 100 / (1 + gain / loss);
   };
   const atr = (): number => {
     const window = bars.slice(-warmup.atr14);
@@ -176,7 +199,8 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
   // Retain the exact bounded observation, including rejected rows, for reproducibility.
   const retainedInput = { ...input, candles: input.candles.map((bar) => ({ ...bar })) };
   return {
-    version, seriesId, snapshotId: hash({ version, input: retainedInput, cutoff }, version === FEATURE_VERSION_V2), input: retainedInput,
+    version, seriesId, snapshotId: hash({ version, input: retainedInput, cutoff,
+      ...(version === FEATURE_VERSION_V2 ? { indicatorRevision: 1 } : {}) }, version === FEATURE_VERSION_V2), input: retainedInput,
     calculatedAt: now, evaluationClose: closeTime,
     refreshAfter: closeTime === null ? now + 60_000 : closeTime + step + PUBLICATION_LAG_MS,
     expiresAt: closeTime === null ? now : closeTime + step + PUBLICATION_LAG_MS + SCHEDULING_GRACE_MS,
@@ -186,8 +210,19 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
       invalidBars, excludedUnclosedBars, identicalDuplicates, conflictingDuplicates: conflicts.size },
     parameters: { historyBars: 120, rocPeriod: 10, rvolBaseline: 20, emaPeriods: [12, 26], atrPeriod: 14,
       emaSeed: "sma", atrSmoothing: "wilder", publicationLagMs: PUBLICATION_LAG_MS,
-      schedulingGraceMs: SCHEDULING_GRACE_MS, bucketConvention: "UTC-open-ms", warmupBars: warmup },
+      schedulingGraceMs: SCHEDULING_GRACE_MS, bucketConvention: "UTC-open-ms", warmupBars: warmup,
+      ...(version === FEATURE_VERSION_V2 ? { indicatorRevision: 1 as const, rsiPeriod: 14 as const,
+        rsiSmoothing: "wilder" as const, rsiFlatValue: 50 as const, momentumPeriod: 10 as const,
+        macdPeriods: [12, 26, 9] as const, signalSeed: "sma" as const,
+        indicatorWarmupBars: { rsi14: 29, macd: 52, signal9: 69, histogram: 69, momentum10: 11 } as const } : {}) },
     metrics: {
+      ...(version === FEATURE_VERSION_V2 ? {
+        momentum10: metric(11, priceUnit, () => latest!.close - bars.at(-11)!.close),
+        rsi14: metric(29, "index", rsi14),
+        macd: metric(52, priceUnit, macd),
+        signal9: metric(69, priceUnit, signal9),
+        histogram: metric(69, priceUnit, () => macd() - signal9()),
+      } : {}),
       roc10Pct: metric(11, "percent", () => (latest!.close / bars.at(-11)!.close - 1) * 100),
       ema12: metric(warmup.ema12, priceUnit, () => ema(12)), ema26: metric(warmup.ema26, priceUnit, () => ema(26)),
       emaSpreadPct: metric(warmup.ema26, "percent", () => (ema(12) / ema(26) - 1) * 100),

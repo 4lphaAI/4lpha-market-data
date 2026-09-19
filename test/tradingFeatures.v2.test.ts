@@ -30,6 +30,47 @@ function near(value:number|null,expected:number){assert.ok(value!==null&&Math.ab
 async function config(store:MemoryStore|PostgresStore){await store.put(FEATURE_WATCHLIST_KEY,[{pool:POOL,currency:"token"}],{source:"test",freshForMs:60_000,deadAfterMs:60_000});}
 
 describe("versioned feature warm-up",()=>{
+  it("computes the added indicators from an isolated last-close shock",()=>{
+    const data=input(69), m=calculateFeatures(data,data.observedAt,FEATURE_VERSION_V2).metrics;
+    const line=20/13-20/27;
+    near(m.momentum10!.value,10); near(m.rsi14!.value,100);
+    near(m.macd!.value,line); near(m.signal9!.value,line/5); near(m.histogram!.value,line*4/5);
+    near(m.macd!.value,m.ema12.value!-m.ema26.value!);
+    assert.equal(m.momentum10!.unit,"quote_token_per_base_token");
+    assert.equal(calculateFeatures(data,data.observedAt).metrics.macd,undefined);
+  });
+  it("handles rising, falling and flat series, including a seeded signal",()=>{
+    for(const direction of [-1,0,1]) {
+      const data=input(69);
+      data.candles.forEach((b,i)=>{const p=200+direction*i;Object.assign(b,{open:p,high:p+1,low:p-1,close:p});});
+      const m=calculateFeatures(data,data.observedAt,FEATURE_VERSION_V2).metrics;
+      near(m.rsi14!.value,direction===0?50:direction>0?100:0);
+      near(m.momentum10!.value,direction*10);
+      near(m.macd!.value,direction*7); near(m.signal9!.value,direction*7); near(m.histogram!.value,0);
+    }
+  });
+  it("uses Wilder RSI smoothing on mixed gains and losses",()=>{
+    const data=input(29);
+    // First fourteen changes alternate +1/-1: average gain = average loss = 0.5.
+    // Then fourteen +1 changes: loss=0.5*(13/14)^14 and gain=1-loss.
+    let price=100;
+    data.candles.forEach((b,i)=>{if(i>0)price+=i<=14?(i%2===1?1:-1):1;
+      Object.assign(b,{open:price,high:price+1,low:price-1,close:price});});
+    near(calculateFeatures(data,data.observedAt,FEATURE_VERSION_V2).metrics.rsi14!.value,100*(1-0.5*(13/14)**14));
+  });
+  it("requires each added indicator's own contiguous window and ignores older history",()=>{
+    for(const [key,required] of [["momentum10",11],["rsi14",29],["macd",52],["signal9",69],["histogram",69]] as const) {
+      const short=input(required-1), exact=input(required);
+      assert.equal(calculateFeatures(short,short.observedAt,FEATURE_VERSION_V2).metrics[key]!.reason,"insufficient_history");
+      assert.equal(calculateFeatures(exact,exact.observedAt,FEATURE_VERSION_V2).metrics[key]!.available,true);
+      const broken=input(120);broken.candles.splice(-5,1);
+      assert.equal(calculateFeatures(broken,broken.observedAt,FEATURE_VERSION_V2).metrics[key]!.reason,"gap");
+      const old=input(120);old.candles[0]!.high=0;
+      near(calculateFeatures(old,old.observedAt,FEATURE_VERSION_V2).metrics[key]!.value,
+        calculateFeatures(exact,exact.observedAt,FEATURE_VERSION_V2).metrics[key]!.value!);
+      assert.equal(calculateFeatures(exact,exact.observedAt+2*STEP,FEATURE_VERSION_V2).metrics[key]!.reason,"stale_input");
+    }
+  });
   it("reproduces IDs after PostgreSQL JSONB recursively reorders object keys",()=>{
     const data=input(), snapshot=calculateFeatures(data,Date.now(),FEATURE_VERSION_V2);
     function reordered(value:unknown):unknown {
@@ -52,7 +93,12 @@ describe("versioned feature warm-up",()=>{
     assert.equal(short.metrics.ema26.reason,"insufficient_history");
     assert.notEqual(v2.snapshotId,calculateFeatures(data,now).snapshotId);
     const long=input(120);long.observedAt=now;
-    assert.deepEqual(calculateFeatures(long,now,FEATURE_VERSION_V2).metrics,v2.metrics);
+    const longer=calculateFeatures(long,now,FEATURE_VERSION_V2);
+    for (const key of Object.keys(v2.metrics) as (keyof typeof v2.metrics)[]) {
+      if (key !== "signal9" && key !== "histogram") assert.deepEqual(longer.metrics[key],v2.metrics[key]);
+    }
+    assert.equal(v2.metrics.signal9!.reason,"insufficient_history");
+    assert.equal(longer.metrics.signal9!.available,true);
   });
   it("isolates old defects without accepting gaps inside a required window",()=>{
     const data=input();data.candles[0]!.high=0;
