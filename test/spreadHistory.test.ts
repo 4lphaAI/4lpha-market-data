@@ -214,3 +214,18 @@ describe("/spreads routes", () => {
     assert.ok(status.data.snapshots.some((s) => s.key === SPREAD_HISTORY_KEY));
   });
 });
+
+describe("spreadHistoryJob switch", () => {
+  it("is off unless SPREAD_HISTORY_ENABLED=true, and a disabled job neither reads nor writes", async () => {
+    const { isSpreadHistoryEnabled, spreadHistoryJob } = await import("../src/jobs/spreadHistory.js");
+    delete process.env["SPREAD_HISTORY_ENABLED"];
+    assert.equal(isSpreadHistoryEnabled(), false);
+    assert.equal(isSpreadHistoryEnabled({ SPREAD_HISTORY_ENABLED: "true" }), true);
+    const store = new MemoryStore(now);
+    await seed(store, [venue({})]);
+    const job = spreadHistoryJob(store);
+    assert.equal(job.intervalMs, 60 * 60_000, "an hourly no-op, not a per-minute multicall");
+    await job.run(signal());
+    assert.equal(await store.get(SPREAD_HISTORY_KEY), null);
+  });
+});

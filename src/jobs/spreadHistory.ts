@@ -331,14 +331,28 @@ export function summarizeSeries(address: string, series: SpreadSeries, sinceTs: 
   };
 }
 
+/**
+ * True when the operator has switched the sweep on. Off by default since
+ * 2026-09-19: the operator decided not to pursue arbitrage after the 48 h
+ * read (research §8), so the minute-by-minute chain read stopped earning its
+ * keep. The job stays registered — `/status` still lists it and `/spreads`
+ * still serves whatever history is stored — but a disabled job is a no-op
+ * once an hour, not one multicall a minute.
+ */
+export function isSpreadHistoryEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env["SPREAD_HISTORY_ENABLED"] === "true";
+}
+
 /** Job registration for the scheduler. */
 export function spreadHistoryJob(store: SnapshotStore): JobSpec {
+  const enabled = isSpreadHistoryEnabled();
   return {
     name: SPREAD_HISTORY_JOB,
-    intervalMs: 60_000,
+    intervalMs: enabled ? 60_000 : 60 * 60_000,
     jitterMs: 3_000,
     timeoutMs: 15_000,
     run: async (signal) => {
+      if (!enabled) return;
       const result = await runSpreadHistory(store, signal);
       if (result.poolsMissing > 0) {
         console.warn(`[${SPREAD_HISTORY_JOB}] ${result.poolsMissing} of ${result.poolsRead + result.poolsMissing} pools did not answer`);

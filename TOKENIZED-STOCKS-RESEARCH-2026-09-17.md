@@ -457,5 +457,20 @@ token. A pool trader sees $84.86 ≈ TLT's price and calls it fair; a raw TLTon 
    `spread-history` would settle it at the next ex-dividend date.
 5. For bStocks the same mechanism is worth 0.0–0.2% — nothing — and a sell-at-NAV leg would be
    Binance's RFQ, which is a different question.
-6. Open until the 48 h read: behaviour across the Ondo weekend close (Fri 20:00 ET) — whether the
-   pool discount widens when mint/redeem is shut.
+6. **48 h read (2026-09-19 04:31 UTC, 2,198 samples, 4.4 h into the Ondo weekend close):** the
+   Ondo pools simply stopped trading after Fri 20:00 ET (SQQQon, GMEon, DISon: min = max for
+   265 minutes); discounts held — TLTon −4.75% → −4.88%, SGOVon −1.92% → −2.14%, FXIon −0.60% →
+   −0.78% — the small drift being `referencePrice` frozen at Friday's close while pools moved a
+   tick. No blow-out, no convergence; GMEon narrowed −1.77% → −1.42% just before the close (a
+   buyer, possibly a redeemer). Pool-vs-pool over the whole 48 h: still only QQQB, **353 minutes
+   over fee, all in the first 24 h**, 17 episodes, the longest 105 min at 23:11 ET Thu, never more
+   than 0.07% over the 0.31% fee; every other pair 0 minutes.
+
+### 8.5 Decision (operator, 2026-09-19)
+
+**No arbitrage product.** Pool-vs-pool never cleared cost in 48 h at 1-minute resolution;
+pool-vs-NAV is real but its exit is a KYC'd, non-US, contract-level Ondo redemption the
+product will not build. The `spread-history` job is switched off (`SPREAD_HISTORY_ENABLED`
+unset → hourly no-op; `/spreads` keeps serving stored history until it ages out) so the plane
+stops spending one multicall a minute on a question that is answered. Everything else from
+this work — the RWA lanes, venues, rule 5, the 29-token allowlist — stays.
