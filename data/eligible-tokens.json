@@ -3,12 +3,12 @@
     "snapshotAt": "2026-08-11T15:19:53.615Z",
     "description": "Static eligible-token allowlist for trade/LP gating. Four.Meme-launched tokens are eligible by factory rule, not enumerated here. Deliberately frozen; regenerate only by explicit decision.",
     "counts": {
-      "eligible": 225,
+      "eligible": 230,
       "needsReview": 3,
       "bySource": {
         "cmc-top200-bsc": 197,
-        "stocks-tier-a": 21,
-        "bstocks": 21,
+        "stocks-tier-a": 26,
+        "bstocks": 26,
         "stocks-tier-b": 8,
         "ondo": 7,
         "static": 4
@@ -64,6 +64,18 @@
           "QCOMB",
           "WDCB"
         ]
+      },
+      {
+        "at": "2026-09-19T10:00:00Z",
+        "decision": "Tier A widened to bStocks with a real venue of either kind: an AMM pool >= $10k (as before) OR a Binance Wallet aggregator route (GET /api/v1/dex/aggregator/quote, LiquidMesh SWAP) within 0.5% of referencePrice at $10k, both directions. Measured 2026-09-19 (TOKENIZED-STOCKS-RESEARCH-2026-09-17.md section 7): PLTRB NBISB COINB LITEB quote at +0.15..0.24% vs ref for $1k-$10k with priceImpact ~0 and no DEX pool; MRVLB has a $101k Pancake v3 pool and also quotes. `measured.venue` records which kind admitted each stock row (pancakeswap/v3 vs binance-aggregator/liquidmesh). Not admitted: ASTS SMCI IREN PYPL SOXS NFLX have no bStock at all (Ondo variants deliberately not substituted). Operator note for the aggregator leg: at $200k the quote returns a price 2-4x reference with priceImpactPercent < 1%, so a consumer must compare toTokenAmount against referencePrice itself; COINB is already +5.8% at $50k.",
+        "added": [
+          "PLTRB",
+          "NBISB",
+          "COINB",
+          "MRVLB",
+          "LITEB"
+        ],
+        "removed": []
       }
     ]
   },
@@ -715,6 +727,29 @@
       "addressSource": "cmc-map",
       "onChainSymbol": "COAI",
       "verifiedOnChain": true
+    },
+    {
+      "address": "0x585bde7c54abb5ccd7791f923d6c2187635f3952",
+      "symbol": "COINB",
+      "name": "Coinbase (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa",
+      "onChainSymbol": "COINB",
+      "verifiedOnChain": true,
+      "platform": "bstock",
+      "underlyingTicker": "COIN",
+      "tier": "A",
+      "measured": {
+        "at": "2026-09-19T09:50:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "sizeUsd": 10000,
+        "quoteVsRefPct": 0.15,
+        "note": "no DEX pool >= $10k (Pancake v3 $3.9k); aggregator quote already +5.8% vs ref at $50k — size accordingly"
+      }
     },
     {
       "address": "0x52ce071bd9b1c4b00a0b92d298c512478cad67e8",
@@ -1525,6 +1560,29 @@
       "verifiedOnChain": true
     },
     {
+      "address": "0x64748bea17b6d19e242adf20425de2440c656142",
+      "symbol": "LITEB",
+      "name": "Lumentum (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa",
+      "onChainSymbol": "LITEB",
+      "verifiedOnChain": true,
+      "platform": "bstock",
+      "underlyingTicker": "LITE",
+      "tier": "A",
+      "measured": {
+        "at": "2026-09-19T09:50:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "sizeUsd": 10000,
+        "quoteVsRefPct": 0.11,
+        "note": "no DEX pool; quoted both directions via GET /api/v1/dex/aggregator/quote"
+      }
+    },
+    {
       "address": "0x4338665cbb7b2485a8855a139b75d5e34ab0db94",
       "symbol": "LTC",
       "name": "Litecoin",
@@ -1603,6 +1661,33 @@
       "addressSource": "coingecko",
       "onChainSymbol": "MON",
       "verifiedOnChain": true
+    },
+    {
+      "address": "0x16cd4fe7e8880ecc3ba222795229e20489fc2c76",
+      "symbol": "MRVLB",
+      "name": "Marvell (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa",
+      "onChainSymbol": "MRVLB",
+      "verifiedOnChain": true,
+      "platform": "bstock",
+      "underlyingTicker": "MRVL",
+      "tier": "A",
+      "measured": {
+        "at": "2026-09-19T09:50:00Z",
+        "venue": "pancakeswap/v3",
+        "pool": "0xd5aefc40828b76d43859b0428534d99fb2480c1f",
+        "liquidityUsd": 100639,
+        "aggregator": {
+          "venue": "binance-aggregator/liquidmesh",
+          "mode": "SWAP",
+          "sizeUsd": 10000,
+          "quoteVsRefPct": 0.22
+        }
+      }
     },
     {
       "address": "0x80106cb3ead06659a5ad19df39d9b4733863b9b0",
@@ -1690,6 +1775,29 @@
       "addressSource": "cmc-map",
       "onChainSymbol": "MY",
       "verifiedOnChain": true
+    },
+    {
+      "address": "0xe256bc2a4f5297f8ba6f043f180a46300ecbcbb1",
+      "symbol": "NBISB",
+      "name": "Nebius (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa",
+      "onChainSymbol": "NBISB",
+      "verifiedOnChain": true,
+      "platform": "bstock",
+      "underlyingTicker": "NBIS",
+      "tier": "A",
+      "measured": {
+        "at": "2026-09-19T09:50:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "sizeUsd": 10000,
+        "quoteVsRefPct": 0.24,
+        "note": "no DEX pool; quoted both directions via GET /api/v1/dex/aggregator/quote"
+      }
     },
     {
       "address": "0x1fa4a73a3f0133f0025378af00236f3abdee5d63",
@@ -1972,6 +2080,29 @@
       "addressSource": "coingecko",
       "onChainSymbol": "PIEVERSE",
       "verifiedOnChain": true
+    },
+    {
+      "address": "0x0ca5d51d0277bd006fd9607d3e560785ebad8222",
+      "symbol": "PLTRB",
+      "name": "Palantir (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa",
+      "onChainSymbol": "PLTRB",
+      "verifiedOnChain": true,
+      "platform": "bstock",
+      "underlyingTicker": "PLTR",
+      "tier": "A",
+      "measured": {
+        "at": "2026-09-19T09:50:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "sizeUsd": 10000,
+        "quoteVsRefPct": 0.17,
+        "note": "no DEX pool; quoted both directions via GET /api/v1/dex/aggregator/quote"
+      }
     },
     {
       "address": "0x5afadcd1e8e3ca78ee2d37100102f2aec8bc0aa8",

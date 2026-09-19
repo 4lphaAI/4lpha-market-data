@@ -310,6 +310,51 @@ The tiers from §5 of the first pass hold unchanged after the US-hours read:
 The plane sets no threshold itself: the `$10k` line is the consumer's, applied to
 `venues[0].liquidityUsd` on the lane row; the gate only answers open/trading/known.
 
+### Allowlist revision (operator, 2026-09-19): tier A admits the Binance aggregator as a venue
+
+The operator asked for eleven more bStocks — ASTSB SMCIB PLTRB IRENB PYPLB NBISB COINB MRVLB
+SOXSB LITEB NFLXB — with execution going through the **Binance Wallet aggregator**, not an AMM
+pool. That changes the admission question from "is there a pool" to "does the aggregator quote
+it", so tier A is now: *bStock with a real venue of either kind* — an AMM pool ≥ $10k (as
+before) **or** an aggregator route within 0.5% of `referencePrice` at $10k in both directions.
+`measured.venue` on each allowlist row records which kind admitted it.
+
+Measured 2026-09-19 ~09:50 UTC, read-only `GET /api/v1/dex/aggregator/quote` (signed like the
+RWA endpoints; `userWalletAddress` is required for RFQ routes and was a placeholder — no
+`/swap`, no order). Control: MSTRB, an existing tier-A row.
+
+| Token | Route | Buy $1k vs ref | Buy−sell spread | $10k | $50k | $200k |
+|---|---|---|---|---|---|---|
+| MSTRB (control) | LiquidMesh / SWAP | +0.15% | 0.30% | — | — | — |
+| PLTRB | LiquidMesh / SWAP | +0.16% | 0.25% | +0.17% | +0.23% | insufficient liquidity |
+| NBISB | LiquidMesh / SWAP | +0.21% | 0.44% | +0.24% | +0.28% | **+194%** (impact reported 0.57%) |
+| COINB | LiquidMesh / SWAP | +0.15% | 0.30% | +0.15% | **+5.8%** | **+331%** (impact reported 0.79%) |
+| MRVLB | LiquidMesh / SWAP | +0.22% | 0.57% | +0.22% | +0.24% | insufficient liquidity |
+| LITEB | LiquidMesh / SWAP | +0.16% | 0.31% | +0.11% | +0.14% | insufficient liquidity |
+
+- Every route came back `executionMode: SWAP` via LiquidMesh — none fell to the PcsXRfq RFQ leg
+  the docs describe for bStocks. Latency 120–1,250 ms per quote; `priceImpactPercent` ≈ 0 at
+  ≤ $10k. One transient "Insufficient liquidity" on LITEB at $10k cleared on immediate retry
+  (5/5 subsequent quotes fine), so a consumer should retry once before reading it as a no.
+- **The aggregator does not refuse a bad fill, it prices it.** At $200k NBISB and COINB return
+  2–4× reference while `priceImpactPercent` stays under 1%. `priceImpactPercent` cannot be
+  trusted as the guard; the consumer must compare `toTokenAmount` against `/rwa/price`
+  `referencePrice` itself before signing. COINB is already +5.8% at $50k — size it ≤ $10k.
+- MRVLB also has a $101k Pancake v3/USDT pool (`0xd5ae…0c1f`), so it qualifies on the old rule
+  too; the spread-history job had already picked it up on 2026-09-18.
+
+Decision:
+
+- **Tier A → 26 bStocks**: the 21 above plus PLTRB NBISB COINB MRVLB LITEB. Four of the five
+  (all but MRVLB) had been *removed* on 2026-09-17 as "no pool"; they return under the widened
+  rule, with `measured.venue: binance-aggregator/liquidmesh` so the reason is on the row.
+- **Not admitted: ASTS SMCI IREN PYPL SOXS NFLX** — Binance issues exactly 46 bStocks and these
+  are not among them. Each has an Ondo variant (`ASTSon` …), none with a DEX pool; the operator
+  ruled explicitly not to substitute Ondo for a missing bStock.
+- Eligibility was already `true` for all five via rule 5 (`binance_rwa`, TRADING 24/7); the
+  allowlist entry additionally keeps them eligible when the `binance-rwa` snapshot goes stale
+  and puts them in the `allowlist` universe lane. Tier B is unchanged.
+
 ---
 
 ## 8. Spread history — 24 hours (2026-09-17 14:58 → 2026-09-18 14:21 UTC; 1,369 one-minute samples)

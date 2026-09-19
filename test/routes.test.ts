@@ -102,18 +102,18 @@ describe("GET /universe", () => {
     const body = envelope(await res.json());
     const data = body["data"];
     assert.ok(Array.isArray(data));
-    // 224 of the snapshot's 225: the BNB row is the `"native"` sentinel, which
+    // 229 of the snapshot's 230: the BNB row is the `"native"` sentinel, which
     // has no contract address.
-    assert.equal(data.length, 224);
+    assert.equal(data.length, 229);
 
     const meta = body["meta"];
     assert.ok(isRecord(meta));
-    assert.equal(meta["total"], 224);
+    assert.equal(meta["total"], 229);
     assert.equal(meta["lane"], "allowlist");
     const lanes = meta["lanes"];
     assert.ok(isRecord(lanes));
     assert.ok(isRecord(lanes["allowlist"]));
-    assert.equal(lanes["allowlist"]["count"], 224);
+    assert.equal(lanes["allowlist"]["count"], 229);
     assert.equal(lanes["allowlist"]["staleness"], "fresh");
     assert.equal(lanes["allowlist"]["asOf"], null);
 
