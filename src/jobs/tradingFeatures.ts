@@ -6,13 +6,17 @@ import { normalizeAddress } from "../adapters/http.js";
 import { PRICE_POOLS } from "./majorsPrices.js";
 import { getPoolOhlcv, type OhlcvAttempt } from "../query/poolOhlcv.js";
 import { calculateFeatures, FEATURE_INDEX_KEY, FEATURE_INDEX_KEY_V2, FEATURE_VERSION, FEATURE_VERSION_V2, FEATURE_STATE_KEY, FEATURE_INTERVALS, featureKey, poolFeatureInput,
-  type FeatureAttempt, type FeatureInterval, type FeatureSnapshot } from "../query/tradingFeatures.js";
+  type FeatureAttempt, type FeatureInterval, type FeatureSnapshot, type ReferenceSession } from "../query/tradingFeatures.js";
+import { RWA_UNIVERSE_KEY } from "../universe.js";
+import { sanitizeMessage } from "../adapters/http.js";
 
 export const FEATURE_WATCHLIST_KEY = "trading:features:v1:watchlist";
 export { FEATURE_STATE_KEY } from "../query/tradingFeatures.js";
 const MAX_POOLS = 10;
 const RETENTION = 30 * 86_400_000;
-export interface FeatureSelection { pool: string; currency: "usd" | "token"; tokenAddress?: string }
+export interface FeatureSelection { pool: string; currency: "usd" | "token"; tokenAddress?: string;
+  /** indicatorRevision 2: the base token is a tokenized US equity, so the series carries session-anchored metrics. */
+  usEquity?: boolean }
 export interface FeatureIndex {
   pools: FeatureSelection[]; intervals: FeatureInterval[]; maxPools: number;
   selection: "operator_watchlist" | "marketplace_reference_pools";
@@ -23,7 +27,41 @@ export function defaultFeatureSelection(): FeatureSelection[] {
       .map(p => ({pool: p.pool, currency: "token" as const, tokenAddress: p.base})),
     {pool: "0x8fb4243b553ac29ba088acf00b9b7da24bd6690c", currency: "token", tokenAddress: "0x02fca66c1d1afb4e2a7884261eb00f63598a7436"},
     {pool: "0xb0f5e5400e8f0f7c242f2b7740c004f020579c41", currency: "token", tokenAddress: "0x5b1910eaad6450e50f816082aa078c41f10c292f"},
+    // SPYB/USDT 0.01% and QQQB/USDT 0.01% (PancakeSwap V3): the equity-regime
+    // legs. Deepest venue of each on 2026-09-21 ($374k / $1.68M), both past
+    // the $10k tier-A floor and not special-cased beyond it.
+    {pool: EQUITY_REGIME_POOLS.spy, currency: "token", tokenAddress: EQUITY_REGIME_TOKENS.spy},
+    {pool: EQUITY_REGIME_POOLS.qqq, currency: "token", tokenAddress: EQUITY_REGIME_TOKENS.qqq},
   ];
+}
+export const EQUITY_REGIME_TOKENS = { spy: "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8", qqq: "0x205812cdbed920aff76c6580abd681a46d11efc7" } as const;
+export const EQUITY_REGIME_POOLS = { spy: "0x7aa6d92fc369a8c1edc631a3aac44efb0808ddbf", qqq: "0xe531fcb1f5a195de7608b9f4f9518544c2cdb693" } as const;
+
+/** Issuers whose underlying is a US-listed equity on the NYSE clock. */
+const US_EQUITY_PLATFORMS = new Set(["bstock", "ondo"]);
+/**
+ * Reference sessions by base address, from the RWA snapshot at any staleness:
+ * the underlying ticker is a permanent fact, and the record's own `asOf` is
+ * carried so a consumer sees how old `marketStatus` / `openState` are. A
+ * token outside the snapshot is not a US equity for this pass.
+ */
+export async function loadReferenceSessions(store: SnapshotStore): Promise<Map<string, ReferenceSession>> {
+  const out = new Map<string, ReferenceSession>();
+  try {
+    const record = await store.get<{ rows?: unknown }>(RWA_UNIVERSE_KEY);
+    const rows = Array.isArray(record?.data?.rows) ? record.data.rows : [];
+    for (const raw of rows) {
+      if (typeof raw !== "object" || raw === null) continue;
+      const row = raw as Record<string, unknown>;
+      const address = normalizeAddress(row["address"]);
+      if (!address || typeof row["underlyingTicker"] !== "string" || !row["underlyingTicker"]
+        || typeof row["platform"] !== "string" || !US_EQUITY_PLATFORMS.has(row["platform"])) continue;
+      out.set(address, { underlyingTicker: row["underlyingTicker"],
+        marketStatus: typeof row["marketStatus"] === "string" ? row["marketStatus"] : null,
+        openState: typeof row["openState"] === "boolean" ? row["openState"] : null, asOf: record?.asOf ?? null });
+    }
+  } catch (error) { console.warn(`[trading-features] rwa snapshot read failed: ${sanitizeMessage(error)}`); }
+  return out;
 }
 /** The operator store key is the only override; HTTP clients cannot mutate it. */
 export async function featureSelection(store: SnapshotStore): Promise<FeatureIndex> {
@@ -50,7 +88,9 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
   const now = deps.now ?? Date.now;
   signal.throwIfAborted();
   if (!await store.acquireSchedulerLease("trading-features:v1:producer", randomUUID(), 60_000)) return { attempted: 0, updated: 0, failed: 0 };
+  const references = await loadReferenceSessions(store);
   const index = await featureSelection(store);
+  index.pools = index.pools.map((p) => ({ ...p, usEquity: p.tokenAddress !== undefined && references.has(p.tokenAddress) }));
   await store.put(FEATURE_INDEX_KEY, index, { source: "trading-features", freshForMs: 120_000, deadAfterMs: RETENTION });
   await store.put(FEATURE_INDEX_KEY_V2, index, { source: "trading-features", freshForMs: 120_000, deadAfterMs: RETENTION });
   const previous = (await store.get<Record<string, FeatureAttempt>>(FEATURE_STATE_KEY))?.data ?? {};
@@ -88,7 +128,7 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
       ...(c.tokenAddress ? { tokenAddress: c.tokenAddress } : {}) });
     signal.throwIfAborted();
     if (!chart || chart.staleness !== "fresh") { fail(chart ? "stale_input" : sources.at(-1)?.reason ?? "provider_unavailable"); return; }
-    const observation = poolFeatureInput(chart, c.interval);
+    const observation = { ...poolFeatureInput(chart, c.interval), referenceSession: references.get(chart.base.address.toLowerCase()) ?? null };
     const snapshot = calculateFeatures(observation, now(), FEATURE_VERSION_V2);
     for (const version of [FEATURE_VERSION, FEATURE_VERSION_V2] as const) {
       const value = version === FEATURE_VERSION_V2 ? snapshot : calculateFeatures(observation, snapshot.calculatedAt, version);

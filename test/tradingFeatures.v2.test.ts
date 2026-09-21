@@ -112,8 +112,11 @@ describe("versioned feature warm-up",()=>{
     assert.equal(calculateFeatures(data,Date.now(),FEATURE_VERSION_V2).metrics.roc10Pct.reason,"gap");
   });
   it("defaults to explicit major and liquid equity references, not all LP seeds",()=>{
-    const selection=defaultFeatureSelection();assert.equal(selection.length,6);
-    assert.equal(new Set(selection.map(p=>p.pool)).size,6);
+    const selection=defaultFeatureSelection();assert.equal(selection.length,8);
+    assert.equal(new Set(selection.map(p=>p.pool)).size,8);
+    // indicatorRevision 2: the equity-regime legs ride the same watch set.
+    assert.ok(selection.some(p=>p.pool==="0x7aa6d92fc369a8c1edc631a3aac44efb0808ddbf"&&p.tokenAddress==="0x7138b48df7d98d7e3cc221bfe7192d0a178182d8"));
+    assert.ok(selection.some(p=>p.pool==="0xe531fcb1f5a195de7608b9f4f9518544c2cdb693"&&p.tokenAddress==="0x205812cdbed920aff76c6580abd681a46d11efc7"));
     assert.ok(selection.every(p=>p.currency==="token"&&p.tokenAddress));
     assert.ok(selection.some(p=>p.pool==="0x172fcd41e0913e95784454622d1c3724f546f849"));
     assert.ok(!selection.some(p=>p.pool==="0x613ebcfcf41749571d659a0bf3e2c0032fd4859e"));

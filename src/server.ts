@@ -27,6 +27,7 @@ import { getPoolOhlcv, poolOhlcvDiagnostics } from "./query/poolOhlcv.js";
 import { FEATURE_INDEX_KEY, FEATURE_INDEX_KEY_V2, FEATURE_VERSION, FEATURE_VERSION_V2, featureKey, isFeatureInterval, readTradingFeatures, readFeatureAttempt,
   type FeatureSnapshot } from "./query/tradingFeatures.js";
 import type { FeatureIndex } from "./jobs/tradingFeatures.js";
+import { readEquityRegime } from "./query/equityRegime.js";
 import { getSecurity } from "./query/security.js";
 import { getHolders } from "./query/holders.js";
 import { getSocials } from "./query/socials.js";
@@ -930,6 +931,15 @@ export function createServer(deps: ServerDeps): Hono {
       data: estimateRange(inputs, request, prices, basis),
       meta: { asOf: loaded.asOf, staleness: loaded.staleness, source: "pancake" },
     });
+  });
+
+  // indicatorRevision 2: the equity leg of the execution plane's regime blend.
+  // Read from the two 1h feature snapshots already in the store; never upstream.
+  app.get("/trading/regime/us-equity", async (c) => {
+    if (Object.keys(c.req.query()).length > 0) return c.json({ data: null, error: { code: "invalid_request" } }, 400);
+    const regime = await readEquityRegime(deps.store, Date.now());
+    const staleness = regime.regime === "unavailable" ? "dead" : "fresh";
+    return c.json({ data: regime, meta: { asOf: regime.asOf, staleness, source: "trading-features", version: FEATURE_VERSION_V2 } });
   });
 
   for (const version of [FEATURE_VERSION, FEATURE_VERSION_V2] as const) {

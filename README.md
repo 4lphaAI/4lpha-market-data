@@ -73,6 +73,30 @@ bars and returns null with a reason when unavailable. These additions are marked
 `parameters.indicatorRevision: 1`; existing stored v2 snapshots acquire them on
 the next successful worker refresh. V1 outputs remain unchanged.
 
+Indicator revision 2 (`parameters.indicatorRevision: 2`, 2026-09-21) adds, beside
+the rev 1 metrics and without changing them: Bollinger 20/2σ (`bbMiddle20`,
+`bbUpper20`, `bbLower20`, `bbPosition20` = (close − lower)/(upper − lower) with
+`reason: zero_width` on a flat band, `bbWidthPct20`; population σ, 20 bars) and
+`stochRsi14` (14 RSI observations, each the rev 1 recurrence over its own 29-bar
+window, so 42 bars; `zero_range` when they all agree). For pools whose base token
+is a tokenized US equity — a Binance RWA row on `bstock`/`ondo` with an
+`underlyingTicker` — the snapshot also carries the NYSE session: a `session`
+block (`rth` 09:30–16:00 ET, `close` 16:00–20:00, `overnight` otherwise, no
+holiday calendar, DST from the zone data) and `lastRthClose` (with `asOf`),
+`gapPct` against it, `vwapSession` / `vwapDistancePct` since the session start,
+and `orbHigh` / `orbLow` / `orbBreakPct` over 09:30–10:00 ET (`interval_too_coarse`
+on 1h, `orb_not_formed` before 10:00, `not_rth` outside the session). Every other
+pool answers `not_us_equity` on those seven. `gapPct` needs the last RTH close
+inside the 120-bucket window, so it is never available on 5m (10 h of buckets)
+and on 15m only Tuesday–Friday; `no_rth_close_in_window` says so. It measures
+the on-chain price against the on-chain RTH close, not against Binance's NAV —
+that is `premiumBps`. The `/input` snapshot retains `referenceSession` so replay
+is exact; `/trading/features/v2/pools` marks each pool `usEquity`.
+`GET /trading/regime/us-equity` is the equity-market regime fact from the SPYB
+and QQQB 1h snapshots: `risk_off` when both have `emaSpreadPct < 0` and
+`roc10Pct < 0` or either `gapPct ≤ −2.5`, `risk_on` when both are positive,
+`neutral` otherwise, `unavailable` when either leg is missing or stale.
+
 `POST /trading/binance/quote-and-swap` is the bounded TradFi proxy to Binance Flash
 (LiquidMesh aggregator): USDT ↔ one token from the fresh RWA registry only, signed
 with the existing Binance HMAC credentials, router/spender/selector pinned, body,
@@ -108,6 +132,7 @@ All routes below are `GET` unless noted.
 /pools/:address/range?lower=...&upper=...&capital=...
 /trading/features/v1[/*]
 /trading/features/v2[/*]
+/trading/regime/us-equity
 /venus/:owner                  # deprecated compatibility route
 /venus/core/markets
 /venus/core/accounts/:owner
