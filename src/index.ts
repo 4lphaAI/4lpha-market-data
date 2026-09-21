@@ -23,10 +23,13 @@ import {
 
 import { studioConfig } from "./studio/config.js";
 import { studioJob } from "./studio/catalog.js";
+import { readBinanceFlashConfig } from "./config/binanceFlash.js";
 
 loadDotEnv();
 const studio = studioConfig(process.env);
 if (process.env["STUDIO_DISCOVERY_ENABLED"] === "true" && !studio) console.warn("[studio] invalid configuration; integration disabled" );
+const binanceFlash = readBinanceFlashConfig(process.env);
+if (binanceFlash === null) console.warn("[binance-flash] verified guard configuration absent; route unavailable");
 
 const DEFAULT_PORT = 8080;
 
@@ -87,7 +90,7 @@ if (studio) scheduler.register(studioJob(store, studio));
 
 scheduler.start();
 
-const app = createServer({ scheduler, store, studio });
+const app = createServer({ scheduler, store, studio, binanceFlash });
 const port = resolvePort(process.env["PORT"]);
 const server = serve({ fetch: app.fetch, port });
 

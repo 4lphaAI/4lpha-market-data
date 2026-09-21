@@ -104,10 +104,42 @@ export interface SignedRequestOptions {
   sleep?: ((ms: number) => Promise<void>) | undefined;
   /** Test hook: bypass the process-wide limiter. */
   limiter?: RateLimiter | undefined;
+  /** Flash quote/build calls are single-attempt; existing callers keep the retry default. */
+  retryOn429?: boolean | undefined;
+  /** Optional response cap for bounded proxy calls. */
+  maxResponseBytes?: number | undefined;
+  /** Optional request deadline override. */
+  timeoutMs?: number | undefined;
+  /** Refuse redirects for bounded proxy calls. */
+  redirect?: RequestInit["redirect"] | undefined;
 }
 
 function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function boundedResponseText(response: Response, maxBytes: number): Promise<string> {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    total += next.value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new AdapterError(SOURCE, "response too large", 413);
+    }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
 }
 
 /**
@@ -121,13 +153,14 @@ export async function signedRequest(options: SignedRequestOptions): Promise<unkn
   const fetchFn = options.fetchFn ?? globalThis.fetch;
   const limiter = options.limiter ?? BINANCE_RWA_LIMITER;
   const sleep = options.sleep ?? defaultSleep;
+  const operationSignal = requestSignal(options.signal, options.timeoutMs);
 
   const search = new URLSearchParams(options.query ?? []).toString();
   const requestPath = `${PATH_PREFIX}${options.path}${search === "" ? "" : `?${search}`}`;
   const bodyText = options.method === "POST" && options.body !== undefined ? JSON.stringify(options.body) : "";
 
   for (let attempt = 0; ; attempt++) {
-    await limiter.acquire(options.signal);
+    await limiter.acquire(operationSignal);
 
     const timestamp = new Date().toISOString();
     const headers: Record<string, string> = {
@@ -150,7 +183,8 @@ export async function signedRequest(options: SignedRequestOptions): Promise<unkn
       response = await fetchFn(`${BASE_URL}${requestPath}`, {
         method: options.method,
         headers,
-        signal: requestSignal(options.signal),
+        signal: operationSignal,
+        ...(options.redirect === undefined ? {} : { redirect: options.redirect }),
         ...(bodyText === "" ? {} : { body: bodyText }),
       });
     } catch (error) {
@@ -158,12 +192,12 @@ export async function signedRequest(options: SignedRequestOptions): Promise<unkn
     }
 
     if (response.status === 429) {
-      if (attempt === 0) {
+      if (attempt === 0 && options.retryOn429 !== false) {
         // Measured Retry-After is 1; the cap keeps an upstream that says 3600
         // from parking a run long past the job's own timeout.
         const retryAfter = parseNum(response.headers.get("retry-after")) ?? 1;
         await sleep(Math.min(RETRY_AFTER_CAP_S, Math.max(1, retryAfter)) * 1000);
-        if (options.signal?.aborted) throw new AdapterError(SOURCE, "aborted while waiting to retry", 429);
+        if (operationSignal.aborted) throw new AdapterError(SOURCE, "aborted while waiting to retry", 429);
         continue;
       }
       throw new AdapterError(SOURCE, "rate limited", 429);
@@ -187,11 +221,15 @@ export async function signedRequest(options: SignedRequestOptions): Promise<unkn
 
     let payload: unknown;
     try {
-      payload = (await response.json()) as unknown;
-    } catch {
+      const responseText = options.maxResponseBytes === undefined
+        ? await response.text()
+        : await boundedResponseText(response, options.maxResponseBytes);
+      payload = JSON.parse(responseText) as unknown;
+    } catch (error) {
+      if (error instanceof AdapterError) throw error;
       throw new AdapterError(SOURCE, "invalid JSON in response", response.status);
     }
-    if (!isRecord(payload)) throw new AdapterError(SOURCE, "unexpected response shape");
+    if (!isRecord(payload)) throw new AdapterError(SOURCE, "unexpected response shape", response.status);
     const code = payload["code"];
     if (String(code) !== "0") {
       const message = parseStr(payload["msg"]) ?? `unsuccessful code ${String(code)}`;

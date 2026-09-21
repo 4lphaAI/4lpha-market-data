@@ -73,6 +73,14 @@ bars and returns null with a reason when unavailable. These additions are marked
 `parameters.indicatorRevision: 1`; existing stored v2 snapshots acquire them on
 the next successful worker refresh. V1 outputs remain unchanged.
 
+`POST /trading/binance/quote-and-swap` is the bounded TradFi proxy to Binance Flash
+(LiquidMesh aggregator): USDT ↔ one token from the fresh RWA registry only, signed
+with the existing Binance HMAC credentials, router/spender/selector pinned, body,
+response, calldata and deadline all capped, 15 s local validity on the returned
+calldata. It answers 503 `aggregator_guard_unavailable` until all four
+`TRADFI_BINANCE_GUARD_*` facts (guard address, router, spender, runtime code hash)
+are configured; a partial configuration never selects a different target.
+
 All market data is BSC-focused (`chainId: 56`). Social data is creator-declared
 links, not social sentiment. The smart-money field is the GMGN holder/tag count;
 wallet-level tracking is outside this service.
@@ -108,6 +116,7 @@ All routes below are `GET` unless noted.
 /diag/latency
 /snapshots/:key                # authenticated diagnostics
 
+POST   /trading/binance/quote-and-swap   # TradFi Flash proxy; 503 until TRADFI_BINANCE_GUARD_* is set
 PUT    /internal/venus/core/tracked-owners/:owner/:reference
 DELETE /internal/venus/core/tracked-owners/:owner/:reference
 ```

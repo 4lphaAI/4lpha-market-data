@@ -2,6 +2,7 @@ import { mountStudio } from "./studio/catalog.js";
 import type { StudioConfig } from "./studio/config.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import type { Scheduler } from "./core/scheduler.js";
 import type { SnapshotStore } from "./core/store.js";
 import type { Lane, PoolStats, PoolTier, VenusHealth } from "./core/models.js";
@@ -14,7 +15,13 @@ import {
   type VenusCoreMarketsSnapshotV1,
   type VenusCoreRewardsSnapshotV2,
 } from "./core/venus.js";
-import { isEvmAddress, normalizeAddress } from "./adapters/http.js";
+import { AdapterError, MissingCredentialsError, isEvmAddress, isRecord, normalizeAddress, type FetchFn } from "./adapters/http.js";
+import {
+  BinanceFlashInvalidResponseError,
+  fetchBinanceFlashQuote,
+  type BinanceFlashQuoteRequest,
+} from "./adapters/binanceFlash.js";
+import { BINANCE_FLASH_USDT_ADDRESS, type BinanceFlashConfig } from "./config/binanceFlash.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
 import { getPoolOhlcv, poolOhlcvDiagnostics } from "./query/poolOhlcv.js";
 import { FEATURE_INDEX_KEY, FEATURE_INDEX_KEY_V2, FEATURE_VERSION, FEATURE_VERSION_V2, featureKey, isFeatureInterval, readTradingFeatures, readFeatureAttempt,
@@ -25,7 +32,7 @@ import { getHolders } from "./query/holders.js";
 import { getSocials } from "./query/socials.js";
 import { getTokenDecimals, type DecimalsReader } from "./query/decimals.js";
 import { isEligible, isEligibleBatch } from "./query/eligibility.js";
-import { buildUniverse } from "./universe.js";
+import { buildUniverse, RWA_UNIVERSE_KEY } from "./universe.js";
 import { readTokenRecords } from "./jobs/tokenStore.js";
 import {
   SPREAD_HISTORY_KEY,
@@ -55,6 +62,10 @@ export interface ServerDeps {
   studio?: StudioConfig | null;
   scheduler: Scheduler;
   store: SnapshotStore;
+  /** Verified, immutable-at-boot guard facts for the bounded Flash route. */
+  binanceFlash?: BinanceFlashConfig | null;
+  /** Injectable signed-upstream transport; production uses global fetch. */
+  fetchBinanceFlash?: FetchFn;
   refreshVenusRisk?: typeof refreshVenusRisk;
   refreshVenusRewards?: typeof refreshVenusRewards;
   /** Injectable ERC-20 `decimals()` reader, so route tests stay offline. */
@@ -158,6 +169,81 @@ type PoolAprField = (typeof POOL_APR_FIELDS)[number];
 const POOL_TIERS: PoolTier[] = ["core", "degen", "unclassified"];
 
 const DEFAULT_POOL_LIMIT = 50;
+
+const BINANCE_FLASH_MAX_REQUEST_BYTES = 4 * 1024;
+const UINT256_MAX = (1n << 256n) - 1n;
+const CANONICAL_UINT = /^[1-9][0-9]*$/u;
+
+function binanceFlashError(
+  c: Context,
+  status: 400 | 404 | 502 | 503,
+  code: "binance_unavailable" | "binance_no_route" | "binance_invalid_response" | "aggregator_guard_unavailable",
+  reason: string,
+) {
+  return c.json({ data: null, error: { code, reason } }, status);
+}
+
+async function readBoundedBody(request: Request, maxBytes: number): Promise<string | null> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength !== null && /^\d+$/u.test(contentLength) && Number(contentLength) > maxBytes) return null;
+  if (request.body === null) return "";
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const next = await reader.read();
+    if (next.done) break;
+    total += next.value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(next.value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+function parseBinanceFlashRequest(value: unknown): BinanceFlashQuoteRequest | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value);
+  if (keys.length !== 4 || !["tokenIn", "tokenOut", "amountAtomic", "slippageBps"].every((key) => keys.includes(key))) {
+    return null;
+  }
+  const tokenIn = normalizeAddress(value["tokenIn"]);
+  const tokenOut = normalizeAddress(value["tokenOut"]);
+  const amountAtomic = value["amountAtomic"];
+  const slippageBps = value["slippageBps"];
+  if (tokenIn === null || tokenOut === null || tokenIn === tokenOut) return null;
+  if (typeof amountAtomic !== "string" || !CANONICAL_UINT.test(amountAtomic)) return null;
+  try {
+    if (BigInt(amountAtomic) > UINT256_MAX) return null;
+  } catch {
+    return null;
+  }
+  if (typeof slippageBps !== "number" || !Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 300) return null;
+  return { tokenIn, tokenOut, amountAtomic, slippageBps };
+}
+
+async function readFreshRwaAddresses(store: SnapshotStore): Promise<ReadonlySet<string>> {
+  const snapshot = await store.get<unknown>(RWA_UNIVERSE_KEY);
+  if (snapshot === null || snapshot.staleness !== "fresh" || !isRecord(snapshot.data)) return new Set();
+  const rows = snapshot.data["rows"];
+  if (!Array.isArray(rows)) return new Set();
+  const addresses = new Set<string>();
+  for (const row of rows) {
+    if (!isRecord(row)) continue;
+    const address = normalizeAddress(row["address"]);
+    if (address !== null) addresses.add(address);
+  }
+  return addresses;
+}
 
 /** A rejected query parameter, reported as a 400 rather than an empty result. */
 class QueryError extends Error {}
@@ -364,6 +450,69 @@ export function createServer(deps: ServerDeps): Hono {
       },
     }),
   );
+
+  app.post("/trading/binance/quote-and-swap", async (c) => {
+    const config = deps.binanceFlash ?? null;
+    if (config === null) {
+      return binanceFlashError(c, 503, "aggregator_guard_unavailable", "verified_guard_config_missing");
+    }
+
+    const requestStartedAt = Date.now();
+    let bodyText: string | null;
+    try {
+      bodyText = await readBoundedBody(c.req.raw, BINANCE_FLASH_MAX_REQUEST_BYTES);
+    } catch {
+      return binanceFlashError(c, 400, "binance_no_route", "request_body_unreadable");
+    }
+    if (bodyText === null) return binanceFlashError(c, 400, "binance_no_route", "request_body_too_large");
+
+    let body: unknown;
+    try {
+      body = JSON.parse(bodyText) as unknown;
+    } catch {
+      return binanceFlashError(c, 400, "binance_no_route", "request_json_invalid");
+    }
+    const request = parseBinanceFlashRequest(body);
+    if (request === null) return binanceFlashError(c, 400, "binance_no_route", "request_shape_invalid");
+
+    let rwaAddresses: ReadonlySet<string>;
+    try {
+      rwaAddresses = await readFreshRwaAddresses(deps.store);
+    } catch {
+      return binanceFlashError(c, 503, "binance_unavailable", "rwa_registry_unavailable");
+    }
+    const otherToken = request.tokenIn === BINANCE_FLASH_USDT_ADDRESS ? request.tokenOut : request.tokenIn;
+    if (
+      request.tokenIn !== BINANCE_FLASH_USDT_ADDRESS &&
+      request.tokenOut !== BINANCE_FLASH_USDT_ADDRESS
+    ) {
+      return binanceFlashError(c, 404, "binance_no_route", "settlement_pair_not_admitted");
+    }
+    if (!rwaAddresses.has(otherToken)) return binanceFlashError(c, 404, "binance_no_route", "token_not_in_rwa_registry");
+
+    try {
+      const quote = await fetchBinanceFlashQuote(request, config, {
+        fetchFn: deps.fetchBinanceFlash,
+        signal: c.req.raw.signal,
+        requestStartedAt,
+      });
+      return c.json({ data: quote });
+    } catch (error) {
+      if (error instanceof BinanceFlashInvalidResponseError) {
+        return binanceFlashError(c, 502, "binance_invalid_response", error.reason);
+      }
+      if (error instanceof MissingCredentialsError) {
+        return binanceFlashError(c, 503, "binance_unavailable", "credentials_unavailable");
+      }
+      if (error instanceof AdapterError && (error.status === 200 || error.status === 413)) {
+        return binanceFlashError(c, 502, "binance_invalid_response", error.status === 413 ? "response_too_large" : "upstream_payload_invalid");
+      }
+      if (error instanceof AdapterError && (error.status === 400 || error.status === 404)) {
+        return binanceFlashError(c, 404, "binance_no_route", "provider_no_route");
+      }
+      return binanceFlashError(c, 503, "binance_unavailable", "upstream_unavailable");
+    }
+  });
 
   app.get("/status", async (c) => {
     const snapshots = await Promise.all(

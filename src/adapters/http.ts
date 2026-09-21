@@ -65,8 +65,11 @@ export function sanitizeMessage(value: unknown): string {
  * Combines the caller's cancellation with this adapter's own deadline. Either
  * one firing aborts the request.
  */
-export function requestSignal(external: AbortSignal | undefined): AbortSignal {
-  const deadline = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+export function requestSignal(
+  external: AbortSignal | undefined,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+): AbortSignal {
+  const deadline = AbortSignal.timeout(timeoutMs);
   return external === undefined ? deadline : AbortSignal.any([external, deadline]);
 }
 
