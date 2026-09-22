@@ -253,4 +253,21 @@ describe("indicatorRevision 2 — replay, regression and producer wiring",()=>{
     const read=await (await app.request(`/trading/features/v2/${EQUITY_REGIME_POOLS.spy}?interval=5m`)).json() as {data:{identity:{referenceSession:{underlyingTicker:string}};session:{state:string};parameters:{indicatorRevision:number}}};
     assert.equal(read.data.identity.referenceSession.underlyingTicker,"SPY"); assert.equal(read.data.session.state,"rth"); assert.equal(read.data.parameters.indicatorRevision,2);
   });
+  it("handoff §11: passes usEquity through to the OHLCV load call, false for a non-equity pool",async()=>{
+    let clock=et(2026,9,18,10,30,30);const now=clock;const store=new MemoryStore(()=>clock);
+    await store.put(RWA_UNIVERSE_KEY,{rows:[{address:EQUITY_REGIME_TOKENS.spy,platform:"bstock",underlyingTicker:"SPY",marketStatus:null,openState:true}]},{source:"test",freshForMs:0,deadAfterMs:60_000});
+    await store.put(FEATURE_WATCHLIST_KEY,[{pool:EQUITY_REGIME_POOLS.spy,currency:"usd",tokenAddress:EQUITY_REGIME_TOKENS.spy},{pool:POOL,currency:"usd",tokenAddress:BASE}],{source:"test",freshForMs:60_000,deadAfterMs:60_000});
+    const seen:Record<string,boolean>={};
+    const load=async(_s:unknown,p:{poolAddress:string;interval:string;tokenAddress?:string;usEquity?:boolean}):Promise<PoolOhlcvResult>=>{
+      seen[p.poolAddress]=p.usEquity??false;
+      const data=series(now,p.interval as Interval,60,()=>({}),{poolAddress:p.poolAddress,baseAddress:p.tokenAddress!});
+      return {schemaVersion:2,candles:data.candles,base:{address:p.tokenAddress!,name:null,symbol:null},quote:{address:QUOTE,name:null,symbol:null},
+        poolAddress:p.poolAddress,interval:p.interval as "5m",limit:500,source:"geckoterminal",asOf:now,staleness:"fresh",priceCurrency:"usd",volumeCurrency:"usd",volumeUnavailableReason:null};
+    };
+    await runTradingFeatures(store,AbortSignal.timeout(2000),{now:()=>clock,load:load as never});
+    clock+=61_000;
+    await runTradingFeatures(store,AbortSignal.timeout(2000),{now:()=>clock,load:load as never});
+    assert.equal(seen[EQUITY_REGIME_POOLS.spy],true);
+    assert.equal(seen[POOL],false);
+  });
 });

@@ -116,9 +116,12 @@ describe("versioned feature warm-up",()=>{
     const selection=await defaultFeatureSelection(new MemoryStore());assert.equal(selection.length,6);
     assert.equal(new Set(selection.map(p=>p.pool)).size,6);
     // indicatorRevision 2: the equity-regime legs ride the same watch set.
-    assert.ok(selection.some(p=>p.pool==="0x7aa6d92fc369a8c1edc631a3aac44efb0808ddbf"&&p.tokenAddress==="0x7138b48df7d98d7e3cc221bfe7192d0a178182d8"));
-    assert.ok(selection.some(p=>p.pool==="0xe531fcb1f5a195de7608b9f4f9518544c2cdb693"&&p.tokenAddress==="0x205812cdbed920aff76c6580abd681a46d11efc7"));
-    assert.ok(selection.every(p=>p.currency==="token"&&p.tokenAddress));
+    // handoff §11: usEquity legs are usd (Sintral-first); the 4 legacy majors stay token-ratio.
+    assert.ok(selection.some(p=>p.pool==="0x7aa6d92fc369a8c1edc631a3aac44efb0808ddbf"&&p.tokenAddress==="0x7138b48df7d98d7e3cc221bfe7192d0a178182d8"&&p.currency==="usd"));
+    assert.ok(selection.some(p=>p.pool==="0xe531fcb1f5a195de7608b9f4f9518544c2cdb693"&&p.tokenAddress==="0x205812cdbed920aff76c6580abd681a46d11efc7"&&p.currency==="usd"));
+    assert.ok(selection.every(p=>p.tokenAddress));
+    assert.equal(selection.filter(p=>p.currency==="usd").length,2);
+    assert.equal(selection.filter(p=>p.currency==="token").length,4);
     assert.ok(selection.some(p=>p.pool==="0x172fcd41e0913e95784454622d1c3724f546f849"));
     assert.ok(!selection.some(p=>p.pool==="0x613ebcfcf41749571d659a0bf3e2c0032fd4859e"));
   });

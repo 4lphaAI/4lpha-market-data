@@ -41,8 +41,10 @@ const waiters: Array<() => void> = [];
 
 /**
  * Minimal counting semaphore. The bapi endpoints throttle aggressively per
- * source IP, so every Binance-host request funnels through here; the Sintral
- * kline host is a different service and is intentionally not gated.
+ * source IP, so every Binance-host request funnels through here — including
+ * `fetchSintralKlines` (handoff §11, 2026-09-22): the Sintral kline host is a
+ * physically different service, but the operator ruled it through the same
+ * shared cap anyway as a precaution, not because it was measured to need it.
  */
 async function withBinanceLimit<T>(fn: () => Promise<T>): Promise<T> {
   if (inFlight >= MAX_CONCURRENT) {
@@ -236,7 +238,19 @@ export interface SintralKlineParams extends BaseParams {
   limit: number;
 }
 
-/** Fetches OHLCV bars from the Sintral kline service used by Binance Web3. */
+/**
+ * Fetches OHLCV bars from the Sintral kline service used by Binance Web3.
+ *
+ * Handoff §11 (2026-09-22, operator ruling): gated behind the same
+ * `withBinanceLimit` semaphore as every other Binance-host call, even though
+ * a live probe of 36 back-to-back requests in 3s saw no throttling (`36/36`
+ * 200s) — the probe was a burst at 12 req/s, the producer's real steady load
+ * is ~5 req/min, so the probe does not clear this host of needing the same
+ * caution applied everywhere else in this file. Sends the same
+ * `clienttype`/`clientversion` headers Neural Alpha's own integration uses
+ * against this same endpoint (its reference implementation is the only
+ * evidence this shape works; this adapter previously sent none).
+ */
 export async function fetchSintralKlines(params: SintralKlineParams): Promise<Candle[]> {
   const address = params.address.toLowerCase();
   const limit = Math.max(1, Math.trunc(params.limit));
@@ -244,12 +258,13 @@ export async function fetchSintralKlines(params: SintralKlineParams): Promise<Ca
     `${KLINE_URL}?address=${encodeURIComponent(address)}` +
     `&interval=${encodeURIComponent(params.interval)}&limit=${limit}&platform=bsc`;
 
-  const payload = await fetchJson({
+  const payload = await withBinanceLimit(() => fetchJson({
     source: SOURCE,
     url,
     fetchFn: params.fetchFn ?? globalThis.fetch,
     signal: params.signal,
-  });
+    headers: { clienttype: "web", clientversion: "1.2.0" },
+  }));
   return normalizeSintralKlines(payload);
 }
 

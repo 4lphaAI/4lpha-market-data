@@ -2,6 +2,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { fetchGeckoPoolOhlcv, type GeckoTokenRef } from "../adapters/geckoTerminal.js";
 import { fetchDexCandles, fetchDexPair, type DexPair } from "../adapters/dexPaprika.js";
+import { fetchSintralKlines } from "../adapters/binanceWeb3.js";
+import { USD_ANCHOR } from "../jobs/majorsPrices.js";
 import { OhlcvTransport } from "../adapters/ohlcvTransport.js";
 import { isEvmAddress, sanitizeMessage } from "../adapters/http.js";
 import type { Candle } from "../core/models.js";
@@ -57,6 +59,15 @@ export interface GetPoolOhlcvParams {
   qualityPolicy?: "trading-v2";
   onAttempt?: (attempt: OhlcvAttempt) => void;
   signal?: AbortSignal | undefined;
+  /**
+   * Handoff §11 (2026-09-22): the base token is a tokenized US equity, so
+   * Sintral (Binance Web3's kline service) is tried first on `15m`/`1h`,
+   * ahead of Gecko/DexPaprika. A hint about which sources to try, not part
+   * of the series identity — omitted from the cache key on purpose, so the
+   * same (pool, interval, currency, token) series is shared regardless of
+   * how a given caller learned it was a US equity.
+   */
+  usEquity?: boolean;
 }
 
 // All limits share one history. Legacy charts have ambiguous denomination and
@@ -119,7 +130,8 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
     let flight = r.inFlight.get(key);
     if (flight) r.stats.coalesced++;
     else if (r.inFlight.size < MAX_IN_FLIGHT_REFRESHES) {
-      flight = refresh(r, pool, params.interval, currency, key, record, token, params.qualityPolicy, params.onAttempt).finally(() => { r.inFlight.delete(key); });
+      flight = refresh(r, pool, params.interval, currency, key, record, token, params.qualityPolicy, params.onAttempt, params.usEquity ?? false)
+        .finally(() => { r.inFlight.delete(key); });
       r.inFlight.set(key, flight);
     } else { r.stats.admissionDenied++; params.onAttempt?.({source: "cache", reason: "admission_limit"}); }
     if (flight) record = await flight;
@@ -133,7 +145,7 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
 
 async function refresh(r: Runtime, pool: string, interval: KlineInterval, currency: PoolPriceCurrency,
   key: string, cached: DataRecord<StoredPoolOhlcv> | null, token?: string, policy?: "trading-v2",
-  onAttempt?: (attempt: OhlcvAttempt) => void): Promise<DataRecord<StoredPoolOhlcv> | null> {
+  onAttempt?: (attempt: OhlcvAttempt) => void, usEquity = false): Promise<DataRecord<StoredPoolOhlcv> | null> {
   // Shared 60s retry floor, including empty responses/failures. A client cannot
   // cause an unbounded retry loop on a cold or stale cache entry.
   // Fixed stripes bound control-table growth under arbitrary public addresses.
@@ -148,13 +160,43 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
   const mapping = INTERVALS[interval];
   const end = Math.floor(Date.now() / 1000 / mapping.seconds) * mapping.seconds;
   const start = end - HISTORY * mapping.seconds;
-  const sources = currency === "token" ? ["geckoterminal", "dexpaprika"] as const : ["geckoterminal"] as const;
+  // Handoff §11 (2026-09-22, operator ruling): Sintral goes first for a US
+  // equity on 15m/1h specifically (the only intervals it was measured on and
+  // mapped for), and only for an explicit usd token request -- Sintral has no
+  // on-chain pair to serve a token-ratio request against. Everything else
+  // keeps the existing order unchanged. GeckoTerminal/DexPaprika stay in the
+  // chain as the fallback either way.
+  const sintralInterval = usEquity && currency === "usd" && token
+    ? (interval === "15m" ? "15min" : interval === "1h" ? "1h" : null) : null;
+  const sources = [
+    ...(sintralInterval ? ["sintral" as const] : []),
+    "geckoterminal" as const,
+    ...(currency === "token" || sintralInterval ? ["dexpaprika" as const] : []),
+  ];
   let best = cached;
   for (const source of sources) {
     try {
       signal.throwIfAborted();
       let data: StoredPoolOhlcv;
-      if (source === "geckoterminal") {
+      if (source === "sintral") {
+        // Sintral is token-level (no on-chain pair), unlike Gecko/DexPaprika:
+        // no pool identity to derive base/quote from, so it can only serve a
+        // request for this token's price, and only in USD (Binance's own
+        // reference, not a ratio against any specific on-chain quote). The
+        // quote reported below is a nominal USDT stand-in for provenance
+        // display, not a claim that Sintral priced against that pool.
+        // `token`/currency are already guaranteed by `sintralInterval` above.
+        // 120, not the general HISTORY(500) constant above: the ruling's own
+        // measured limit, matching the trading-features 120-bucket window
+        // this exists to feed (query/tradingFeatures.ts's FEATURE_HISTORY,
+        // not imported here to avoid a cycle -- that module imports types
+        // from this one).
+        const raw = await fetchSintralKlines({ address: token!, interval: sintralInterval!, limit: 120, signal });
+        const candles: PoolCandle[] = raw.filter((c) => c.timestamp >= start * 1000 && c.timestamp < end * 1000 && c.timestamp % (mapping.seconds * 1000) === 0);
+        data = { schemaVersion: 2, candles: candles.sort((a, b) => a.timestamp - b.timestamp),
+          base: { address: token!, symbol: null, name: null }, quote: { address: USD_ANCHOR.address, symbol: USD_ANCHOR.symbol, name: null },
+          priceCurrency: "usd", volumeCurrency: "usd", volumeUnavailableReason: null };
+      } else if (source === "geckoterminal") {
         const raw = await fetchGeckoPoolOhlcv({ poolAddress: pool, timeframe: mapping.timeframe,
           aggregate: mapping.aggregate, limit: HISTORY + 1, currency, signal,
           ...(currency === "usd" && (token || cached) ? { token: token ?? cached!.data.base.address } : {}),

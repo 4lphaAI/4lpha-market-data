@@ -27,7 +27,10 @@ export type UnavailableReason = "insufficient_history" | "gap" | "stale_input" |
   | "numeric_overflow" | "observation_after_evaluation" | "invalid_identity"
   // indicatorRevision 2
   | "zero_width" | "zero_range" | "not_us_equity" | "no_rth_close_in_window" | "zero_volume"
-  | "interval_too_coarse" | "orb_not_formed" | "not_rth";
+  | "interval_too_coarse" | "orb_not_formed" | "not_rth"
+  // indicatorRevision 3 (handoff §11): a Sintral-sourced series with too little
+  // real trading to be worth forward-filling into flat-but-valid indicators.
+  | "too_few_real_bars";
 export interface Metric {
   value: number | null;
   available: boolean;
@@ -93,13 +96,21 @@ export interface FeatureSnapshot {
     firstOpen: number | null; latestClose: number | null;
     missingBuckets: number; invalidBars: number; excludedUnclosedBars: number;
     identicalDuplicates: number; conflictingDuplicates: number;
+    /**
+     * indicatorRevision 3 (handoff §11): real (provider-observed) vs
+     * synthetic forward-filled bars behind the working series. `filledBars`
+     * is 0 outside a Sintral-sourced, gap-filled computation; `realBars`
+     * always equals `bars.length` before any fill is applied, so the two
+     * fields are meaningful (and safe to read) on every version/source.
+     */
+    realBars: number; filledBars: number;
   };
   parameters: {
     historyBars: 120; rocPeriod: 10; rvolBaseline: 20; emaPeriods: readonly [12, 26];
     atrPeriod: 14; emaSeed: "sma"; atrSmoothing: "wilder";
     publicationLagMs: number; schedulingGraceMs: number; bucketConvention: "UTC-open-ms";
     warmupBars: { ema12: number; ema26: number; atr14: number };
-    indicatorRevision?: 2;
+    indicatorRevision?: 2 | 3;
     rsiPeriod?: 14; rsiSmoothing?: "wilder"; rsiFlatValue?: 50;
     momentumPeriod?: 10; macdPeriods?: readonly [12, 26, 9]; signalSeed?: "sma";
     indicatorWarmupBars?: { rsi14: 29; macd: 52; signal9: 69; histogram: 69; momentum10: 11;
@@ -159,7 +170,29 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
     byTime.set(bar.timestamp, { ...bar });
   }
   for (const time of conflicts) byTime.delete(time);
-  const bars = [...byTime.values()].sort((a, b) => a.timestamp - b.timestamp);
+  let bars = [...byTime.values()].sort((a, b) => a.timestamp - b.timestamp);
+  const realBars = bars;
+  // indicatorRevision 3 (handoff §11): Sintral omits buckets with no trades,
+  // unlike Gecko/DexPaprika. Under rev 2 only (rev 1 is untouched by design),
+  // a Sintral-sourced series is forward-filled to a gap-free working series
+  // before any indicator runs, so EMA/RSI/MACD/ATR/momentum/BB/StochRSI see a
+  // real time axis instead of a compressed trade-count one. Never fills
+  // before the first real bar (nothing to carry forward) or the current
+  // unclosed bucket (`cutoff` already excludes it, same as the raw-bar loop
+  // above). RVOL/volume baseline below intentionally keep reading `bars` as
+  // filled (a filled bar's `volume: 0` is real information, not a gap), so a
+  // thin pool honestly reads low volume off-hours rather than "unavailable".
+  const sintralFill = version === FEATURE_VERSION_V2 && input.source === "sintral";
+  if (sintralFill && realBars.length > 0) {
+    const filled: PoolCandle[] = [];
+    let lastClose = realBars[0]!.close;
+    for (let t = realBars[0]!.timestamp; t < cutoff; t += step) {
+      const real = byTime.get(t);
+      if (real) { filled.push(real); lastClose = real.close; }
+      else filled.push({ timestamp: t, open: lastClose, high: lastClose, low: lastClose, close: lastClose, volume: 0 });
+    }
+    bars = filled;
+  }
   const latest = bars.at(-1);
   const closeTime = latest ? latest.timestamp + step : null;
   let contiguous = latest ? 1 : 0;
@@ -169,9 +202,12 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
   }
   const address = /^0x[0-9a-f]{40}$/u;
   const identityValid = input.chainId === 56 && [input.poolAddress, input.baseAddress, input.quoteAddress].every((s) => address.test(s))
-    && input.baseAddress !== input.quoteAddress && ["geckoterminal", "dexpaprika"].includes(input.source);
+    && input.baseAddress !== input.quoteAddress && ["geckoterminal", "dexpaprika", "sintral"].includes(input.source);
   const globalReason: UnavailableReason | null = !identityValid ? "invalid_identity"
     : !Number.isFinite(now) || !Number.isFinite(input.observedAt) || input.observedAt > now ? "observation_after_evaluation"
+    // A dead pool forward-filled into 90+ synthetic bars must not produce
+    // flat-but-valid indicators; require real evidence, not real-or-carried.
+    : sintralFill && realBars.length < 30 ? "too_few_real_bars"
     : closeTime !== null && now >= closeTime + step + PUBLICATION_LAG_MS + SCHEDULING_GRACE_MS ? "stale_input" : null;
   const reasonWithin = (windowStart: number, required: number, contiguity: boolean): UnavailableReason | null => {
     if (globalReason) return globalReason;
@@ -323,20 +359,22 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
   const { referenceSession: _omitted, ...bareInput } = input;
   const retainedInput: FeatureInput = { ...bareInput, candles: input.candles.map((bar) => ({ ...bar })),
     ...(rev2 ? { referenceSession: reference ? { ...reference } : null } : {}) };
+  const indicatorRevision = rev2 ? (sintralFill ? 3 as const : 2 as const) : undefined;
   return {
     version, seriesId, snapshotId: hash({ version, input: retainedInput, cutoff,
-      ...(rev2 ? { indicatorRevision: 2 } : {}) }, rev2), input: retainedInput,
+      ...(rev2 ? { indicatorRevision } : {}) }, rev2), input: retainedInput,
     calculatedAt: now, evaluationClose: closeTime,
     refreshAfter: closeTime === null ? now + 60_000 : closeTime + step + PUBLICATION_LAG_MS,
     expiresAt: closeTime === null ? now : closeTime + step + PUBLICATION_LAG_MS + SCHEDULING_GRACE_MS,
     coverage: { availableBars: bars.length, contiguousBars: contiguous, requiredHistory: FEATURE_HISTORY,
       firstOpen: bars[0]?.timestamp ?? null, latestClose: closeTime,
       missingBuckets: bars.length ? (latest!.timestamp - bars[0]!.timestamp) / step + 1 - bars.length : 0,
-      invalidBars, excludedUnclosedBars, identicalDuplicates, conflictingDuplicates: conflicts.size },
+      invalidBars, excludedUnclosedBars, identicalDuplicates, conflictingDuplicates: conflicts.size,
+      realBars: realBars.length, filledBars: sintralFill ? bars.length - realBars.length : 0 },
     parameters: { historyBars: 120, rocPeriod: 10, rvolBaseline: 20, emaPeriods: [12, 26], atrPeriod: 14,
       emaSeed: "sma", atrSmoothing: "wilder", publicationLagMs: PUBLICATION_LAG_MS,
       schedulingGraceMs: SCHEDULING_GRACE_MS, bucketConvention: "UTC-open-ms", warmupBars: warmup,
-      ...(rev2 ? { indicatorRevision: 2 as const, rsiPeriod: 14 as const,
+      ...(rev2 ? { indicatorRevision: indicatorRevision as 2 | 3, rsiPeriod: 14 as const,
         rsiSmoothing: "wilder" as const, rsiFlatValue: 50 as const, momentumPeriod: 10 as const,
         macdPeriods: [12, 26, 9] as const, signalSeed: "sma" as const,
         indicatorWarmupBars: { rsi14: 29, macd: 52, signal9: 69, histogram: 69, momentum10: 11,

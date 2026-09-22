@@ -101,7 +101,13 @@ async function defaultRwaFeatureSelection(store: SnapshotStore): Promise<(Featur
       if (deepest === null || venue.liquidityUsd > deepest.liquidityUsd) deepest = { pool: venue.pool, liquidityUsd: venue.liquidityUsd };
     }
     if (deepest === null) continue;
-    out.push({ pool: deepest.pool, currency: "token", tokenAddress: entry.address, liquidityUsd: deepest.liquidityUsd });
+    // Handoff §11 (2026-09-22): usd, not token-ratio -- Sintral (the new
+    // primary source for these, see poolOhlcv.ts's refresh()) has no on-chain
+    // pair to price a ratio against, only Binance's own USD reference. The
+    // Gecko/DexPaprika fallback then also runs in usd mode for the same
+    // series, keeping one denomination across the whole chain rather than
+    // switching currency depending on which source happened to answer.
+    out.push({ pool: deepest.pool, currency: "usd", tokenAddress: entry.address, liquidityUsd: deepest.liquidityUsd });
   }
   out.sort((a, b) => b.liquidityUsd - a.liquidityUsd);
   return out;
@@ -116,8 +122,10 @@ export async function defaultFeatureSelection(store: SnapshotStore): Promise<Fea
   // so `/trading/regime/us-equity` keeps a known-good pool even on a cycle
   // where the venue sweep hasn't run or disagrees on which pool is deepest.
   const equityLegs: FeatureSelection[] = [
-    {pool: EQUITY_REGIME_POOLS.spy, currency: "token", tokenAddress: EQUITY_REGIME_TOKENS.spy},
-    {pool: EQUITY_REGIME_POOLS.qqq, currency: "token", tokenAddress: EQUITY_REGIME_TOKENS.qqq},
+    // usd, not token-ratio, for the same reason as the RWA sweep below (§11):
+    // both are usEquity pools, so Sintral is tried first for them too.
+    {pool: EQUITY_REGIME_POOLS.spy, currency: "usd", tokenAddress: EQUITY_REGIME_TOKENS.spy},
+    {pool: EQUITY_REGIME_POOLS.qqq, currency: "usd", tokenAddress: EQUITY_REGIME_TOKENS.qqq},
   ];
   const reserved = new Set([...majors.map(p => p.tokenAddress), ...equityLegs.map(p => p.tokenAddress)]);
   const rwa = (await defaultRwaFeatureSelection(store)).filter(p => !reserved.has(p.tokenAddress));
@@ -238,7 +246,7 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
     try {
     signal.throwIfAborted();
     const chart = await (deps.load ?? getPoolOhlcv)(store, { poolAddress: c.pool, interval: c.interval, currency: c.currency, limit: 500, signal,
-      qualityPolicy: "trading-v2", onAttempt: info => { if (sources.length < 4) sources.push(info); },
+      qualityPolicy: "trading-v2", onAttempt: info => { if (sources.length < 4) sources.push(info); }, usEquity: c.usEquity ?? false,
       ...(c.tokenAddress ? { tokenAddress: c.tokenAddress } : {}) });
     signal.throwIfAborted();
     if (!chart || chart.staleness !== "fresh") { fail(chart ? "stale_input" : sources.at(-1)?.reason ?? "provider_unavailable"); return; }

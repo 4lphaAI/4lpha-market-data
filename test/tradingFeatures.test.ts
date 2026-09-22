@@ -199,7 +199,10 @@ describe("explicit trading target", () => {
   });
   it("defaults seeds to ratios while preserving explicit USD selections", async () => {
     const store = new MemoryStore();
-    assert.ok((await featureSelection(store)).pools.every(p=>p.currency==="token"));
+    // handoff §11: the 4 legacy majors stay token-ratio; the 2 usEquity legs are usd (Sintral-first).
+    const defaults = (await featureSelection(store)).pools;
+    assert.equal(defaults.filter(p => p.currency === "token").length, 4);
+    assert.equal(defaults.filter(p => p.currency === "usd").length, 2);
     await configure(store);
     assert.ok((await featureSelection(store)).pools.every(p=>p.currency==="usd"));
     await store.put(FEATURE_WATCHLIST_KEY,[{pool:POOL,currency:"token",tokenAddress:QUOTE}],{source:"test",freshForMs:60000,deadAfterMs:60000});
