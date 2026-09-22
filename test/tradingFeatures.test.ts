@@ -251,12 +251,15 @@ describe("bounded feature producer and store-only delivery", () => {
   });
   it("caps each pass, fairly advances attempts, and isolates missing pools", async () => {
     let time = NOW; const store = new MemoryStore(() => time);
-    // 4 pools x 3 intervals = 12 candidates against a 5/cycle cap
-    // (DUE_PER_CYCLE, deliberately paced -- handoff §10 follow-up, not sized
-    // to burst through a transport budget): 2*5=10 < 12, so two candidates
-    // are still left uncovered after two admitted cycles, same shape as the
-    // original 3-pool/cap-4 case (2*4=8 < 9).
-    const extra = ["0x0000000000000000000000000000000000000004"];
+    // 27 pools x 3 intervals = 81 candidates against a 40/cycle cap
+    // (DUE_PER_CYCLE, handoff §12 -- Sintral gave most of these series enough
+    // headroom to admit a full same-instant 15m rotation in about one cycle).
+    // POOL always fails (never a real pool below), so two of cycle 2's 40
+    // slots go back to re-attempting POOL's already-logged 15m/1h candidates
+    // (due again, since a real failure still backs off, unlike a self-throttle
+    // denial) instead of covering new ones: 40 (cycle 1) + 38 new (cycle 2,
+    // capacity 40 minus those 2 retries) = 78 of 81 covered, not 80.
+    const extra = Array.from({ length: 24 }, (_, i) => `0x${(i + 100).toString(16).padStart(40, "0")}`);
     const pools = [POOL, BASE, QUOTE, ...extra]; await configure(store, pools);
     const calls: string[] = [];
     const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async (_store, p) => {
@@ -264,12 +267,12 @@ describe("bounded feature producer and store-only delivery", () => {
       return p.poolAddress === POOL ? null : { ...chart(), poolAddress: p.poolAddress, interval: p.interval };
     };
     const first = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
-    assert.equal(first.attempted, 5); assert.equal(calls.length, 5);
+    assert.equal(first.attempted, 40); assert.equal(calls.length, 40);
     assert.equal((await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load })).attempted, 0);
     time += 61_000;
     await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
-    assert.equal(new Set(calls).size, 10);
-    assert.equal(Object.keys((await store.get<Record<string, unknown>>(FEATURE_STATE_KEY))!.data).length, 12);
+    assert.equal(new Set(calls).size, 78);
+    assert.equal(Object.keys((await store.get<Record<string, unknown>>(FEATURE_STATE_KEY))!.data).length, 81);
   });
   it("does not write a success after cancellation or restamp stale history", async () => {
     const store = new MemoryStore(() => NOW); await configure(store);
@@ -357,21 +360,37 @@ describe("bounded feature producer and store-only delivery", () => {
       assert.match(lines[0]!, /quiet, not failed \(rate_limited×3\)/);
     } finally { console.log = log; }
   });
-  it("handoff §10: prefers 1h/15m over 5m when demand exceeds the per-cycle cap", async () => {
-    // The execution plane never reads 5m, so under contention it should lose
-    // its admission slots to 1h/15m first rather than compete evenly by age.
+  it("handoff §12: too_few_real_bars gets a longer retry floor than an ordinary success", async () => {
+    // A genuinely thin/dead Sintral series (§11) still succeeds at fetching
+    // (updated++, no backoff) but has nothing new to say for a while -- the
+    // ordinary 60s floor meant it got re-admitted every single minute,
+    // spending a slot the ~40 other live series needed more (measured live).
+    const store = new MemoryStore(() => NOW); await configure(store);
+    const sparse = { ...chart(input(20)), source: "sintral" }; // < 30 real bars
+    const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async () => sparse;
+    const result = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW, load });
+    assert.equal(result.failed, 0); // a thin series is not a failure
+    const state = (await store.get<Record<string, { nextAttempt: number; reason?: string }>>(FEATURE_STATE_KEY))!.data;
+    const entry = state[`${featureKey(POOL, "5m")}:usd`]!;
+    assert.equal(entry.reason, "too_few_real_bars");
+    assert.equal(entry.nextAttempt, NOW + 300_000); // the 5-minute floor, not the ordinary 60s one
+  });
+  it("handoff §12: 15m strictly outranks 1h, which outranks 5m, when demand exceeds the per-cycle cap", async () => {
+    // Tied (§9/§10), 1h -- refreshed a quarter as often -- almost always won
+    // ties by age, exactly backwards: 1h's own tolerance can absorb a delay
+    // for free, 15m's tighter one cannot. §12 makes 15m win outright.
     const store = new MemoryStore(() => NOW);
-    const pools = Array.from({ length: 2 }, (_, i) => `0x${(i + 20).toString(16).padStart(40, "0")}`);
-    await configure(store, pools); // 2 pools x 3 intervals = 6 candidates, cap 5
+    const pools = Array.from({ length: 15 }, (_, i) => `0x${(i + 20).toString(16).padStart(40, "0")}`);
+    await configure(store, pools); // 15 pools x 3 intervals = 45 candidates, cap 40
     const calls: string[] = [];
     const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async (_s, p) => {
       calls.push(p.interval); return { ...chart(), poolAddress: p.poolAddress, interval: p.interval };
     };
     const result = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW, load });
-    assert.equal(result.attempted, 5);
+    assert.equal(result.attempted, 40);
     const counts = { "1h": calls.filter(i => i === "1h").length, "15m": calls.filter(i => i === "15m").length, "5m": calls.filter(i => i === "5m").length };
-    assert.equal(counts["1h"], 2); assert.equal(counts["15m"], 2); // both fully admitted
-    assert.equal(counts["5m"], 1); // only the 1 leftover slot, not fairly split by age
+    assert.equal(counts["15m"], 15); assert.equal(counts["1h"], 15); // both fully admitted
+    assert.equal(counts["5m"], 10); // only the 10 leftover slots, not fairly split by age
   });
   it("shares producer admission across replicas, persists replay evidence and expires by input age in Postgres", async () => {
     let time = NOW; const pg = new FakePg();

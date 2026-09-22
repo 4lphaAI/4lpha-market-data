@@ -38,19 +38,38 @@ describe("exact-pool fallback", () => {
     assert.equal(poolOhlcvKey(POOL, "1m", 10), poolOhlcvKey(POOL, "1m", 500));
   });
   it("bounds concurrent cold charts with fail-fast admission", async () => {
-    const store = new MemoryStore(); let calls = 0;
+    // Handoff §12 raised MAX_IN_FLIGHT_REFRESHES to 40, above the shared
+    // geckoterminal+dexpaprika transport budget (22 total). Gating via a
+    // blocked-until-released fetch (the old pattern) no longer isolates this
+    // cap cleanly: with Gecko/DexPaprika, most of 40 concurrent pools would
+    // be denied by the 22-request budget before ever reaching a fetch call
+    // (so the gate's release signal, tied to a fetch-call counter, would
+    // never fire); routed through Sintral instead, its withBinanceLimit is a
+    // true wait-for-a-slot semaphore (6 concurrent) rather than a fail-fast
+    // budget, so a fetch blocked *inside* it stalls every later waiter
+    // forever. Blocking `store.acquireSchedulerLease` instead -- refresh()'s
+    // own first await, before any source or budget is even chosen -- gates
+    // all 40 identically regardless of which source they'd pick, with no
+    // real-provider ceiling in the way.
+    const store = new MemoryStore();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    let ready!: () => void;
-    const started = new Promise<void>((resolve) => { ready = resolve; });
-    globalThis.fetch = async () => { if (++calls === 22) ready(); await gate; return gecko(); };
-    const first = Array.from({ length: 22 }, (_, i) => getPoolOhlcv(store, {
-      ...params, poolAddress: `0x${(i + 100).toString(16).padStart(40, "0")}`,
+    const realLease = store.acquireSchedulerLease.bind(store);
+    store.acquireSchedulerLease = async (...leaseArgs) => { await gate; return realLease(...leaseArgs); };
+    globalThis.fetch = async () => json({ data: [[1, 2, 0.5, 1.5, 50, last() / 1000]] });
+    const sintralParams = { interval: "15m" as const, limit: 20, currency: "usd" as const, tokenAddress: A, usEquity: true };
+    const first = Array.from({ length: 40 }, (_, i) => getPoolOhlcv(store, {
+      ...sintralParams, poolAddress: `0x${(i + 100).toString(16).padStart(40, "0")}`,
     }));
     try {
-      await started;
-      assert.equal(await getPoolOhlcv(store, params), null);
-      assert.equal(calls, 22);
+      // No signal to wait on for "all 40 admitted": getPoolOhlcv's own
+      // await (the cache read) resolves in one microtask tick for
+      // MemoryStore, so draining the microtask queue once is enough for
+      // every call to reach its in-flight admission check and then block
+      // on the lease gate -- nothing past that point can advance further.
+      await Promise.resolve();
+      assert.equal(poolOhlcvDiagnostics(store).inFlight, 40);
+      assert.equal(await getPoolOhlcv(store, { ...sintralParams, poolAddress: POOL }), null);
       assert.equal(poolOhlcvDiagnostics(store).admissionDenied, 1);
     } finally { release(); await Promise.all(first); }
   });

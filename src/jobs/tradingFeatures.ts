@@ -34,45 +34,52 @@ const RETENTION = 30 * 86_400_000;
  */
 const DEFAULT_SELECTION_INTERVALS: FeatureInterval[] = ["15m", "1h"];
 /**
- * Admissions per 60s cycle. §8/§9 (2026-09-22) sized this to *burst* enough
- * series through within the read side's freshness grace, on a mistaken
- * reading of that grace as ~90 seconds. It is not: `readTradingFeatures`'s
- * staleness cutoff is `closeTime + step + PUBLICATION_LAG_MS +
- * SCHEDULING_GRACE_MS` (`query/tradingFeatures.ts`) — a full *extra* bar
- * period on top of the 90s, e.g. ~16.5 minutes of slack for a 15m series, not
- * 90 seconds. Chasing that wrong, tight deadline is what pushed admission up
- * to 22/cycle and tripped real `geckoterminal` 429s at scale (handoff §10).
+ * Admissions per 60s cycle. History, because the right number kept moving
+ * with the architecture underneath it:
  *
- * Corrected: with `5m` dropped from the default (above), steady-state demand
- * for the ~40-pool marketplace default is `40/15 (15m) + 40/60 (1h) ≈
- * 3.3/minute` — nowhere near a burst. This stays low and deliberately paced
- * (operator directive, 2026-09-22: "~2-3 req/phút, spread across the 15
- * minutes, not a burst at the close") rather than raised to match the
- * transport budget ceiling (`BUDGETS`, `adapters/ohlcvTransport.ts`) the way
- * it was before: the ceiling is a safety bound on the transport, not a
- * target for this job to hit. At this admission rate the existing
- * age-fairness sort (`due` below) naturally rotates a same-instant 36-pool
- * close across roughly a dozen cycles — comfortably inside the ~16.5-minute
- * tolerance, never bursting the provider.
+ * §8/§9 (2026-09-22) sized this to *burst* enough series through within the
+ * read side's freshness grace, on a mistaken reading of that grace as ~90
+ * seconds. It is not: `readTradingFeatures`'s staleness cutoff is `closeTime
+ * + step + PUBLICATION_LAG_MS + SCHEDULING_GRACE_MS` (`query/tradingFeatures.ts`)
+ * — a full *extra* bar period on top of the 90s, ~16.5 minutes of slack for a
+ * 15m series. Chasing that wrong, tight deadline pushed admission to 22/cycle
+ * and tripped real `geckoterminal` 429s at scale (§10).
+ *
+ * §10 follow-up corrected that to a deliberately low, paced 5/cycle (~3.3/min
+ * steady-state demand for a ~40-pool default with `5m` dropped) — right for a
+ * Gecko/DexPaprika-only world, where the ceiling worth respecting is
+ * `BUDGETS` (`adapters/ohlcvTransport.ts`), not a target to hit.
+ *
+ * §11 changed the input to that calculation: most of these series now try
+ * Sintral first (`query/poolOhlcv.ts`'s `refresh()`), gated only by
+ * `withBinanceLimit`'s 6-concurrent in-process semaphore, not a per-minute
+ * budget — measured 36 requests in 3s with no throttling. 5/cycle was
+ * conservative for the old Gecko-bound world; it is needlessly slow now that
+ * the dominant path for these series has that much more headroom.
+ *
+ * §12 (2026-09-22, measured live): 5/cycle rotating ~40 same-instant 15m
+ * candidates took 15-19 minutes to cycle back to any one of them — readers
+ * saw `stale_input` for most of that window even though the data existed,
+ * because a full rotation is far slower than the bar recurs. Raised to 40 so
+ * a same-instant 15m close can clear in about one cycle when Sintral is
+ * healthy. A Sintral outage falling everything back to Gecko/DexPaprika at
+ * once is not a new risk this creates — `budget_exhausted` is a
+ * `SELF_THROTTLE_REASONS` case (flat retry, no backoff escalation, see
+ * `fail` below), so a burst against that budget degrades to roughly the old
+ * §10 pace rather than failing hard; it is the same ceiling as before, not a
+ * higher one.
  */
-const DUE_PER_CYCLE = 5;
+const DUE_PER_CYCLE = 40;
 /**
- * Handoff §10 (2026-09-22, measured live after the §9 fix): admission and
- * in-flight capacity stopped being the bottleneck, but 36 pools' worth of
- * `5m` + `15m` (+ `1h` on the hour) all becoming due on the same wall-clock
- * boundary now exceeds the transport budget itself — real `rate_limited`
- * (429) responses from GeckoTerminal were observed, not just our own
- * self-imposed `budget_exhausted`. The execution plane never reads `5m` for
- * these series, so it is pure wasted demand on an already-saturated budget.
- * Lower number sorts first: `5m` is strictly deprioritized behind `1h`/`15m`
- * (tied with each other, unchanged from before) rather than removed outright,
- * so it still gets produced whenever there is spare capacity, but never at
- * the expense of the interval the score actually consumes. This does not
- * reorder `1h` ahead of `15m` — that specific top-of-hour collision is a
- * separate, still-open question (see the caveat on `DUE_PER_CYCLE`'s history
- * in the handoff, §9).
+ * Handoff §12 (2026-09-22): `15m` gets *strict* priority over `1h` now, not a
+ * tie. Tied (§9/§10), the age-fairness sort below still let `1h` win most
+ * ties — refreshed a quarter as often, its `attemptedAt` is almost always
+ * older — which is exactly backwards: `1h`'s own ~92-minute tolerance can
+ * absorb a few cycles' delay for free, `15m`'s ~16.5-minute one cannot. This
+ * is the direct fix for "recompute 15m the way 1h already effectively is."
+ * `5m` stays last (§10): the execution plane never reads it.
  */
-const INTERVAL_PRIORITY: Record<FeatureInterval, number> = { "1h": 0, "15m": 0, "5m": 1 };
+const INTERVAL_PRIORITY: Record<FeatureInterval, number> = { "15m": 0, "1h": 1, "5m": 2 };
 export interface FeatureSelection { pool: string; currency: "usd" | "token"; tokenAddress?: string;
   /** indicatorRevision 2: the base token is a tokenized US equity, so the series carries session-anchored metrics. */
   usEquity?: boolean }
@@ -263,9 +270,19 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
     }
     updated++;
     const unavailable = Object.values(snapshot.metrics).filter(m => !m.available);
-    Object.assign(attempt, {state: unavailable.length ? "partial" : "ready", reason: unavailable[0]?.reason ?? "ready", sources,
+    const reason = unavailable[0]?.reason ?? "ready";
+    // Handoff §12: a too_few_real_bars pool (a genuinely thin/dead Sintral
+    // series, §11) had refreshAfter computed from a stale closeTime, so the
+    // 60s floor below was the only thing setting its next attempt -- it was
+    // retried every single minute for an outcome unlikely to change soon,
+    // spending an admission slot every cycle that the ~40 other, live series
+    // needed more. A few more real trades won't show up within a minute;
+    // give it room without going as far as exponential backoff (this is not
+    // a failure, `updated++`/`consecutiveFailures: 0` above still apply).
+    const floorMs = reason === "too_few_real_bars" ? 300_000 : 60_000;
+    Object.assign(attempt, {state: unavailable.length ? "partial" : "ready", reason, sources,
       completedAt: now(), lastSuccessAt: now(), consecutiveFailures: 0,
-      nextAttempt: Math.max(now() + 60_000, snapshot.refreshAfter)});
+      nextAttempt: Math.max(now() + floorMs, snapshot.refreshAfter)});
     } catch { fail(signal.aborted ? "refresh_interrupted" : "refresh_error"); }
   }));
   for (const outcome of outcomes) if (outcome.status === "rejected") failed++;

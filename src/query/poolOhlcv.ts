@@ -84,14 +84,16 @@ export function poolOhlcvKey(pool: string, interval: KlineInterval, _limit?: num
  * 4, this was the dominant cause of `admission_limit` denials once the
  * trading-features watchlist grew past ~10 pools — most of a job cycle's own
  * admissions (`DUE_PER_CYCLE`, `jobs/tradingFeatures.ts`) were discarded here
- * before ever reaching the transport budget check. Raised to 22 — kept there
- * even though `jobs/tradingFeatures.ts`'s own `DUE_PER_CYCLE` came back down
- * to 5 in the §10 follow-up (that job now paces itself deliberately rather
- * than bursting), because this cap is shared by every caller of
- * `getPoolOhlcv`, not just that one job, and headroom here costs nothing on
- * its own — the transport budgets below remain the real ceiling regardless.
+ * before ever reaching the transport budget check. Kept 1:1 with that
+ * constant on principle (§10, §12): 22 while `DUE_PER_CYCLE` was 22, back to
+ * 40 alongside it in §12 once Sintral (§11) made a faster same-instant 15m
+ * rotation both necessary (measured 15-19 min of `stale_input` at 5/cycle)
+ * and affordable (Sintral's own real ceiling is a 6-concurrent semaphore, not
+ * a per-minute budget). Shared by every caller of `getPoolOhlcv`, not just
+ * that one job; headroom here costs nothing on its own — the transport
+ * budgets below remain the real ceiling for the Gecko/DexPaprika path.
  */
-const MAX_IN_FLIGHT_REFRESHES = 22;
+const MAX_IN_FLIGHT_REFRESHES = 40;
 class Runtime {
   readonly transport: OhlcvTransport;
   readonly inFlight = new Map<string, Promise<DataRecord<StoredPoolOhlcv> | null>>();
