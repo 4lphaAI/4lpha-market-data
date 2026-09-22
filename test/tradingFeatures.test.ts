@@ -233,7 +233,11 @@ describe("explicit trading target", () => {
       const oldChart = await getPoolOhlcv(store, { poolAddress: POOL, interval: "5m", limit: 10 });
       assert.equal(oldChart!.base.address, BASE); assert.equal(oldChart!.candles[0]!.close, 1);
       await getPoolOhlcv(store, { poolAddress: POOL, interval: "5m", limit: 20, tokenAddress: QUOTE });
-      assert.equal(calls, 2);
+      // 3, not 2: a currency=usd + tokenAddress request now tries Sintral
+      // first (2026-09-22 widening) before falling through to GeckoTerminal;
+      // this mock's response shape parses as zero Sintral candles, so it
+      // costs one extra call and changes nothing else about this test.
+      assert.equal(calls, 3);
       assert.notEqual(poolOhlcvKey(POOL, "5m"), poolOhlcvKey(POOL, "5m", 500, "usd", QUOTE));
       assert.equal(await getPoolOhlcv(store, { poolAddress: POOL, interval: "5m", limit: 20, tokenAddress: POOL }), null);
       assert.equal(await getPoolOhlcv(store, { poolAddress: POOL, interval: "5m", limit: 20, currency: "token", tokenAddress: "invalid" }), null);

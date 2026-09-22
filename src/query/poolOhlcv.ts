@@ -3,10 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { fetchGeckoPoolOhlcv, type GeckoTokenRef } from "../adapters/geckoTerminal.js";
 import { fetchDexCandles, fetchDexPair, type DexPair } from "../adapters/dexPaprika.js";
 import { fetchSintralKlines } from "../adapters/binanceWeb3.js";
+import { poolKey } from "../adapters/pancake.js";
 import { USD_ANCHOR } from "../jobs/majorsPrices.js";
 import { OhlcvTransport } from "../adapters/ohlcvTransport.js";
 import { isEvmAddress, sanitizeMessage } from "../adapters/http.js";
-import type { Candle } from "../core/models.js";
+import type { Candle, PoolStats } from "../core/models.js";
 import type { SnapshotStore } from "../core/store.js";
 import type { DataRecord, Staleness } from "../core/types.js";
 import type { KlineInterval } from "./klines.js";
@@ -60,12 +61,12 @@ export interface GetPoolOhlcvParams {
   onAttempt?: (attempt: OhlcvAttempt) => void;
   signal?: AbortSignal | undefined;
   /**
-   * Handoff §11 (2026-09-22): the base token is a tokenized US equity, so
-   * Sintral (Binance Web3's kline service) is tried first on `15m`/`1h`,
-   * ahead of Gecko/DexPaprika. A hint about which sources to try, not part
-   * of the series identity — omitted from the cache key on purpose, so the
-   * same (pool, interval, currency, token) series is shared regardless of
-   * how a given caller learned it was a US equity.
+   * Unused since 2026-09-22: Sintral is now tried first for every
+   * `currency: "usd"` + `token` request regardless of asset class (see
+   * `refresh`'s `sintralInterval`), so this no longer changes source order.
+   * Kept accepted (not removed) so `jobs/tradingFeatures.ts`'s call sites
+   * don't need an unrelated signature change; safe to delete once nothing
+   * sets it.
    */
   usEquity?: boolean;
 }
@@ -132,7 +133,7 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
     let flight = r.inFlight.get(key);
     if (flight) r.stats.coalesced++;
     else if (r.inFlight.size < MAX_IN_FLIGHT_REFRESHES) {
-      flight = refresh(r, pool, params.interval, currency, key, record, token, params.qualityPolicy, params.onAttempt, params.usEquity ?? false)
+      flight = refresh(r, pool, params.interval, currency, key, record, token, params.qualityPolicy, params.onAttempt)
         .finally(() => { r.inFlight.delete(key); });
       r.inFlight.set(key, flight);
     } else { r.stats.admissionDenied++; params.onAttempt?.({source: "cache", reason: "admission_limit"}); }
@@ -147,7 +148,7 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
 
 async function refresh(r: Runtime, pool: string, interval: KlineInterval, currency: PoolPriceCurrency,
   key: string, cached: DataRecord<StoredPoolOhlcv> | null, token?: string, policy?: "trading-v2",
-  onAttempt?: (attempt: OhlcvAttempt) => void, usEquity = false): Promise<DataRecord<StoredPoolOhlcv> | null> {
+  onAttempt?: (attempt: OhlcvAttempt) => void): Promise<DataRecord<StoredPoolOhlcv> | null> {
   // Shared 60s retry floor, including empty responses/failures. A client cannot
   // cause an unbounded retry loop on a cold or stale cache entry.
   // Fixed stripes bound control-table growth under arbitrary public addresses.
@@ -162,19 +163,44 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
   const mapping = INTERVALS[interval];
   const end = Math.floor(Date.now() / 1000 / mapping.seconds) * mapping.seconds;
   const start = end - HISTORY * mapping.seconds;
-  // Handoff §11 (2026-09-22, operator ruling): Sintral goes first for a US
-  // equity on 15m/1h specifically (the only intervals it was measured on and
-  // mapped for), and only for an explicit usd token request -- Sintral has no
-  // on-chain pair to serve a token-ratio request against. Everything else
-  // keeps the existing order unchanged. GeckoTerminal/DexPaprika stay in the
-  // chain as the fallback either way.
-  const sintralInterval = usEquity && currency === "usd" && token
-    ? (interval === "15m" ? "15min" : interval === "1h" ? "1h" : null) : null;
+  // Widened 2026-09-22 (was: US-equity 15m/1h only, handoff §11): the
+  // `token` HTTP param is now public (any caller can ask `/pools/:addr/ohlcv
+  // ?token=`), and GeckoTerminal's plane-wide budget was already ~91% consumed
+  // by the trading-features job alone (BUDGETS.geckoterminal=10,
+  // ohlcvTransport.ts) before any UI chart competed for it -- live /status
+  // measured 28 budgetDenied + 17 rateLimited + 27 cooldownDenied on Gecko in
+  // one window, and 29 pool-ohlcv reads that came back `unavailable` because
+  // it was the only source in the chain for a usd+token request. Sintral has
+  // proven headroom (310 req/s live probe, no 429 anywhere) and, per the
+  // `/klines` reorder the same day, is the cleaner series besides -- so any
+  // usd+token request now tries it first, on every chart interval, not just
+  // 15m/1h. GeckoTerminal/DexPaprika stay in the chain as the fallback either
+  // way, so a token Sintral has never heard of (the overwhelming majority of
+  // this plane's tokens) fails there fast and falls through exactly as before.
+  const sintralInterval = currency === "usd" && token
+    ? (interval === "1m" ? "1min" : interval === "5m" ? "5min" : interval === "15m" ? "15min"
+      : interval === "1h" ? "1h" : null) : null;
   const sources = [
     ...(sintralInterval ? ["sintral" as const] : []),
     "geckoterminal" as const,
     ...(currency === "token" || sintralInterval ? ["dexpaprika" as const] : []),
   ];
+  // Sintral has no on-chain pair to check `token` against, unlike the Gecko
+  // branch's own "requested token is not in pool" guard below -- and that
+  // guard only fires once a `cached` record already exists to compare against.
+  // On a cold key, nothing has verified `token` is actually one of this
+  // pool's two legs. Best-effort, no extra network call: if this pool already
+  // has a `pool:<addr>` PancakeSwap snapshot (written by the pools lane/seed
+  // set, not this path), require `token` to match one of its two sides before
+  // ever trusting a Sintral answer for it. No snapshot yet -- proceed; this is
+  // a same-origin, `x-dp-token`-gated API, not open to the public internet.
+  if (sintralInterval && !cached) {
+    const stats = await r.store.get<PoolStats>(poolKey(pool));
+    if (stats && token !== stats.data.token0 && token !== stats.data.token1) {
+      onAttempt?.({source: "cache", reason: "token_not_in_pool"});
+      return cached;
+    }
+  }
   let best = cached;
   for (const source of sources) {
     try {
