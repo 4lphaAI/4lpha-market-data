@@ -205,6 +205,12 @@ describe("explicit trading target", () => {
     await store.put(FEATURE_WATCHLIST_KEY,[{pool:POOL,currency:"token",tokenAddress:QUOTE}],{source:"test",freshForMs:60000,deadAfterMs:60000});
     assert.equal((await featureSelection(store)).pools[0]!.tokenAddress,QUOTE);
   });
+  it("handoff §10 follow-up: default selection drops 5m, an explicit watchlist keeps it", async () => {
+    const marketplace = new MemoryStore();
+    assert.deepEqual((await featureSelection(marketplace)).intervals, ["15m", "1h"]);
+    const operator = new MemoryStore(); await configure(operator);
+    assert.deepEqual((await featureSelection(operator)).intervals, ["5m", "15m", "1h"]);
+  });
   it("requests USD target without reciprocating USD or contaminating chart cache", async () => {
     const fetch = globalThis.fetch;
     const store = new MemoryStore();
@@ -242,12 +248,12 @@ describe("bounded feature producer and store-only delivery", () => {
   });
   it("caps each pass, fairly advances attempts, and isolates missing pools", async () => {
     let time = NOW; const store = new MemoryStore(() => time);
-    // 15 pools x 3 intervals = 45 candidates against a 22/cycle cap
-    // (DUE_PER_CYCLE, matched to the combined geckoterminal+dexpaprika
-    // transport budget): 2*22=44 < 45, so one candidate is still left
-    // uncovered after two admitted cycles, same shape as the original
-    // 3-pool/cap-4 case (2*4=8 < 9).
-    const extra = Array.from({ length: 12 }, (_, i) => `0x${(i + 4).toString(16).padStart(40, "0")}`);
+    // 4 pools x 3 intervals = 12 candidates against a 5/cycle cap
+    // (DUE_PER_CYCLE, deliberately paced -- handoff §10 follow-up, not sized
+    // to burst through a transport budget): 2*5=10 < 12, so two candidates
+    // are still left uncovered after two admitted cycles, same shape as the
+    // original 3-pool/cap-4 case (2*4=8 < 9).
+    const extra = ["0x0000000000000000000000000000000000000004"];
     const pools = [POOL, BASE, QUOTE, ...extra]; await configure(store, pools);
     const calls: string[] = [];
     const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async (_store, p) => {
@@ -255,12 +261,12 @@ describe("bounded feature producer and store-only delivery", () => {
       return p.poolAddress === POOL ? null : { ...chart(), poolAddress: p.poolAddress, interval: p.interval };
     };
     const first = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
-    assert.equal(first.attempted, 22); assert.equal(calls.length, 22);
+    assert.equal(first.attempted, 5); assert.equal(calls.length, 5);
     assert.equal((await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load })).attempted, 0);
     time += 61_000;
     await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
-    assert.equal(new Set(calls).size, 44);
-    assert.equal(Object.keys((await store.get<Record<string, unknown>>(FEATURE_STATE_KEY))!.data).length, 45);
+    assert.equal(new Set(calls).size, 10);
+    assert.equal(Object.keys((await store.get<Record<string, unknown>>(FEATURE_STATE_KEY))!.data).length, 12);
   });
   it("does not write a success after cancellation or restamp stale history", async () => {
     const store = new MemoryStore(() => NOW); await configure(store);
@@ -352,17 +358,17 @@ describe("bounded feature producer and store-only delivery", () => {
     // The execution plane never reads 5m, so under contention it should lose
     // its admission slots to 1h/15m first rather than compete evenly by age.
     const store = new MemoryStore(() => NOW);
-    const pools = Array.from({ length: 8 }, (_, i) => `0x${(i + 20).toString(16).padStart(40, "0")}`);
-    await configure(store, pools); // 8 pools x 3 intervals = 24 candidates, cap 22
+    const pools = Array.from({ length: 2 }, (_, i) => `0x${(i + 20).toString(16).padStart(40, "0")}`);
+    await configure(store, pools); // 2 pools x 3 intervals = 6 candidates, cap 5
     const calls: string[] = [];
     const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async (_s, p) => {
       calls.push(p.interval); return { ...chart(), poolAddress: p.poolAddress, interval: p.interval };
     };
     const result = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW, load });
-    assert.equal(result.attempted, 22);
+    assert.equal(result.attempted, 5);
     const counts = { "1h": calls.filter(i => i === "1h").length, "15m": calls.filter(i => i === "15m").length, "5m": calls.filter(i => i === "5m").length };
-    assert.equal(counts["1h"], 8); assert.equal(counts["15m"], 8); // both fully admitted
-    assert.equal(counts["5m"], 6); // only the 6 leftover slots, not fairly split by age
+    assert.equal(counts["1h"], 2); assert.equal(counts["15m"], 2); // both fully admitted
+    assert.equal(counts["5m"], 1); // only the 1 leftover slot, not fairly split by age
   });
   it("shares producer admission across replicas, persists replay evidence and expires by input age in Postgres", async () => {
     let time = NOW; const pg = new FakePg();

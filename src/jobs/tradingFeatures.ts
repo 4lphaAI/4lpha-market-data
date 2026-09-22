@@ -27,20 +27,35 @@ export { FEATURE_STATE_KEY } from "../query/tradingFeatures.js";
 const MAX_POOLS = 40;
 const RETENTION = 30 * 86_400_000;
 /**
- * Admissions per 60s cycle. Handoff §9 (2026-09-22, measured live at 36
- * pools): raising this alone from 4 wasn't enough — `poolOhlcv.ts`'s
- * process-local `MAX_IN_FLIGHT_REFRESHES` cap (unrelated to this constant,
- * was 4) was silently discarding most of what this admits before it ever
- * reached the transport budget, showing up as `admission_limit`. With that
- * fixed, the real ceiling is the transport: every default selection entry is
- * `currency: "token"`, which tries `geckoterminal` then falls back to
- * `dexpaprika` (`query/poolOhlcv.ts`'s `refresh`), so combined capacity per
- * ~60s budget window is `BUDGETS.geckoterminal (10) + BUDGETS.dexpaprika (12)
- * = 22` — this stays 1:1 with that combined number, not padded, for the same
- * reason as before: admitting past what the transport can serve just returns
- * `budget_exhausted` instead of running faster.
+ * Handoff §10 follow-up (2026-09-22, operator directive after live 429s):
+ * the marketplace default drops `5m` — the execution plane never reads it,
+ * so at 36+ pools it was pure wasted demand competing for the same transport
+ * budget as the interval that actually feeds the score.
  */
-const DUE_PER_CYCLE = 22;
+const DEFAULT_SELECTION_INTERVALS: FeatureInterval[] = ["15m", "1h"];
+/**
+ * Admissions per 60s cycle. §8/§9 (2026-09-22) sized this to *burst* enough
+ * series through within the read side's freshness grace, on a mistaken
+ * reading of that grace as ~90 seconds. It is not: `readTradingFeatures`'s
+ * staleness cutoff is `closeTime + step + PUBLICATION_LAG_MS +
+ * SCHEDULING_GRACE_MS` (`query/tradingFeatures.ts`) — a full *extra* bar
+ * period on top of the 90s, e.g. ~16.5 minutes of slack for a 15m series, not
+ * 90 seconds. Chasing that wrong, tight deadline is what pushed admission up
+ * to 22/cycle and tripped real `geckoterminal` 429s at scale (handoff §10).
+ *
+ * Corrected: with `5m` dropped from the default (above), steady-state demand
+ * for the ~40-pool marketplace default is `40/15 (15m) + 40/60 (1h) ≈
+ * 3.3/minute` — nowhere near a burst. This stays low and deliberately paced
+ * (operator directive, 2026-09-22: "~2-3 req/phút, spread across the 15
+ * minutes, not a burst at the close") rather than raised to match the
+ * transport budget ceiling (`BUDGETS`, `adapters/ohlcvTransport.ts`) the way
+ * it was before: the ceiling is a safety bound on the transport, not a
+ * target for this job to hit. At this admission rate the existing
+ * age-fairness sort (`due` below) naturally rotates a same-instant 36-pool
+ * close across roughly a dozen cycles — comfortably inside the ~16.5-minute
+ * tolerance, never bursting the provider.
+ */
+const DUE_PER_CYCLE = 5;
 /**
  * Handoff §10 (2026-09-22, measured live after the §9 fix): admission and
  * in-flight capacity stopped being the bottleneck, but 36 pools' worth of
@@ -159,7 +174,14 @@ export async function featureSelection(store: SnapshotStore): Promise<FeatureInd
     if (tokenAddress === null) throw new Error("invalid explicit feature token");
     pools.push({ pool, currency, ...(tokenAddress ? { tokenAddress } : {}) });
   }
-  return { pools, intervals: Object.keys(FEATURE_INTERVALS) as FeatureInterval[], maxPools: MAX_POOLS,
+  // Handoff §10 follow-up (2026-09-22, operator directive): the execution
+  // plane never reads 5m for the marketplace default set, so producing it
+  // there is pure wasted demand on a budget that is already tight at 36+
+  // pools. Scoped to the default only — an explicit operator watchlist still
+  // gets all three intervals, since it may exist for a reason other than the
+  // TradFi score.
+  const intervals = (configured ? Object.keys(FEATURE_INTERVALS) : DEFAULT_SELECTION_INTERVALS) as FeatureInterval[];
+  return { pools, intervals, maxPools: MAX_POOLS,
     selection: configured ? "operator_watchlist" : "marketplace_reference_pools" };
 }
 

@@ -73,10 +73,12 @@ export function poolOhlcvKey(pool: string, interval: KlineInterval, _limit?: num
  * 4, this was the dominant cause of `admission_limit` denials once the
  * trading-features watchlist grew past ~10 pools — most of a job cycle's own
  * admissions (`DUE_PER_CYCLE`, `jobs/tradingFeatures.ts`) were discarded here
- * before ever reaching the transport budget check. Raised to 22 to match that
- * job's per-cycle admission count (itself sized to the combined
- * geckoterminal+dexpaprika budget), so this cap stops being the binding
- * constraint; the transport budgets remain the real ceiling.
+ * before ever reaching the transport budget check. Raised to 22 — kept there
+ * even though `jobs/tradingFeatures.ts`'s own `DUE_PER_CYCLE` came back down
+ * to 5 in the §10 follow-up (that job now paces itself deliberately rather
+ * than bursting), because this cap is shared by every caller of
+ * `getPoolOhlcv`, not just that one job, and headroom here costs nothing on
+ * its own — the transport budgets below remain the real ceiling regardless.
  */
 const MAX_IN_FLIGHT_REFRESHES = 22;
 class Runtime {
