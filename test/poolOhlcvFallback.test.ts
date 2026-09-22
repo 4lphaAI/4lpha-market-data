@@ -179,7 +179,7 @@ describe("OHLCV transport protection", () => {
     const clients = [new OhlcvTransport(a).fetch("geckoterminal", raw), new OhlcvTransport(b).fetch("geckoterminal", raw)];
     const results = await Promise.all(Array.from({ length: 20 }, (_, i) => clients[i % 2]!("https://unused"))
       .map((call) => call.then(() => true, () => false)));
-    assert.equal(calls, 8); assert.equal(results.filter(Boolean).length, 8);
+    assert.equal(calls, 10); assert.equal(results.filter(Boolean).length, 10);
   });
   it("persists Retry-After and rejects calls during cooldown without hitting upstream", async () => {
     let now = Date.now(); const store = new MemoryStore(() => now); let calls = 0;

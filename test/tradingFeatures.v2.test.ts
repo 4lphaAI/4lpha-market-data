@@ -9,6 +9,7 @@ import {calculateFeatures, FEATURE_VERSION_V2, FEATURE_INDEX_KEY_V2, featureKey,
 import {defaultFeatureSelection, runTradingFeatures, FEATURE_WATCHLIST_KEY} from "../src/jobs/tradingFeatures.js";
 import {getPoolOhlcv, normalizeChart, poolOhlcvKey, type OhlcvAttempt, type PoolOhlcvResult} from "../src/query/poolOhlcv.js";
 import {fetchDexCandles} from "../src/adapters/dexPaprika.js";
+import {RWA_UNIVERSE_KEY, RWA_VENUES_KEY} from "../src/universe.js";
 
 const POOL="0x0000000000000000000000000000000000000010";
 const BASE="0x0000000000000000000000000000000000000001", QUOTE="0x0000000000000000000000000000000000000002";
@@ -111,15 +112,32 @@ describe("versioned feature warm-up",()=>{
     data.candles.splice(-3,1);
     assert.equal(calculateFeatures(data,Date.now(),FEATURE_VERSION_V2).metrics.roc10Pct.reason,"gap");
   });
-  it("defaults to explicit major and liquid equity references, not all LP seeds",()=>{
-    const selection=defaultFeatureSelection();assert.equal(selection.length,8);
-    assert.equal(new Set(selection.map(p=>p.pool)).size,8);
+  it("defaults to explicit major and liquid equity references when no venue data is swept",async()=>{
+    const selection=await defaultFeatureSelection(new MemoryStore());assert.equal(selection.length,6);
+    assert.equal(new Set(selection.map(p=>p.pool)).size,6);
     // indicatorRevision 2: the equity-regime legs ride the same watch set.
     assert.ok(selection.some(p=>p.pool==="0x7aa6d92fc369a8c1edc631a3aac44efb0808ddbf"&&p.tokenAddress==="0x7138b48df7d98d7e3cc221bfe7192d0a178182d8"));
     assert.ok(selection.some(p=>p.pool==="0xe531fcb1f5a195de7608b9f4f9518544c2cdb693"&&p.tokenAddress==="0x205812cdbed920aff76c6580abd681a46d11efc7"));
     assert.ok(selection.every(p=>p.currency==="token"&&p.tokenAddress));
     assert.ok(selection.some(p=>p.pool==="0x172fcd41e0913e95784454622d1c3724f546f849"));
     assert.ok(!selection.some(p=>p.pool==="0x613ebcfcf41749571d659a0bf3e2c0032fd4859e"));
+  });
+  it("handoff §8: covers every RWA-allowlisted pool at the $10k depth floor by default, deepest venue first",async()=>{
+    const store=new MemoryStore();
+    const addr=(hex:string)=>`0x${hex.padStart(40,"0")}`;
+    const rwaToken=addr("abc0d"), quote=addr("dead0");
+    const deepPool=addr("abc01"), shallowerPool=addr("abc02"), belowFloorPool=addr("abc03");
+    await store.put(RWA_UNIVERSE_KEY,{rows:[{address:rwaToken,symbol:"TESTB",platform:"bstock",underlyingTicker:"TEST"}]},{source:"test",freshForMs:60_000,deadAfterMs:60_000});
+    await store.put(RWA_VENUES_KEY,{byAddress:{[rwaToken]:[
+      {pool:belowFloorPool,dex:"pancakeswap",version:"v3",feeTier:100,quote:{address:quote,symbol:"USDT"},liquidityUsd:5_000},
+      {pool:shallowerPool,dex:"pancakeswap",version:"v3",feeTier:100,quote:{address:quote,symbol:"USDT"},liquidityUsd:20_000},
+      {pool:deepPool,dex:"pancakeswap",version:"v3",feeTier:100,quote:{address:quote,symbol:"USDT"},liquidityUsd:50_000},
+    ]}},{source:"test",freshForMs:60_000,deadAfterMs:60_000});
+    const selection=await defaultFeatureSelection(store);
+    const entries=selection.filter(p=>p.tokenAddress===rwaToken);
+    assert.equal(entries.length,1); // one series per token: the deepest qualifying venue, not one per venue
+    assert.equal(entries[0]?.pool,deepPool);
+    assert.ok(!selection.some(p=>p.pool===shallowerPool||p.pool===belowFloorPool));
   });
 });
 

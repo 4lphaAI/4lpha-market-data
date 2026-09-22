@@ -7,13 +7,35 @@ import { PRICE_POOLS } from "./majorsPrices.js";
 import { getPoolOhlcv, type OhlcvAttempt } from "../query/poolOhlcv.js";
 import { calculateFeatures, FEATURE_INDEX_KEY, FEATURE_INDEX_KEY_V2, FEATURE_VERSION, FEATURE_VERSION_V2, FEATURE_STATE_KEY, FEATURE_INTERVALS, featureKey, poolFeatureInput,
   type FeatureAttempt, type FeatureInterval, type FeatureSnapshot, type ReferenceSession } from "../query/tradingFeatures.js";
-import { RWA_UNIVERSE_KEY } from "../universe.js";
+import { RWA_UNIVERSE_KEY, buildUniverse } from "../universe.js";
+import { SPREAD_MIN_LIQUIDITY_USD } from "./spreadHistory.js";
 import { sanitizeMessage } from "../adapters/http.js";
 
 export const FEATURE_WATCHLIST_KEY = "trading:features:v1:watchlist";
 export { FEATURE_STATE_KEY } from "../query/tradingFeatures.js";
-const MAX_POOLS = 10;
+/**
+ * Handoff §8 (2026-09-22): the operator watchlist stayed the override, but the
+ * default must cover the whole TradFi pin so a score never starves on missing
+ * evidence. Today that is the 25 static bStocks minus SPYB/QQQB (reserved
+ * below) plus Ondo's rows plus the 4 legacy major pools plus the 2 equity
+ * legs — comfortably under this ceiling, which is sized with headroom rather
+ * than pinned to the exact current count so normal Ondo/venue growth doesn't
+ * start throwing. `defaultRwaFeatureSelection` still drops the shallowest
+ * (lowest-liquidity) rows first if the union ever does exceed it, rather than
+ * throw and starve every series for one new admission.
+ */
+const MAX_POOLS = 40;
 const RETENTION = 30 * 86_400_000;
+/**
+ * Admissions per 60s cycle, sized to the `geckoterminal` transport budget
+ * (`adapters/ohlcvTransport.ts`, 10/min): a candidate needing only Gecko costs
+ * one call, so this stays 1:1 with that budget rather than the old 2x
+ * headroom (4 series -> <=8 HTTP against an 8/min budget), which was already
+ * exact. Raising this past the transport budget does not admit more series
+ * faster — the excess gets `budgetDenied`, is recorded as a failure, and
+ * lands on exponential backoff, which is worse than leaving it queued.
+ */
+const DUE_PER_CYCLE = 10;
 export interface FeatureSelection { pool: string; currency: "usd" | "token"; tokenAddress?: string;
   /** indicatorRevision 2: the base token is a tokenized US equity, so the series carries session-anchored metrics. */
   usEquity?: boolean }
@@ -21,18 +43,54 @@ export interface FeatureIndex {
   pools: FeatureSelection[]; intervals: FeatureInterval[]; maxPools: number;
   selection: "operator_watchlist" | "marketplace_reference_pools";
 }
-export function defaultFeatureSelection(): FeatureSelection[] {
-  return [
-    ...PRICE_POOLS.filter(p => p.base !== "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d")
-      .map(p => ({pool: p.pool, currency: "token" as const, tokenAddress: p.base})),
-    {pool: "0x8fb4243b553ac29ba088acf00b9b7da24bd6690c", currency: "token", tokenAddress: "0x02fca66c1d1afb4e2a7884261eb00f63598a7436"},
-    {pool: "0xb0f5e5400e8f0f7c242f2b7740c004f020579c41", currency: "token", tokenAddress: "0x5b1910eaad6450e50f816082aa078c41f10c292f"},
-    // SPYB/USDT 0.01% and QQQB/USDT 0.01% (PancakeSwap V3): the equity-regime
-    // legs. Deepest venue of each on 2026-09-21 ($374k / $1.68M), both past
-    // the $10k tier-A floor and not special-cased beyond it.
+/**
+ * Every RWA token (bStock or Ondo) the allowlist admits with a venue at or
+ * above the $10k depth floor (`SPREAD_MIN_LIQUIDITY_USD` — the same floor
+ * `spread-history` already watches at, TRADFI-DATA-RESULT-2026-09-17.md) —
+ * deepest venue wins when a token clears the floor on more than one pool.
+ * Reads `buildUniverse`'s bstocks/ondo lanes rather than re-deriving
+ * admission, so a new listing is covered the next time this runs with no
+ * hand-enumeration. Sorted deepest-first so a caller trimming to a cap keeps
+ * the tokens best supported by liquidity.
+ */
+async function defaultRwaFeatureSelection(store: SnapshotStore): Promise<(FeatureSelection & { liquidityUsd: number })[]> {
+  const universe = await buildUniverse(store);
+  const out: (FeatureSelection & { liquidityUsd: number })[] = [];
+  for (const entry of universe.entries) {
+    if (entry.lane !== "bstocks" && entry.lane !== "ondo") continue;
+    let deepest: { pool: string; liquidityUsd: number } | null = null;
+    for (const venue of entry.venues ?? []) {
+      if (venue.liquidityUsd === null || venue.liquidityUsd < SPREAD_MIN_LIQUIDITY_USD) continue;
+      if (deepest === null || venue.liquidityUsd > deepest.liquidityUsd) deepest = { pool: venue.pool, liquidityUsd: venue.liquidityUsd };
+    }
+    if (deepest === null) continue;
+    out.push({ pool: deepest.pool, currency: "token", tokenAddress: entry.address, liquidityUsd: deepest.liquidityUsd });
+  }
+  out.sort((a, b) => b.liquidityUsd - a.liquidityUsd);
+  return out;
+}
+
+export async function defaultFeatureSelection(store: SnapshotStore): Promise<FeatureSelection[]> {
+  const majors = PRICE_POOLS.filter(p => p.base !== "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d")
+    .map(p => ({pool: p.pool, currency: "token" as const, tokenAddress: p.base}));
+  // SPYB/USDT 0.01% and QQQB/USDT 0.01% (PancakeSwap V3): the equity-regime
+  // legs. Deepest venue of each on 2026-09-21 ($374k / $1.68M), both past the
+  // $10k tier-A floor. Pinned explicitly rather than left to the sweep below
+  // so `/trading/regime/us-equity` keeps a known-good pool even on a cycle
+  // where the venue sweep hasn't run or disagrees on which pool is deepest.
+  const equityLegs: FeatureSelection[] = [
     {pool: EQUITY_REGIME_POOLS.spy, currency: "token", tokenAddress: EQUITY_REGIME_TOKENS.spy},
     {pool: EQUITY_REGIME_POOLS.qqq, currency: "token", tokenAddress: EQUITY_REGIME_TOKENS.qqq},
   ];
+  const reserved = new Set([...majors.map(p => p.tokenAddress), ...equityLegs.map(p => p.tokenAddress)]);
+  const rwa = (await defaultRwaFeatureSelection(store)).filter(p => !reserved.has(p.tokenAddress));
+
+  const budget = MAX_POOLS - majors.length - equityLegs.length;
+  const admitted = rwa.length <= budget ? rwa : rwa.slice(0, Math.max(0, budget));
+  if (admitted.length < rwa.length) {
+    console.warn(`[trading-features] default RWA coverage trimmed ${rwa.length - admitted.length} of ${rwa.length} admitted pools to fit MAX_POOLS=${MAX_POOLS}; raise the ceiling rather than let this persist`);
+  }
+  return [...majors, ...admitted.map(({liquidityUsd: _liquidityUsd, ...p}) => p), ...equityLegs];
 }
 export const EQUITY_REGIME_TOKENS = { spy: "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8", qqq: "0x205812cdbed920aff76c6580abd681a46d11efc7" } as const;
 export const EQUITY_REGIME_POOLS = { spy: "0x7aa6d92fc369a8c1edc631a3aac44efb0808ddbf", qqq: "0xe531fcb1f5a195de7608b9f4f9518544c2cdb693" } as const;
@@ -66,8 +124,8 @@ export async function loadReferenceSessions(store: SnapshotStore): Promise<Map<s
 /** The operator store key is the only override; HTTP clients cannot mutate it. */
 export async function featureSelection(store: SnapshotStore): Promise<FeatureIndex> {
   const configured = await store.get<unknown>(FEATURE_WATCHLIST_KEY);
-  const raw = configured ? configured.data : defaultFeatureSelection();
-  if (!Array.isArray(raw) || raw.length > MAX_POOLS) throw new Error("invalid trading feature watchlist (maximum 10 pools)");
+  const raw = configured ? configured.data : await defaultFeatureSelection(store);
+  if (!Array.isArray(raw) || raw.length > MAX_POOLS) throw new Error(`invalid trading feature watchlist (maximum ${MAX_POOLS} pools)`);
   const pools: FeatureSelection[] = [];
   for (const value of raw) {
     if (typeof value !== "object" || value === null) throw new Error("invalid trading feature watchlist entry");
@@ -107,7 +165,7 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
       state: "queued", reason: saved ? "recompute_version" : "not_attempted"};
   }
   const due = candidates.filter((c) => state[`${c.key}:${c.currency}`]!.nextAttempt <= now())
-    .sort((a, b) => state[`${a.key}:${a.currency}`]!.attemptedAt - state[`${b.key}:${b.currency}`]!.attemptedAt || a.key.localeCompare(b.key)).slice(0, 4);
+    .sort((a, b) => state[`${a.key}:${a.currency}`]!.attemptedAt - state[`${b.key}:${b.currency}`]!.attemptedAt || a.key.localeCompare(b.key)).slice(0, DUE_PER_CYCLE);
   // Persist admission before IO: an interrupted pass cannot starve other series.
   for (const c of due) state[`${c.key}:${c.currency}`] = {...state[`${c.key}:${c.currency}`]!, attemptedAt: now(), nextAttempt: now() + 60_000, state: "refreshing", reason: "refreshing", sources: []};
   await store.put(FEATURE_STATE_KEY, state, { source: "trading-features", freshForMs: 60_000, deadAfterMs: RETENTION });

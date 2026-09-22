@@ -4,7 +4,16 @@ import type { SnapshotStore } from "../core/store.js";
 import { AdapterError, type FetchFn } from "./http.js";
 
 export type OhlcvProvider = "geckoterminal" | "dexpaprika";
-const BUDGETS: Record<OhlcvProvider, number> = { geckoterminal: 8, dexpaprika: 12 };
+/**
+ * `geckoterminal` raised 8 -> 10 alongside the trading-features watchlist
+ * growing to `MAX_POOLS` (`jobs/tradingFeatures.ts`): steady-state warm demand
+ * at the new pool count is `~pools*(1/5+1/15+1/60) ~= 9.07` Gecko requests/min
+ * (TRADING-FEATURES-SPEC.md's own formula), so 8 would already be short before
+ * counting retries or the RTH-close burst. This budget is shared plane-wide
+ * (also `/pools/:address/ohlcv`), not exclusive to that job — raise it again
+ * only with the same kind of steady-state arithmetic, not a guess.
+ */
+const BUDGETS: Record<OhlcvProvider, number> = { geckoterminal: 10, dexpaprika: 12 };
 export interface OhlcvCounters {
   requests: number;
   failures: number;

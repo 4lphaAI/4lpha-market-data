@@ -235,26 +235,32 @@ describe("explicit trading target", () => {
 describe("bounded feature producer and store-only delivery", () => {
   it("rejects invalid and oversized configuration before upstream work", async () => {
     const store = new MemoryStore();
-    await configure(store, Array(11).fill(POOL) as string[]);
-    await assert.rejects(featureSelection(store), /maximum 10/);
+    await configure(store, Array(41).fill(POOL) as string[]);
+    await assert.rejects(featureSelection(store), /maximum 40/);
     await configure(store, ["bad"]); await assert.rejects(featureSelection(store), /identity/);
     await configure(store, [POOL, POOL]); await assert.rejects(featureSelection(store), /identity/);
   });
   it("caps each pass, fairly advances attempts, and isolates missing pools", async () => {
     let time = NOW; const store = new MemoryStore(() => time);
-    const pools = [POOL, BASE, QUOTE]; await configure(store, pools);
+    // 7 pools x 3 intervals = 21 candidates against a 10/cycle cap (DUE_PER_CYCLE,
+    // matched to the geckoterminal transport budget): 2*10=20 < 21, so one
+    // candidate is still left uncovered after two admitted cycles, same shape
+    // as the original 3-pool/cap-4 case (2*4=8 < 9).
+    const extra = ["0x0000000000000000000000000000000000000004", "0x0000000000000000000000000000000000000005",
+      "0x0000000000000000000000000000000000000006", "0x0000000000000000000000000000000000000007"];
+    const pools = [POOL, BASE, QUOTE, ...extra]; await configure(store, pools);
     const calls: string[] = [];
     const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async (_store, p) => {
       calls.push(`${p.poolAddress}:${p.interval}`);
       return p.poolAddress === POOL ? null : { ...chart(), poolAddress: p.poolAddress, interval: p.interval };
     };
     const first = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
-    assert.equal(first.attempted, 4); assert.equal(calls.length, 4);
+    assert.equal(first.attempted, 10); assert.equal(calls.length, 10);
     assert.equal((await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load })).attempted, 0);
     time += 61_000;
     await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
-    assert.equal(new Set(calls).size, 8);
-    assert.equal(Object.keys((await store.get<Record<string, unknown>>(FEATURE_STATE_KEY))!.data).length, 9);
+    assert.equal(new Set(calls).size, 20);
+    assert.equal(Object.keys((await store.get<Record<string, unknown>>(FEATURE_STATE_KEY))!.data).length, 21);
   });
   it("does not write a success after cancellation or restamp stale history", async () => {
     const store = new MemoryStore(() => NOW); await configure(store);
