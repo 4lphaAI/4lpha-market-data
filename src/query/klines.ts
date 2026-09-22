@@ -2,10 +2,21 @@
  * Read-through kline query layer.
  *
  * A read is served from the store when it is fresh. On a miss it walks the
- * source chain OnchainOS -> Sintral (Binance Web3), writes the first
+ * source chain Sintral (Binance Web3) -> OnchainOS, writes the first
  * success back, and returns it. If every source fails, a previously stored but
  * stale record is returned rather than nothing — a late chart beats no chart —
  * and the caller can see that from `staleness`.
+ *
+ * Sintral first, not OnchainOS: measured 2026-09-22 on live NVDAB candles,
+ * OnchainOS's own high/low construction averages an 0.88 wick ratio (88% of
+ * each bar is wick, 12% body) against Sintral's 0.18 and GeckoTerminal's 0.20
+ * for the same window — a ~5x noisier bar shape, not a volatility difference
+ * (all three would be equally noisy if the underlying asset actually moved
+ * that much). Sintral only knows tokens Binance has listed (majors, Alpha
+ * list, bStocks/Ondo); for anything else it fails fast/empty and the chain
+ * falls through to OnchainOS exactly as before, so this reorder costs those
+ * tokens one extra round trip and changes nothing else about the chain's
+ * fail-through behavior.
  */
 
 import type { Candle } from "../core/models.js";
@@ -128,21 +139,21 @@ export async function getKlines(
 
   const sources: Source[] = [
     {
-      name: "onchainos",
-      fetch: () =>
-        fetchOnchainosKlines({
-          address,
-          bar: mapping.onchainos,
-          limit,
-          signal: params.signal,
-        }),
-    },
-    {
       name: "sintral",
       fetch: () =>
         fetchSintralKlines({
           address,
           interval: mapping.sintral,
+          limit,
+          signal: params.signal,
+        }),
+    },
+    {
+      name: "onchainos",
+      fetch: () =>
+        fetchOnchainosKlines({
+          address,
+          bar: mapping.onchainos,
           limit,
           signal: params.signal,
         }),

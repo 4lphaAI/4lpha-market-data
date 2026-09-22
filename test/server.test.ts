@@ -102,3 +102,43 @@ describe("unknown routes", () => {
     await store.close();
   });
 });
+
+describe("GET /pools/:address/ohlcv", () => {
+  const POOL = "0x172fcd41e0913e95784454622d1c3724f546f849";
+
+  it("rejects a malformed token address before touching the store", async () => {
+    const store = new MemoryStore();
+    const app = createServer({ scheduler: createScheduler(store), store });
+
+    const res = await app.request(`/pools/${POOL}/ohlcv?token=not-an-address`);
+
+    assert.equal(res.status, 400);
+    assert.deepEqual(await res.json(), {
+      error: { code: "invalid_token", message: "token must be an address" },
+    });
+
+    await store.close();
+  });
+
+  it("accepts a well-formed token address and reaches the query layer (offline upstream, no cache)", async () => {
+    const store = new MemoryStore();
+    const app = createServer({ scheduler: createScheduler(store), store });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("offline", { status: 503 })) as typeof globalThis.fetch;
+
+    try {
+      // Every upstream fails and nothing is cached: a well-formed `token`
+      // still reaches `getPoolOhlcv` and answers `not_found`, not a 500 —
+      // proving the param is read/validated without ever being required.
+      const res = await app.request(`/pools/${POOL}/ohlcv?token=0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c`);
+
+      assert.equal(res.status, 404);
+      assert.deepEqual(await res.json(), {
+        error: { code: "not_found", message: "no pool candles available" },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await store.close();
+    }
+  });
+});

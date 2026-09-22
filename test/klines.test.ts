@@ -126,35 +126,35 @@ describe("getKlines", () => {
     await store.close();
   });
 
-  it("prefers OnchainOS and writes the result back to the store", async () => {
+  it("prefers Sintral and writes the result back to the store", async () => {
     const store = new MemoryStore();
     const observed = installFetch({ onchainos: "ok", sintral: "ok" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "15m", limit: 5 });
 
     assert.ok(result !== null);
-    assert.equal(result.source, "onchainos");
-    assert.equal(observed.onchainosBar, "15m");
-    assert.deepEqual(observed.hosts, ["web3.okx.com"]);
+    assert.equal(result.source, "sintral");
+    assert.equal(observed.sintralInterval, "15min");
+    assert.deepEqual(observed.hosts, ["dquery.sintral.io"]);
 
     const stored = await store.get<Candle[]>(klinesKey(ADDRESS, "15m", 5));
     assert.ok(stored !== null);
-    assert.equal(stored.source, "onchainos");
+    assert.equal(stored.source, "sintral");
     assert.equal(stored.data.length, 1);
     await store.close();
   });
 
-  it("falls through to Sintral when OnchainOS fails", async () => {
+  it("falls through to OnchainOS when Sintral fails", async () => {
     const store = new MemoryStore();
-    const observed = installFetch({ onchainos: "fail", sintral: "ok" });
+    const observed = installFetch({ sintral: "fail", onchainos: "ok" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "1h", limit: 5 });
 
     assert.ok(result !== null);
-    assert.equal(result.source, "sintral");
-    assert.equal(observed.onchainosBar, "1H");
+    assert.equal(result.source, "onchainos");
     assert.equal(observed.sintralInterval, "1h");
-    assert.deepEqual(observed.hosts, ["web3.okx.com", "dquery.sintral.io"]);
+    assert.equal(observed.onchainosBar, "1H");
+    assert.deepEqual(observed.hosts, ["dquery.sintral.io", "web3.okx.com"]);
     await store.close();
   });
 
@@ -165,17 +165,17 @@ describe("getKlines", () => {
     const result = await getKlines(store, { address: ADDRESS, interval: "1d", limit: 5 });
 
     assert.equal(result, null);
-    assert.deepEqual(observed.hosts, ["web3.okx.com", "dquery.sintral.io"]);
+    assert.deepEqual(observed.hosts, ["dquery.sintral.io", "web3.okx.com"]);
     await store.close();
   });
 
   it("treats an empty candle list as no data and keeps walking the chain", async () => {
     const store = new MemoryStore();
-    const observed = installFetch({ onchainos: "empty", sintral: "ok" });
+    const observed = installFetch({ sintral: "empty", onchainos: "ok" });
 
     const result = await getKlines(store, { address: ADDRESS, interval: "5m", limit: 5 });
 
-    assert.equal(result?.source, "sintral");
+    assert.equal(result?.source, "onchainos");
     assert.equal(observed.hosts.length, 2);
     await store.close();
   });

@@ -1049,7 +1049,15 @@ export function createServer(deps: ServerDeps): Hono {
     if (currency !== "usd" && currency !== "token") {
       return c.json({ error: { code: "invalid_currency", message: "currency must be usd or token" } }, 400);
     }
-    const result = await getPoolOhlcv(deps.store, { poolAddress, interval, limit, currency });
+    const rawToken = c.req.query("token");
+    const tokenAddress = rawToken === undefined ? undefined : rawToken.toLowerCase();
+    if (tokenAddress !== undefined && !isEvmAddress(tokenAddress)) {
+      return c.json({ error: { code: "invalid_token", message: "token must be an address" } }, 400);
+    }
+    const result = await getPoolOhlcv(deps.store, {
+      poolAddress, interval, limit, currency,
+      ...(tokenAddress !== undefined ? { tokenAddress } : {}),
+    });
     if (result === null) {
       return c.json({ error: { code: "not_found", message: "no pool candles available" } }, 404);
     }
