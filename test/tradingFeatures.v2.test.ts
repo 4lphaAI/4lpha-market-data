@@ -233,7 +233,10 @@ describe("producer diagnostics and v2 API",()=>{
     assert.deepEqual(calculateFeatures(snapshot.input,snapshot.calculatedAt,snapshot.version),snapshot);
     const app=createServer({store,scheduler:createScheduler(store)});
     const response=await app.request(`/trading/features/v2/${POOL}/input?snapshotId=${snapshot.snapshotId}`);assert.equal(response.status,200);
-    const index=await (await app.request("/trading/features/v2/pools")).json() as {data:{series:unknown[]}};assert.equal(index.data.series.length,3);
+    const index=await (await app.request("/trading/features/v2/pools")).json() as {data:{series:unknown[]}, meta:{ohlcvTransport:{providers:{geckoterminal:unknown}}}};
+    assert.equal(index.data.series.length,3);
+    // Handoff §10: tells a live check "budget exhausted" from "just paced" without a separate /status call.
+    assert.ok(index.meta.ohlcvTransport.providers.geckoterminal);
     const batch=await (await app.request(`/trading/features/v2?pools=${POOL},${BASE}`)).json() as {data:Record<string,{data?:{version:string};error?:{code:string}}>};
     assert.equal(batch.data[POOL]!.data!.version,FEATURE_VERSION_V2);assert.equal(batch.data[BASE]!.error!.code,"outside_feature_watchlist");
   });

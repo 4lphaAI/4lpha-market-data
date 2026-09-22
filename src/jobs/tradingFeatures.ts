@@ -29,19 +29,35 @@ const RETENTION = 30 * 86_400_000;
 /**
  * Admissions per 60s cycle. Handoff §9 (2026-09-22, measured live at 36
  * pools): raising this alone from 4 wasn't enough — `poolOhlcv.ts`'s
- * process-local `inFlight < 4` cap (unrelated to this constant, see
- * `IN_FLIGHT_REFRESH_LIMIT` below) was silently discarding most of what this
- * admits before it ever reached the transport budget, showing up as
- * `admission_limit`. With that fixed, the real ceiling is the transport: every
- * default selection entry is `currency: "token"`, which tries `geckoterminal`
- * then falls back to `dexpaprika` (`query/poolOhlcv.ts`'s `refresh`), so
- * combined capacity per ~60s budget window is `BUDGETS.geckoterminal (10) +
- * BUDGETS.dexpaprika (12) = 22` — this stays 1:1 with that combined number,
- * not padded, for the same reason as before: admitting past what the
- * transport can serve just returns `budget_exhausted` instead of running
- * faster.
+ * process-local `MAX_IN_FLIGHT_REFRESHES` cap (unrelated to this constant,
+ * was 4) was silently discarding most of what this admits before it ever
+ * reached the transport budget, showing up as `admission_limit`. With that
+ * fixed, the real ceiling is the transport: every default selection entry is
+ * `currency: "token"`, which tries `geckoterminal` then falls back to
+ * `dexpaprika` (`query/poolOhlcv.ts`'s `refresh`), so combined capacity per
+ * ~60s budget window is `BUDGETS.geckoterminal (10) + BUDGETS.dexpaprika (12)
+ * = 22` — this stays 1:1 with that combined number, not padded, for the same
+ * reason as before: admitting past what the transport can serve just returns
+ * `budget_exhausted` instead of running faster.
  */
 const DUE_PER_CYCLE = 22;
+/**
+ * Handoff §10 (2026-09-22, measured live after the §9 fix): admission and
+ * in-flight capacity stopped being the bottleneck, but 36 pools' worth of
+ * `5m` + `15m` (+ `1h` on the hour) all becoming due on the same wall-clock
+ * boundary now exceeds the transport budget itself — real `rate_limited`
+ * (429) responses from GeckoTerminal were observed, not just our own
+ * self-imposed `budget_exhausted`. The execution plane never reads `5m` for
+ * these series, so it is pure wasted demand on an already-saturated budget.
+ * Lower number sorts first: `5m` is strictly deprioritized behind `1h`/`15m`
+ * (tied with each other, unchanged from before) rather than removed outright,
+ * so it still gets produced whenever there is spare capacity, but never at
+ * the expense of the interval the score actually consumes. This does not
+ * reorder `1h` ahead of `15m` — that specific top-of-hour collision is a
+ * separate, still-open question (see the caveat on `DUE_PER_CYCLE`'s history
+ * in the handoff, §9).
+ */
+const INTERVAL_PRIORITY: Record<FeatureInterval, number> = { "1h": 0, "15m": 0, "5m": 1 };
 export interface FeatureSelection { pool: string; currency: "usd" | "token"; tokenAddress?: string;
   /** indicatorRevision 2: the base token is a tokenized US equity, so the series carries session-anchored metrics. */
   usEquity?: boolean }
@@ -171,7 +187,9 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
       state: "queued", reason: saved ? "recompute_version" : "not_attempted"};
   }
   const due = candidates.filter((c) => state[`${c.key}:${c.currency}`]!.nextAttempt <= now())
-    .sort((a, b) => state[`${a.key}:${a.currency}`]!.attemptedAt - state[`${b.key}:${b.currency}`]!.attemptedAt || a.key.localeCompare(b.key)).slice(0, DUE_PER_CYCLE);
+    .sort((a, b) => INTERVAL_PRIORITY[a.interval] - INTERVAL_PRIORITY[b.interval]
+      || state[`${a.key}:${a.currency}`]!.attemptedAt - state[`${b.key}:${b.currency}`]!.attemptedAt || a.key.localeCompare(b.key))
+    .slice(0, DUE_PER_CYCLE);
   // Persist admission before IO: an interrupted pass cannot starve other series.
   for (const c of due) state[`${c.key}:${c.currency}`] = {...state[`${c.key}:${c.currency}`]!, attemptedAt: now(), nextAttempt: now() + 60_000, state: "refreshing", reason: "refreshing", sources: []};
   await store.put(FEATURE_STATE_KEY, state, { source: "trading-features", freshForMs: 60_000, deadAfterMs: RETENTION });
@@ -248,8 +266,18 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
  * once they became the routine case rather than a rare collision.
  */
 const SELF_THROTTLE_REASONS: ReadonlySet<string> = new Set(["admission_limit", "refresh_lease", "budget_exhausted"]);
-/** Reasons meaning the provider answered but had nothing new: not an outage. */
-const QUIET_REASONS: ReadonlySet<string> = new Set(["stale_input", "stale", "empty", "gap", "refresh_lease", "cache_hit", "admission_limit", "budget_exhausted"]);
+/**
+ * Reasons meaning the provider answered but had nothing new: not an outage.
+ * Handoff §10: `rate_limited` (a real 429 from the upstream, not our own
+ * budget denial) joins this set — it still backs a candidate off per-candidate
+ * (see `fail`, unlike the `SELF_THROTTLE_REASONS` set above, since a genuine
+ * 429 is real evidence something is wrong), but at 36+ pools it is now routine
+ * enough that a pass landing entirely on it should not be reported as a job
+ * failure ("no provider answered" reads as an outage; "the provider answered
+ * with 429" is the provider telling us to slow down, already handled by the
+ * per-candidate backoff and this job's own admission pacing above).
+ */
+const QUIET_REASONS: ReadonlySet<string> = new Set(["stale_input", "stale", "empty", "gap", "refresh_lease", "cache_hit", "admission_limit", "budget_exhausted", "rate_limited"]);
 function summarizeReasons(reasons: string[]): string {
   const counts = new Map<string, number>();
   for (const reason of reasons) counts.set(reason, (counts.get(reason) ?? 0) + 1);

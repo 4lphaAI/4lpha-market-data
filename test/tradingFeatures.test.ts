@@ -290,8 +290,8 @@ describe("bounded feature producer and store-only delivery", () => {
   it("still fails the job when a provider is the reason, and names it", async () => {
     const store = new MemoryStore(() => NOW); await configure(store);
     await assert.rejects(runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW,
-      load: async (_s, p) => { p.onAttempt?.({ source: "geckoterminal", reason: "rate_limited" }); return null; } }),
-      /unavailable for every attempted series \(rate_limited×3\)/);
+      load: async (_s, p) => { p.onAttempt?.({ source: "geckoterminal", reason: "provider_error" }); return null; } }),
+      /unavailable for every attempted series \(provider_error×3\)/);
     // One stale series in a batch does not hide the other two provider failures.
     const mixed = new MemoryStore(() => NOW); await configure(mixed);
     await assert.rejects(runTradingFeatures(mixed, AbortSignal.timeout(1000), { now: () => NOW,
@@ -326,6 +326,43 @@ describe("bounded feature producer and store-only delivery", () => {
       assert.equal(lines.length, 2); // both passes logged quiet, neither threw
       for (const line of lines) assert.match(line, /quiet, not failed \(admission_limit×3\)/);
     } finally { console.log = log; }
+  });
+  it("handoff §10: a real 429 still backs off per-candidate but does not fail the whole job", async () => {
+    // Unlike admission_limit/budget_exhausted (never reached the provider),
+    // rate_limited is a genuine answer from the upstream, so it keeps
+    // escalating this candidate's own backoff — it just stops being treated
+    // as job-wide evidence that nothing is working, since at pool-set scale
+    // this is now routine (the provider throttling us, not an outage).
+    const store = new MemoryStore(() => NOW); await configure(store);
+    const lines: string[] = []; const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try {
+      const result = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW,
+        load: async (_s, p) => { p.onAttempt?.({ source: "geckoterminal", reason: "rate_limited" }); return null; } });
+      assert.deepEqual(result, { attempted: 3, updated: 0, failed: 3 });
+      const state = (await store.get<Record<string, { nextAttempt: number; consecutiveFailures?: number }>>(FEATURE_STATE_KEY))!.data;
+      const entry = state[`${featureKey(POOL, "5m")}:usd`]!;
+      assert.equal(entry.consecutiveFailures, 1); // still a real failure, unlike the self-throttle case
+      assert.equal(entry.nextAttempt, NOW + 60_000); // still backs off (2^0 * 60s here), just doesn't trip the job
+      assert.equal(lines.length, 1);
+      assert.match(lines[0]!, /quiet, not failed \(rate_limited×3\)/);
+    } finally { console.log = log; }
+  });
+  it("handoff §10: prefers 1h/15m over 5m when demand exceeds the per-cycle cap", async () => {
+    // The execution plane never reads 5m, so under contention it should lose
+    // its admission slots to 1h/15m first rather than compete evenly by age.
+    const store = new MemoryStore(() => NOW);
+    const pools = Array.from({ length: 8 }, (_, i) => `0x${(i + 20).toString(16).padStart(40, "0")}`);
+    await configure(store, pools); // 8 pools x 3 intervals = 24 candidates, cap 22
+    const calls: string[] = [];
+    const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async (_s, p) => {
+      calls.push(p.interval); return { ...chart(), poolAddress: p.poolAddress, interval: p.interval };
+    };
+    const result = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => NOW, load });
+    assert.equal(result.attempted, 22);
+    const counts = { "1h": calls.filter(i => i === "1h").length, "15m": calls.filter(i => i === "15m").length, "5m": calls.filter(i => i === "5m").length };
+    assert.equal(counts["1h"], 8); assert.equal(counts["15m"], 8); // both fully admitted
+    assert.equal(counts["5m"], 6); // only the 6 leftover slots, not fairly split by age
   });
   it("shares producer admission across replicas, persists replay evidence and expires by input age in Postgres", async () => {
     let time = NOW; const pg = new FakePg();

@@ -950,8 +950,13 @@ export function createServer(deps: ServerDeps): Hono {
     const series = index ? await Promise.all(index.data.pools.flatMap(p => index.data.intervals.map(async interval => ({
       pool: p.pool, interval, producer: await readFeatureAttempt(deps.store, p.pool, interval, p.currency, p.tokenAddress),
     })))) : [];
+    // Handoff §10: lets a live check tell "budget exhausted" from "just
+    // paced" without cross-referencing /status separately. Named
+    // `ohlcvTransport` rather than `producer` (the ask's literal wording) to
+    // avoid colliding with the per-series `producer` field above, which is a
+    // different, per-candidate shape (FeatureAttempt, not transport counters).
     return c.json({ data: index ? {...index.data, series} : null, meta: { version, preferredVersion: FEATURE_VERSION_V2,
-      asOf: index?.asOf ?? null, staleness: index?.staleness ?? "dead" } });
+      asOf: index?.asOf ?? null, staleness: index?.staleness ?? "dead", ohlcvTransport: poolOhlcvDiagnostics(deps.store) } });
   });
 
   // Strict store-only reads: batch size and identities cannot trigger upstream work.
