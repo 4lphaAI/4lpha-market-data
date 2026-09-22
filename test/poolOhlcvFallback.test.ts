@@ -43,14 +43,14 @@ describe("exact-pool fallback", () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let ready!: () => void;
     const started = new Promise<void>((resolve) => { ready = resolve; });
-    globalThis.fetch = async () => { if (++calls === 4) ready(); await gate; return gecko(); };
-    const first = Array.from({ length: 4 }, (_, i) => getPoolOhlcv(store, {
+    globalThis.fetch = async () => { if (++calls === 22) ready(); await gate; return gecko(); };
+    const first = Array.from({ length: 22 }, (_, i) => getPoolOhlcv(store, {
       ...params, poolAddress: `0x${(i + 100).toString(16).padStart(40, "0")}`,
     }));
     try {
       await started;
       assert.equal(await getPoolOhlcv(store, params), null);
-      assert.equal(calls, 4);
+      assert.equal(calls, 22);
       assert.equal(poolOhlcvDiagnostics(store).admissionDenied, 1);
     } finally { release(); await Promise.all(first); }
   });

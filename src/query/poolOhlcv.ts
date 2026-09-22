@@ -64,6 +64,21 @@ export interface GetPoolOhlcvParams {
 export function poolOhlcvKey(pool: string, interval: KlineInterval, _limit?: number, currency: PoolPriceCurrency = "usd", tokenAddress?: string, qualityPolicy?: "trading-v2"): string {
   return `pool:ohlcv:v2:${pool.toLowerCase()}:${interval}:${currency}${tokenAddress ? `:${tokenAddress.toLowerCase()}` : ""}${qualityPolicy ? ":trading-v2" : ""}`;
 }
+/**
+ * Process-local concurrency cap on simultaneous upstream refreshes, separate
+ * from and unrelated to the `OhlcvTransport` per-minute budgets below. It
+ * exists only so one caller firing many `getPoolOhlcv` calls at once can't
+ * pile up unbounded in-flight promises; it does not itself protect any real
+ * upstream limit. Handoff §9 (2026-09-22, measured live): at the old value of
+ * 4, this was the dominant cause of `admission_limit` denials once the
+ * trading-features watchlist grew past ~10 pools — most of a job cycle's own
+ * admissions (`DUE_PER_CYCLE`, `jobs/tradingFeatures.ts`) were discarded here
+ * before ever reaching the transport budget check. Raised to 22 to match that
+ * job's per-cycle admission count (itself sized to the combined
+ * geckoterminal+dexpaprika budget), so this cap stops being the binding
+ * constraint; the transport budgets remain the real ceiling.
+ */
+const MAX_IN_FLIGHT_REFRESHES = 22;
 class Runtime {
   readonly transport: OhlcvTransport;
   readonly inFlight = new Map<string, Promise<DataRecord<StoredPoolOhlcv> | null>>();
@@ -101,7 +116,7 @@ export async function getPoolOhlcv(store: SnapshotStore, params: GetPoolOhlcvPar
   } else if (!params.signal?.aborted) {
     let flight = r.inFlight.get(key);
     if (flight) r.stats.coalesced++;
-    else if (r.inFlight.size < 4) {
+    else if (r.inFlight.size < MAX_IN_FLIGHT_REFRESHES) {
       flight = refresh(r, pool, params.interval, currency, key, record, token, params.qualityPolicy, params.onAttempt).finally(() => { r.inFlight.delete(key); });
       r.inFlight.set(key, flight);
     } else { r.stats.admissionDenied++; params.onAttempt?.({source: "cache", reason: "admission_limit"}); }

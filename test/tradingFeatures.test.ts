@@ -242,12 +242,12 @@ describe("bounded feature producer and store-only delivery", () => {
   });
   it("caps each pass, fairly advances attempts, and isolates missing pools", async () => {
     let time = NOW; const store = new MemoryStore(() => time);
-    // 7 pools x 3 intervals = 21 candidates against a 10/cycle cap (DUE_PER_CYCLE,
-    // matched to the geckoterminal transport budget): 2*10=20 < 21, so one
-    // candidate is still left uncovered after two admitted cycles, same shape
-    // as the original 3-pool/cap-4 case (2*4=8 < 9).
-    const extra = ["0x0000000000000000000000000000000000000004", "0x0000000000000000000000000000000000000005",
-      "0x0000000000000000000000000000000000000006", "0x0000000000000000000000000000000000000007"];
+    // 15 pools x 3 intervals = 45 candidates against a 22/cycle cap
+    // (DUE_PER_CYCLE, matched to the combined geckoterminal+dexpaprika
+    // transport budget): 2*22=44 < 45, so one candidate is still left
+    // uncovered after two admitted cycles, same shape as the original
+    // 3-pool/cap-4 case (2*4=8 < 9).
+    const extra = Array.from({ length: 12 }, (_, i) => `0x${(i + 4).toString(16).padStart(40, "0")}`);
     const pools = [POOL, BASE, QUOTE, ...extra]; await configure(store, pools);
     const calls: string[] = [];
     const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async (_store, p) => {
@@ -255,12 +255,12 @@ describe("bounded feature producer and store-only delivery", () => {
       return p.poolAddress === POOL ? null : { ...chart(), poolAddress: p.poolAddress, interval: p.interval };
     };
     const first = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
-    assert.equal(first.attempted, 10); assert.equal(calls.length, 10);
+    assert.equal(first.attempted, 22); assert.equal(calls.length, 22);
     assert.equal((await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load })).attempted, 0);
     time += 61_000;
     await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
-    assert.equal(new Set(calls).size, 20);
-    assert.equal(Object.keys((await store.get<Record<string, unknown>>(FEATURE_STATE_KEY))!.data).length, 21);
+    assert.equal(new Set(calls).size, 44);
+    assert.equal(Object.keys((await store.get<Record<string, unknown>>(FEATURE_STATE_KEY))!.data).length, 45);
   });
   it("does not write a success after cancellation or restamp stale history", async () => {
     const store = new MemoryStore(() => NOW); await configure(store);
@@ -299,6 +299,33 @@ describe("bounded feature producer and store-only delivery", () => {
         if (p.interval === "5m") return { ...chart(), staleness: "stale" };
         p.onAttempt?.({ source: "geckoterminal", reason: "provider_error" }); return null;
       } }), /\(provider_error×2, stale_input\)/);
+  });
+  it("handoff §9: self-throttle denials retry next tick without backoff and never fail the job", async () => {
+    // admission_limit / budget_exhausted mean this attempt never reached the
+    // provider at all (our own capacity control said "not this tick"), unlike
+    // rate_limited/provider_error above which do reflect a real answer.
+    let time = NOW; const store = new MemoryStore(() => time); await configure(store);
+    const lines: string[] = []; const log = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+    try {
+      const load: typeof import("../src/query/poolOhlcv.js").getPoolOhlcv = async (_s, p) => {
+        p.onAttempt?.({ source: "cache", reason: "admission_limit" }); return null;
+      };
+      const first = await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
+      assert.deepEqual(first, { attempted: 3, updated: 0, failed: 3 });
+      const state1 = (await store.get<Record<string, { nextAttempt: number; consecutiveFailures?: number }>>(FEATURE_STATE_KEY))!.data;
+      const entry1 = state1[`${featureKey(POOL, "5m")}:usd`]!;
+      assert.equal(entry1.consecutiveFailures, undefined); // left untouched, unlike a real failure
+      assert.equal(entry1.nextAttempt, time + 60_000); // flat retry, no exponential escalation
+      time += 61_000;
+      await runTradingFeatures(store, AbortSignal.timeout(1000), { now: () => time, load });
+      const state2 = (await store.get<Record<string, { nextAttempt: number; consecutiveFailures?: number }>>(FEATURE_STATE_KEY))!.data;
+      const entry2 = state2[`${featureKey(POOL, "5m")}:usd`]!;
+      assert.equal(entry2.consecutiveFailures, undefined); // still untouched after a second self-throttled pass
+      assert.equal(entry2.nextAttempt, time + 60_000);
+      assert.equal(lines.length, 2); // both passes logged quiet, neither threw
+      for (const line of lines) assert.match(line, /quiet, not failed \(admission_limit×3\)/);
+    } finally { console.log = log; }
   });
   it("shares producer admission across replicas, persists replay evidence and expires by input age in Postgres", async () => {
     let time = NOW; const pg = new FakePg();

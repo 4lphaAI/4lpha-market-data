@@ -27,15 +27,21 @@ export { FEATURE_STATE_KEY } from "../query/tradingFeatures.js";
 const MAX_POOLS = 40;
 const RETENTION = 30 * 86_400_000;
 /**
- * Admissions per 60s cycle, sized to the `geckoterminal` transport budget
- * (`adapters/ohlcvTransport.ts`, 10/min): a candidate needing only Gecko costs
- * one call, so this stays 1:1 with that budget rather than the old 2x
- * headroom (4 series -> <=8 HTTP against an 8/min budget), which was already
- * exact. Raising this past the transport budget does not admit more series
- * faster — the excess gets `budgetDenied`, is recorded as a failure, and
- * lands on exponential backoff, which is worse than leaving it queued.
+ * Admissions per 60s cycle. Handoff §9 (2026-09-22, measured live at 36
+ * pools): raising this alone from 4 wasn't enough — `poolOhlcv.ts`'s
+ * process-local `inFlight < 4` cap (unrelated to this constant, see
+ * `IN_FLIGHT_REFRESH_LIMIT` below) was silently discarding most of what this
+ * admits before it ever reached the transport budget, showing up as
+ * `admission_limit`. With that fixed, the real ceiling is the transport: every
+ * default selection entry is `currency: "token"`, which tries `geckoterminal`
+ * then falls back to `dexpaprika` (`query/poolOhlcv.ts`'s `refresh`), so
+ * combined capacity per ~60s budget window is `BUDGETS.geckoterminal (10) +
+ * BUDGETS.dexpaprika (12) = 22` — this stays 1:1 with that combined number,
+ * not padded, for the same reason as before: admitting past what the
+ * transport can serve just returns `budget_exhausted` instead of running
+ * faster.
  */
-const DUE_PER_CYCLE = 10;
+const DUE_PER_CYCLE = 22;
 export interface FeatureSelection { pool: string; currency: "usd" | "token"; tokenAddress?: string;
   /** indicatorRevision 2: the base token is a tokenized US equity, so the series carries session-anchored metrics. */
   usEquity?: boolean }
@@ -175,6 +181,16 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
     const sources: OhlcvAttempt[] = [];
     const fail = (reason: string) => {
       failed++;
+      // Self-imposed capacity denials (we never actually reached the
+      // provider) are not evidence anything is broken; escalating backoff on
+      // them just pushes a candidate further behind every time demand
+      // exceeds a budget, which at 36+ pools is routine, not exceptional
+      // (handoff §9, 2026-09-22). Retry next tick instead, same as
+      // `refresh_lease` already did before this reason set existed.
+      if (SELF_THROTTLE_REASONS.has(reason)) {
+        Object.assign(attempt, {state: "unavailable", reason, sources, completedAt: now(), nextAttempt: now() + 60_000});
+        return;
+      }
       attempt.consecutiveFailures = (attempt.consecutiveFailures ?? 0) + 1;
       Object.assign(attempt, {state: "unavailable", reason, sources, completedAt: now(),
         nextAttempt: now() + Math.min(300_000, 60_000 * 2 ** Math.min(3, attempt.consecutiveFailures - 1))});
@@ -223,8 +239,17 @@ export async function runTradingFeatures(store: SnapshotStore, signal: AbortSign
   }
   return { attempted: due.length, updated, failed };
 }
+/**
+ * Reasons meaning this attempt never reached the provider at all — our own
+ * admission/rate control said "not this tick," not "the data is bad." Exempt
+ * from backoff escalation (see `fail` above) and from counting as a job
+ * failure below. `refresh_lease` already behaved this way for the job-failure
+ * check; `admission_limit` and `budget_exhausted` are new as of handoff §9,
+ * once they became the routine case rather than a rare collision.
+ */
+const SELF_THROTTLE_REASONS: ReadonlySet<string> = new Set(["admission_limit", "refresh_lease", "budget_exhausted"]);
 /** Reasons meaning the provider answered but had nothing new: not an outage. */
-const QUIET_REASONS: ReadonlySet<string> = new Set(["stale_input", "stale", "empty", "gap", "refresh_lease", "cache_hit"]);
+const QUIET_REASONS: ReadonlySet<string> = new Set(["stale_input", "stale", "empty", "gap", "refresh_lease", "cache_hit", "admission_limit", "budget_exhausted"]);
 function summarizeReasons(reasons: string[]): string {
   const counts = new Map<string, number>();
   for (const reason of reasons) counts.set(reason, (counts.get(reason) ?? 0) + 1);
