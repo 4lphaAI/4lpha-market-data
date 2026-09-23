@@ -96,7 +96,21 @@ Summary:
 Sintral latency is 160–340 ms per call, with no throttling seen across about 170 sequential calls
 at about 3 requests/s. This is the same host the pool features already use.
 
-## A narrow option (operator's call, not built)
+## Closed: operator ruling, 2026-09-23
+
+**Not building the narrow option.** The only token that clears the 15m floor is AMDB, and AMDB is
+**not in the tier-A allowlist**.
+
+- **Why AMDB is out.** It was removed on 2026-09-17 with the other pool-less bStocks. The 2026-09-19
+  revision added back only PLTRB, NBISB, COINB, MRVLB and LITEB on the aggregator criterion, and
+  AMDB was not among them.
+- **What that means.** AI Trade could not pin AMDB anyway. The pool-less tokens that *are*
+  allowlisted (PLTRB, LITEB, NBISB, COINB) clear the 15m floor only 0–22 % of the time.
+- **Nothing else changes.** Schedule Buy keeps buying them through Flash, which needs no features.
+- **Reopen condition:** a pool-less token that is both tier-A and clears the 15m floor most of the
+  time.
+
+## A narrow option (superseded by the ruling above)
 
 If AMDB alone, or AMDB and KORUB, is worth it, the change is small, because the rev 3 floor already
 decides admission bar by bar:
