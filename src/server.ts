@@ -552,14 +552,20 @@ export function createServer(deps: ServerDeps): Hono {
     }
     if (!rwaAddresses.has(otherToken)) return binanceFlashError(c, 404, "binance_no_route", "token_not_in_rwa_registry");
 
+    // Upstream time as seen from this host, outside the closed wire, so a
+    // caller can separate Binance latency from its own hop to the plane.
+    const upstreamStartedAt = performance.now();
+    const timing = () => c.header("server-timing", `binance;dur=${Math.round(performance.now() - upstreamStartedAt)}`);
     try {
       const quote = await fetchBinanceFlashQuote(request, config, {
         fetchFn: deps.fetchBinanceFlash,
         signal: c.req.raw.signal,
         requestStartedAt,
       });
+      timing();
       return c.json({ data: quote });
     } catch (error) {
+      timing();
       const failure = classifyFlashFailure(error);
       logFlashFailure(request, failure.reason, requestStartedAt, error);
       return binanceFlashError(c, failure.status, failure.code, failure.reason);

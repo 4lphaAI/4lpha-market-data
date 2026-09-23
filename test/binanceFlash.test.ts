@@ -241,6 +241,7 @@ describe("POST /trading/binance/quote-and-swap", () => {
       body: JSON.stringify(REQUEST),
     });
     assert.equal(response.status, 200);
+    assert.match(response.headers.get("server-timing") ?? "", /^binance;dur=\d+$/u);
     const body: unknown = await response.json();
     assert.ok(isRecord(body));
     assert.equal(calls, 1);
