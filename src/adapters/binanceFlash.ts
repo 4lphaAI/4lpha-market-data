@@ -1,5 +1,6 @@
 import { isRecord, normalizeAddress, type FetchFn } from "./http.js";
-import { signedRequest } from "./binanceRwa.js";
+import { BINANCE_RWA_LIMITER, signedRequest } from "./binanceRwa.js";
+import type { RateLimiter } from "./rateLimiter.js";
 import {
   BINANCE_FLASH_ROUTER_SPENDER_ADDRESS,
   BINANCE_FLASH_USDT_ADDRESS,
@@ -11,6 +12,13 @@ export const BINANCE_FLASH_TIMEOUT_MS = 5_000;
 export const BINANCE_FLASH_LOCAL_VALIDITY_MS = 15_000;
 export const BINANCE_FLASH_MAX_RESPONSE_BYTES = 256 * 1024;
 export const BINANCE_FLASH_MAX_CALLDATA_BYTES = 64 * 1024;
+/**
+ * Longest a quote waits for the shared 5 rps key bucket. Measured quote latency
+ * is p95 ~250 ms, so this leaves the 5 s deadline for the upstream itself.
+ */
+export const BINANCE_FLASH_BUDGET_WAIT_MS = 1_000;
+/** Envelope code LiquidMesh answers, inside an HTTP 200, when no path exists. */
+export const BINANCE_FLASH_NO_PATH_CODE = "40465";
 
 const UINT256_MAX = (1n << 256n) - 1n;
 const DECIMAL_UINT = /^(?:0|[1-9][0-9]*)$/u;
@@ -51,6 +59,14 @@ export class BinanceFlashInvalidResponseError extends Error {
   constructor(readonly reason: string) {
     super(`binance flash response invalid: ${reason}`);
     this.name = "BinanceFlashInvalidResponseError";
+  }
+}
+
+/** Raised when no slot in the shared key bucket frees up within the budget wait. */
+export class BinanceFlashRateBudgetError extends Error {
+  constructor() {
+    super("binance flash rate budget exhausted");
+    this.name = "BinanceFlashRateBudgetError";
   }
 }
 
@@ -264,7 +280,28 @@ export interface FetchBinanceFlashOptions {
   readonly fetchFn?: FetchFn | undefined;
   readonly signal?: AbortSignal | undefined;
   readonly requestStartedAt?: number | undefined;
+  /** Test hook: the key bucket to draw from. */
+  readonly limiter?: RateLimiter | undefined;
+  /** Test hook: how long to wait for a slot before refusing. */
+  readonly budgetWaitMs?: number | undefined;
 }
+
+/**
+ * Waits for a slot in the shared 5 rps key bucket for at most `budgetWaitMs`,
+ * then gives up with {@link BinanceFlashRateBudgetError}. Queueing for the whole
+ * 5 s upstream deadline would turn a burst into timeouts that read as outages.
+ */
+async function acquireFlashSlot(limiter: RateLimiter, budgetWaitMs: number, signal: AbortSignal | undefined): Promise<void> {
+  const budget = AbortSignal.timeout(budgetWaitMs);
+  try {
+    await limiter.acquire(signal === undefined ? budget : AbortSignal.any([signal, budget]));
+  } catch (error) {
+    if (signal?.aborted !== true && budget.aborted) throw new BinanceFlashRateBudgetError();
+    throw error;
+  }
+}
+
+const NO_WAIT_LIMITER: RateLimiter = { acquire: async () => undefined, available: () => Number.POSITIVE_INFINITY };
 
 /** Performs one bounded, signed Flash quote/build request. */
 export async function fetchBinanceFlashQuote(
@@ -274,6 +311,11 @@ export async function fetchBinanceFlashQuote(
 ): Promise<BinanceFlashQuote> {
   validateRequest(request);
   const requestStartedAt = options.requestStartedAt ?? Date.now();
+  await acquireFlashSlot(
+    options.limiter ?? BINANCE_RWA_LIMITER,
+    options.budgetWaitMs ?? BINANCE_FLASH_BUDGET_WAIT_MS,
+    options.signal,
+  );
   const data = await signedRequest({
     method: "GET",
     path: BINANCE_FLASH_PATH,
@@ -295,6 +337,8 @@ export async function fetchBinanceFlashQuote(
     timeoutMs: BINANCE_FLASH_TIMEOUT_MS,
     maxResponseBytes: BINANCE_FLASH_MAX_RESPONSE_BYTES,
     retryOn429: false,
+    // The slot was taken above; a single attempt needs no second token.
+    limiter: NO_WAIT_LIMITER,
     redirect: "error",
   });
   return normalizeBinanceFlashResponse(data, request, config, requestStartedAt);

@@ -17,7 +17,9 @@ import {
 } from "./core/venus.js";
 import { AdapterError, MissingCredentialsError, isEvmAddress, isRecord, normalizeAddress, type FetchFn } from "./adapters/http.js";
 import {
+  BINANCE_FLASH_NO_PATH_CODE,
   BinanceFlashInvalidResponseError,
+  BinanceFlashRateBudgetError,
   fetchBinanceFlashQuote,
   type BinanceFlashQuoteRequest,
 } from "./adapters/binanceFlash.js";
@@ -182,6 +184,65 @@ function binanceFlashError(
   reason: string,
 ) {
   return c.json({ data: null, error: { code, reason } }, status);
+}
+
+/** Order-of-magnitude bucket of an 18-decimal atomic amount (USDT and bStocks alike). */
+function flashAmountBucket(amountAtomic: string): string {
+  const whole = BigInt(amountAtomic) / 10n ** 18n;
+  if (whole < 1n) return "<1";
+  if (whole < 10n) return "1-10";
+  if (whole < 100n) return "10-100";
+  if (whole < 1_000n) return "100-1k";
+  if (whole < 10_000n) return "1k-10k";
+  return "10k+";
+}
+
+/**
+ * One line per Flash call that did not produce a quote, so the operator can
+ * count 429s apart from outages and no-route answers during live gates.
+ */
+function logFlashFailure(
+  request: BinanceFlashQuoteRequest,
+  reason: string,
+  startedAt: number,
+  error: unknown,
+): void {
+  const status = error instanceof AdapterError ? error.status ?? "none" : "none";
+  const upstreamCode = error instanceof AdapterError ? error.upstreamCode ?? "none" : "none";
+  console.warn(
+    `[binance-flash] upstream_failure reason=${reason} status=${status} code=${upstreamCode}` +
+      ` tokenIn=${request.tokenIn} tokenOut=${request.tokenOut} amount=${flashAmountBucket(request.amountAtomic)}` +
+      ` ms=${Date.now() - startedAt}`,
+  );
+}
+
+/** Maps a failed Flash call to the route's closed `{code, reason}` set. */
+function classifyFlashFailure(error: unknown): {
+  status: 404 | 502 | 503;
+  code: "binance_unavailable" | "binance_no_route" | "binance_invalid_response";
+  reason: string;
+} {
+  if (error instanceof BinanceFlashInvalidResponseError) {
+    return { status: 502, code: "binance_invalid_response", reason: error.reason };
+  }
+  if (error instanceof BinanceFlashRateBudgetError) {
+    return { status: 503, code: "binance_unavailable", reason: "rate_budget_exhausted" };
+  }
+  if (error instanceof MissingCredentialsError) {
+    return { status: 503, code: "binance_unavailable", reason: "credentials_unavailable" };
+  }
+  if (error instanceof AdapterError) {
+    if (error.status === 200 || error.status === 413) {
+      return { status: 502, code: "binance_invalid_response", reason: error.status === 413 ? "response_too_large" : "upstream_payload_invalid" };
+    }
+    // LiquidMesh answers "Path not found" as HTTP 200 with its own code;
+    // read as an outage it would hide a real no-route from execution.
+    if (error.status === 400 || error.status === 404 || error.upstreamCode === BINANCE_FLASH_NO_PATH_CODE) {
+      return { status: 404, code: "binance_no_route", reason: "provider_no_route" };
+    }
+    if (error.status === 429) return { status: 503, code: "binance_unavailable", reason: "upstream_rate_limited" };
+  }
+  return { status: 503, code: "binance_unavailable", reason: "upstream_unavailable" };
 }
 
 async function readBoundedBody(request: Request, maxBytes: number): Promise<string | null> {
@@ -438,7 +499,7 @@ export function createServer(deps: ServerDeps): Hono {
     if (expected === "" || c.req.path === "/health") return next();
     const provided = c.req.header("x-dp-token") ?? "";
     if (!tokenMatches(provided, expected)) {
-      return c.json({ error: { code: "unauthorized" } }, 401);
+      return c.json({ error: { code: "unauthorized", reason: "dp_token_rejected" } }, 401);
     }
     return next();
   });
@@ -499,19 +560,9 @@ export function createServer(deps: ServerDeps): Hono {
       });
       return c.json({ data: quote });
     } catch (error) {
-      if (error instanceof BinanceFlashInvalidResponseError) {
-        return binanceFlashError(c, 502, "binance_invalid_response", error.reason);
-      }
-      if (error instanceof MissingCredentialsError) {
-        return binanceFlashError(c, 503, "binance_unavailable", "credentials_unavailable");
-      }
-      if (error instanceof AdapterError && (error.status === 200 || error.status === 413)) {
-        return binanceFlashError(c, 502, "binance_invalid_response", error.status === 413 ? "response_too_large" : "upstream_payload_invalid");
-      }
-      if (error instanceof AdapterError && (error.status === 400 || error.status === 404)) {
-        return binanceFlashError(c, 404, "binance_no_route", "provider_no_route");
-      }
-      return binanceFlashError(c, 503, "binance_unavailable", "upstream_unavailable");
+      const failure = classifyFlashFailure(error);
+      logFlashFailure(request, failure.reason, requestStartedAt, error);
+      return binanceFlashError(c, failure.status, failure.code, failure.reason);
     }
   });
 
@@ -1352,7 +1403,7 @@ export function createServer(deps: ServerDeps): Hono {
 
   app.onError((error, c) => {
     console.error(`[server] unhandled_error: ${error.message}`);
-    return c.json({ error: { code: "internal_error" } }, 500);
+    return c.json({ error: { code: "internal_error", reason: "unhandled" } }, 500);
   });
 
   mountStudio(app, deps.store, deps.studio ?? null);

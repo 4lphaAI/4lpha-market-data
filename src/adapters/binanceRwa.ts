@@ -233,7 +233,7 @@ export async function signedRequest(options: SignedRequestOptions): Promise<unkn
     const code = payload["code"];
     if (String(code) !== "0") {
       const message = parseStr(payload["msg"]) ?? `unsuccessful code ${String(code)}`;
-      throw new AdapterError(SOURCE, sanitizeMessage(message));
+      throw new AdapterError(SOURCE, sanitizeMessage(message), undefined, String(code));
     }
     return payload["data"];
   }

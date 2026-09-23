@@ -26,6 +26,8 @@ export class AdapterError extends Error {
     message: string,
     /** HTTP status, when the failure came from a response. */
     readonly status?: number,
+    /** Provider's own envelope code, when a 2xx carried a non-success `code`. */
+    readonly upstreamCode?: string,
   ) {
     super(`${source}: ${message}`);
     this.name = "AdapterError";

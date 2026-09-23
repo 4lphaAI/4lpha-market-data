@@ -4,6 +4,7 @@ import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import {
   BinanceFlashInvalidResponseError,
+  BinanceFlashRateBudgetError,
   fetchBinanceFlashQuote,
   normalizeBinanceFlashResponse,
 } from "../src/adapters/binanceFlash.js";
@@ -12,6 +13,7 @@ import {
   type BinanceFlashConfig,
 } from "../src/config/binanceFlash.js";
 import { createServer } from "../src/server.js";
+import { createRateLimiter } from "../src/adapters/rateLimiter.js";
 
 const TAKER = "0x1111111111111111111111111111111111111111";
 const ROUTER = "0xb44446b0c8e56988c34f7ff73ae904982b5fdda5";
@@ -153,6 +155,24 @@ describe("Binance Flash adapter", () => {
     assert.equal(seenInit?.redirect, "error");
   });
 
+  it("refuses fast with a distinct error when the key bucket stays empty past the budget wait", async () => {
+    armCredentials();
+    let calls = 0;
+    const fetchFn: typeof globalThis.fetch = async () => {
+      calls += 1;
+      return providerResponse();
+    };
+    const limiter = createRateLimiter({ capacity: 1, refillPerSecond: 0.001 });
+    await limiter.acquire();
+    const started = Date.now();
+    await assert.rejects(
+      fetchBinanceFlashQuote(REQUEST, CONFIG, { fetchFn, limiter, budgetWaitMs: 50, requestStartedAt: 1_900_000_000_000 }),
+      (error: unknown) => error instanceof BinanceFlashRateBudgetError,
+    );
+    assert.ok(Date.now() - started < 1_000);
+    assert.equal(calls, 0);
+  });
+
   it("refuses an unexpected router or spender as an invalid provider response", () => {
     const bad = {
       ...PROTOCOL_SHAPED_DATA,
@@ -270,6 +290,55 @@ describe("POST /trading/binance/quote-and-swap", () => {
     });
     assert.equal(calls, 0);
     await store.close();
+  });
+
+  async function quoteWith(upstream: () => Response): Promise<{ status: number; body: unknown; logs: string[] }> {
+    armCredentials();
+    const store = new MemoryStore();
+    await store.put("universe:rwa", { rows: [{ address: RWA_TOKEN }], byPlatform: { bstock: 1 } }, {
+      source: "binance-rwa",
+      freshForMs: 60_000,
+      deadAfterMs: 300_000,
+    });
+    const app = createServer({ scheduler: createScheduler(store), store, binanceFlash: CONFIG, fetchBinanceFlash: async () => upstream() });
+    const logs: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+    try {
+      const response = await app.request("/trading/binance/quote-and-swap", { method: "POST", body: JSON.stringify(REQUEST) });
+      return { status: response.status, body: await response.json(), logs };
+    } finally {
+      console.warn = originalWarn;
+      await store.close();
+    }
+  }
+
+  it("reads LiquidMesh's in-band 'Path not found' as no route, not as an outage", async () => {
+    // Live shape, 2026-09-23: PLTRB with enableRFQ=false.
+    const result = await quoteWith(() => new Response(JSON.stringify({
+      code: 40465, msg: "LiquidMesh EVM quoteAndSwap error: Path not found", data: null, success: false,
+    }), { status: 200 }));
+    assert.equal(result.status, 404);
+    assert.deepEqual(result.body, { data: null, error: { code: "binance_no_route", reason: "provider_no_route" } });
+    assert.equal(result.logs.length, 1);
+    assert.match(result.logs[0]!, /reason=provider_no_route status=none code=40465 /u);
+  });
+
+  it("names an upstream 429 and logs status, pair, amount bucket and latency", async () => {
+    const result = await quoteWith(() => new Response(JSON.stringify({ code: 42900, msg: "Rate limit exceeded", data: "" }), { status: 429 }));
+    assert.equal(result.status, 503);
+    assert.deepEqual(result.body, { data: null, error: { code: "binance_unavailable", reason: "upstream_rate_limited" } });
+    assert.equal(result.logs.length, 1);
+    assert.match(
+      result.logs[0]!,
+      new RegExp(`^\\[binance-flash\\] upstream_failure reason=upstream_rate_limited status=429 code=none tokenIn=${REQUEST.tokenIn} tokenOut=${RWA_TOKEN} amount=1-10 ms=\\d+$`, "u"),
+    );
+  });
+
+  it("keeps a plain upstream 5xx as upstream_unavailable", async () => {
+    const result = await quoteWith(() => new Response("bad gateway", { status: 502 }));
+    assert.deepEqual(result.body, { data: null, error: { code: "binance_unavailable", reason: "upstream_unavailable" } });
+    assert.match(result.logs[0]!, /status=502 /u);
   });
 
   it("enforces the request body bound", async () => {
