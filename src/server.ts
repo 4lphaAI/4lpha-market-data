@@ -36,6 +36,7 @@ import { getSocials } from "./query/socials.js";
 import { getTokenDecimals, type DecimalsReader } from "./query/decimals.js";
 import { isEligible, isEligibleBatch } from "./query/eligibility.js";
 import { buildUniverse, RWA_UNIVERSE_KEY } from "./universe.js";
+import { isSector, SECTORS, TRENDING_KEY } from "./query/bstockSectors.js";
 import { readTokenRecords } from "./jobs/tokenStore.js";
 import {
   SPREAD_HISTORY_KEY,
@@ -146,6 +147,7 @@ const STATUS_SNAPSHOT_KEYS = [
   "universe:coins",
   "universe:rwa",
   "venues:rwa",
+  TRENDING_KEY,
   SPREAD_HISTORY_KEY,
   "universe:pools",
   "pools:index",
@@ -599,23 +601,42 @@ export function createServer(deps: ServerDeps): Hono {
         400,
       );
     }
+    // Sector labels exist only on bStocks, so the filter narrows to that lane.
+    const sectorParam = c.req.query("sector");
+    if (sectorParam !== undefined && !isSector(sectorParam)) {
+      return c.json(
+        { error: { code: "invalid_sector", message: `sector must be one of ${SECTORS.join(", ")}` } },
+        400,
+      );
+    }
+    if (sectorParam !== undefined && laneParam !== undefined && laneParam !== "bstocks") {
+      return c.json(
+        { error: { code: "invalid_sector", message: "sector labels exist only on lane=bstocks" } },
+        400,
+      );
+    }
 
     const universe = await buildUniverse(deps.store);
     // The allowlist lane is served from the frozen snapshot itself, not from the
     // merged entries, so it answers with the whole list. The other three keep
     // filtering the merge unchanged.
-    const entries =
+    const laneEntries =
       laneParam === undefined
         ? universe.entries
         : laneParam === "allowlist"
           ? universe.allowlist
           : universe.entries.filter((entry) => entry.lane === laneParam);
+    const entries =
+      sectorParam === undefined
+        ? laneEntries
+        : laneEntries.filter((entry) => entry.lane === "bstocks" && entry.sectors?.includes(sectorParam) === true);
 
     return c.json({
       data: entries,
       meta: {
         total: entries.length,
         ...(laneParam === undefined ? {} : { lane: laneParam }),
+        ...(sectorParam === undefined ? {} : { sector: sectorParam }),
         lanes: universe.lanes,
       },
     });

@@ -6,6 +6,7 @@ import { createServer } from "./server.js";
 import { binancePricesJob } from "./jobs/binancePrices.js";
 import { binanceRwaJob } from "./jobs/binanceRwa.js";
 import { binanceUniverseJob } from "./jobs/binanceUniverse.js";
+import { bstockTrendingJob } from "./jobs/bstockTrending.js";
 import { hasBinanceRwaCredentials } from "./adapters/binanceRwa.js";
 import { stockVenuesJob } from "./jobs/stockVenues.js";
 import { spreadHistoryJob } from "./jobs/spreadHistory.js";
@@ -71,6 +72,8 @@ scheduler.register(binancePricesJob(store));
 // per-token AMM venues (keyless; sweeps the static bStocks without the key).
 if (hasBinanceRwaCredentials()) {
   scheduler.register(binanceRwaJob(store));
+  // One signed call a day (the fixed sector baskets are a frozen file).
+  scheduler.register(bstockTrendingJob(store));
   console.log("[binance-rwa] credentials present; tokenized-stock lanes armed");
 } else console.warn("[binance-rwa] BINANCE_WEB3_API_KEY/SECRET_KEY not set; bstocks lane is static only, ondo lane empty");
 scheduler.register(stockVenuesJob(store));

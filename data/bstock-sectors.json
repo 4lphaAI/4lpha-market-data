@@ -1,0 +1,289 @@
+{
+  "meta": {
+    "generatedAt": "2026-09-26T06:16:12.672Z",
+    "source": "binance-web3 /api/v1/dex/market/rwa/tokens?tabId=",
+    "note": "Labels are ours: the API filters by tabId but returns no tab names, so each name was inferred from the tickers in the tab. bStocks only. Regenerate with scripts/gen-bstock-sectors.ts.",
+    "tabs": {
+      "mag7": {
+        "tabId": 21,
+        "label": "Magnificent 7"
+      },
+      "ai-chips": {
+        "tabId": 19,
+        "label": "AI Chips"
+      },
+      "big-tech": {
+        "tabId": 25,
+        "label": "Big Tech"
+      },
+      "crypto-stocks": {
+        "tabId": 23,
+        "label": "Crypto stocks"
+      },
+      "memory": {
+        "tabId": 37,
+        "label": "Memory & storage"
+      },
+      "etf": {
+        "tabId": 24,
+        "label": "ETF"
+      },
+      "sector-etf": {
+        "tabId": 66,
+        "label": "Sector ETF"
+      },
+      "space-defense": {
+        "tabId": 42,
+        "label": "Space & defense"
+      },
+      "china": {
+        "tabId": 22,
+        "label": "China"
+      },
+      "buffett": {
+        "tabId": 26,
+        "label": "Buffett Portfolio"
+      }
+    },
+    "counts": {
+      "mag7": 5,
+      "ai-chips": 7,
+      "big-tech": 16,
+      "crypto-stocks": 4,
+      "memory": 5,
+      "etf": 3,
+      "sector-etf": 6,
+      "space-defense": 3,
+      "china": 1,
+      "buffett": 1
+    }
+  },
+  "byAddress": {
+    "0x75fd4cf6f8392e41e70391d60c90c0d5211603a1": {
+      "symbol": "AMDB",
+      "sectors": [
+        "ai-chips",
+        "big-tech"
+      ]
+    },
+    "0xd42a79ebb7f527f40faecd196ffb47ad5e8d6f8c": {
+      "symbol": "ARMB",
+      "sectors": [
+        "ai-chips",
+        "big-tech"
+      ]
+    },
+    "0x76682c454467b3a1150ad8b6a92fc5ee2c21d7ed": {
+      "symbol": "AVGOB",
+      "sectors": [
+        "ai-chips",
+        "big-tech"
+      ]
+    },
+    "0x4ef9d3062c7f6eba4aae4990c5036598c6eff4ec": {
+      "symbol": "BABAB",
+      "sectors": [
+        "china"
+      ]
+    },
+    "0x585bde7c54abb5ccd7791f923d6c2187635f3952": {
+      "symbol": "COINB",
+      "sectors": [
+        "crypto-stocks"
+      ]
+    },
+    "0x80f3d493ebce97e343c53d29a137942416b4ffc0": {
+      "symbol": "CRCLB",
+      "sectors": [
+        "crypto-stocks"
+      ]
+    },
+    "0x93862d63fd9fd488b1328e9b47717d75e994a84b": {
+      "symbol": "DRAMB",
+      "sectors": [
+        "memory",
+        "sector-etf"
+      ]
+    },
+    "0x3f53de71c126bdabae20f9cd64848d317f6c3238": {
+      "symbol": "GOOGLB",
+      "sectors": [
+        "mag7",
+        "big-tech",
+        "buffett"
+      ]
+    },
+    "0xa394dcea3fd3847fd793afbfd163e2e3858b7c65": {
+      "symbol": "HOODB",
+      "sectors": [
+        "crypto-stocks"
+      ]
+    },
+    "0xfa273b076feb8c0fb34e554ae341082323d016a3": {
+      "symbol": "IBMB",
+      "sectors": [
+        "big-tech"
+      ]
+    },
+    "0xe614e2fc6c787035ff51f452e8e826bfd32d5283": {
+      "symbol": "INTCB",
+      "sectors": [
+        "ai-chips",
+        "big-tech"
+      ]
+    },
+    "0x0735d9904b7e34e6fe39b0f66e00c111b3f2b681": {
+      "symbol": "INTWB",
+      "sectors": [
+        "sector-etf"
+      ]
+    },
+    "0x7425889fe94f9d693e8daefe88bcced6acfef4c0": {
+      "symbol": "METAB",
+      "sectors": [
+        "mag7",
+        "big-tech"
+      ]
+    },
+    "0x16cd4fe7e8880ecc3ba222795229e20489fc2c76": {
+      "symbol": "MRVLB",
+      "sectors": [
+        "ai-chips",
+        "big-tech"
+      ]
+    },
+    "0x80106cb3ead06659a5ad19df39d9b4733863b9b0": {
+      "symbol": "MSFTB",
+      "sectors": [
+        "mag7",
+        "big-tech"
+      ]
+    },
+    "0xe87afb3076aeb0f9b14e368de8145ae6a2826a14": {
+      "symbol": "MSTRB",
+      "sectors": [
+        "crypto-stocks"
+      ]
+    },
+    "0xcdf2f3e0fa43c47a6662a91c9e4a7c5f69762699": {
+      "symbol": "MUB",
+      "sectors": [
+        "big-tech",
+        "memory"
+      ]
+    },
+    "0x0bb3fa77e0809f42948e435f04883c25415e8263": {
+      "symbol": "MUUB",
+      "sectors": [
+        "sector-etf"
+      ]
+    },
+    "0x7c26a12f20507e2cee22ceebed9e88fda47f866c": {
+      "symbol": "MVLLB",
+      "sectors": [
+        "sector-etf"
+      ]
+    },
+    "0x02fca66c1d1afb4e2a7884261eb00f63598a7436": {
+      "symbol": "NVDAB",
+      "sectors": [
+        "mag7",
+        "ai-chips",
+        "big-tech"
+      ]
+    },
+    "0x4684d9887fc1c71cba7bab8e88835cec217eb598": {
+      "symbol": "ORCLB",
+      "sectors": [
+        "big-tech"
+      ]
+    },
+    "0x0ca5d51d0277bd006fd9607d3e560785ebad8222": {
+      "symbol": "PLTRB",
+      "sectors": [
+        "big-tech"
+      ]
+    },
+    "0x5f7a56e877b9130608bf8be962621011182fefe1": {
+      "symbol": "QCOMB",
+      "sectors": [
+        "big-tech"
+      ]
+    },
+    "0x205812cdbed920aff76c6580abd681a46d11efc7": {
+      "symbol": "QQQB",
+      "sectors": [
+        "etf"
+      ]
+    },
+    "0xc8da12cbcce7c45180692a6420b0076e03a5179a": {
+      "symbol": "RKLBB",
+      "sectors": [
+        "space-defense"
+      ]
+    },
+    "0xca750ef65f295bbecd685abf54e82caf297bdb61": {
+      "symbol": "SKHYB",
+      "sectors": [
+        "memory"
+      ]
+    },
+    "0x3ee4df61bd4f867e349beae8bfe07bc31b4850fb": {
+      "symbol": "SNDKB",
+      "sectors": [
+        "memory"
+      ]
+    },
+    "0x9e82e3da8f1115b73d24bb24113ab836ffdab6b6": {
+      "symbol": "SNXXB",
+      "sectors": [
+        "sector-etf"
+      ]
+    },
+    "0xd97d097a89113fa59b76c572e5b2eb647e8eefaf": {
+      "symbol": "SOXLB",
+      "sectors": [
+        "sector-etf"
+      ]
+    },
+    "0xbe9d156892e55e7154bcd3cb0fea677f9d3103e1": {
+      "symbol": "SPCXB",
+      "sectors": [
+        "space-defense"
+      ]
+    },
+    "0x7138b48df7d98d7e3cc221bfe7192d0a178182d8": {
+      "symbol": "SPYB",
+      "sectors": [
+        "etf"
+      ]
+    },
+    "0x462b5f13b7c7748279358962925c5de83bb9e598": {
+      "symbol": "TQQQB",
+      "sectors": [
+        "etf"
+      ]
+    },
+    "0x5b1910eaad6450e50f816082aa078c41f10c292f": {
+      "symbol": "TSLAB",
+      "sectors": [
+        "mag7",
+        "big-tech",
+        "space-defense"
+      ]
+    },
+    "0xab78b89b5bb00236be0b4b20704cbfa04efc711c": {
+      "symbol": "TSMB",
+      "sectors": [
+        "ai-chips",
+        "big-tech"
+      ]
+    },
+    "0xebe29695f8047c13d36e7a790ca8c1b239ffad1c": {
+      "symbol": "WDCB",
+      "sectors": [
+        "memory"
+      ]
+    }
+  }
+}

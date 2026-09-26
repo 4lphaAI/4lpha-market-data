@@ -17,6 +17,7 @@ import type { SnapshotStore } from "./core/store.js";
 import type { Staleness } from "./core/types.js";
 import { normalizeAddress } from "./adapters/http.js";
 import { loadAllowlist } from "./allowlist.js";
+import { loadStaticSectors, readTrending, sectorsFor } from "./query/bstockSectors.js";
 
 /** Store key holding the Four.Meme-discovered lane. */
 export const MEME_UNIVERSE_KEY = "universe:meme";
@@ -121,6 +122,16 @@ export interface LaneStatus {
   /** Epoch milliseconds of the lane's snapshot; `null` for the static lane. */
   asOf: number | null;
   source: string;
+  /**
+   * bStocks lane only: where its `sectors` labels came from. The fixed baskets
+   * are a frozen file (`fixedGeneratedAt`); `trending` is a daily read with
+   * its own age, and a `dead` read contributes no labels.
+   */
+  sectors?: {
+    fixedGeneratedAt: string | null;
+    trendingAsOf: number | null;
+    trendingStaleness: Staleness | null;
+  };
 }
 
 export interface UniverseResult {
@@ -181,6 +192,7 @@ export async function buildUniverse(store: SnapshotStore): Promise<UniverseResul
         staleness: rwa.staleness ?? "fresh",
         asOf: rwa.asOf,
         source: rwa.staleness === null ? "static" : "static+binance-rwa",
+        sectors: rwa.sectors,
       },
       ondo: { count: rwa.ondo.length, staleness: rwa.staleness, asOf: rwa.asOf, source: "binance-rwa" },
       // Static like bStocks, so always fresh with no `asOf` — except when the
@@ -280,6 +292,7 @@ interface RwaLanes {
   ondo: UniverseEntry[];
   staleness: Staleness | null;
   asOf: number | null;
+  sectors: NonNullable<LaneStatus["sectors"]>;
 }
 
 /**
@@ -331,12 +344,21 @@ async function readRwaLanes(store: SnapshotStore): Promise<RwaLanes> {
   for (const entry of bstocks.values()) {
     if (entry.venues === undefined && venues.has(entry.address)) entry.venues = venues.get(entry.address)!;
   }
+  // Sector labels on every bStock, static floor included; Ondo rows get none.
+  const fixed = loadStaticSectors();
+  const trending = await readTrending(store);
+  for (const entry of bstocks.values()) entry.sectors = sectorsFor(entry, fixed, trending);
 
   return {
     bstocks: [...bstocks.values()],
     ondo,
     staleness: record === null ? null : record.staleness,
     asOf: record === null ? null : record.asOf,
+    sectors: {
+      fixedGeneratedAt: fixed?.generatedAt ?? null,
+      trendingAsOf: trending.asOf,
+      trendingStaleness: trending.staleness,
+    },
   };
 }
 

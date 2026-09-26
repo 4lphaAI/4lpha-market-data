@@ -123,6 +123,12 @@ export interface UniverseEntry {
   staleness?: Staleness;
   /** AMM pools the token trades in, deepest first; absent until swept. */
   venues?: Venue[];
+  /**
+   * bStocks only: sector baskets from the Binance RWA sector tabs, e.g.
+   * `["mag7", "ai-chips", "trending"]`. Names are the plane's, not Binance's
+   * (see `query/bstockSectors.ts`). Empty for a bStock in no basket.
+   */
+  sectors?: string[];
 }
 
 /**

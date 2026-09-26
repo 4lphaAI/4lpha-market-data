@@ -244,6 +244,13 @@ export async function signedRequest(options: SignedRequestOptions): Promise<unkn
 export interface RwaTokensParams {
   chainId?: string;
   platformId?: "bstock" | "ondo" | undefined;
+  /**
+   * Sector tab ("Magnificent 7", "AI Chips", ...). The docs only say the list
+   * "supports filtering by sector tab"; the ids were found by sweeping (see
+   * `data/bstock-sectors.json`). An unknown id is not an error — the API
+   * answers with the whole unfiltered list, so callers must bound the row count.
+   */
+  tabId?: number | undefined;
   signal?: AbortSignal | undefined;
   fetchFn?: FetchFn | undefined;
 }
@@ -258,6 +265,7 @@ export interface RwaTokensResult {
 export async function fetchRwaTokens(params: RwaTokensParams = {}): Promise<RwaTokensResult> {
   const query: Array<[string, string]> = [["binanceChainId", params.chainId ?? BSC_CHAIN_ID]];
   if (params.platformId !== undefined) query.push(["platformId", params.platformId]);
+  if (params.tabId !== undefined) query.push(["tabId", String(params.tabId)]);
   const data = await signedRequest({
     method: "GET",
     path: `${RWA_PATH}/tokens`,
