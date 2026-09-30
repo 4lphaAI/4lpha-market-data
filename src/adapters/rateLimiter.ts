@@ -1,9 +1,9 @@
 /**
  * Token-bucket rate limiter for upstreams that enforce a per-key request rate.
  *
- * Built for the Binance Web3 API, whose 5 rps ceiling is per key and shared by
- * every endpoint (measured 2026-09-16: two endpoints at 5 rps each got 20 of 40
- * through). One bucket per process is therefore the only shape that matches
+ * Built for the Binance Web3 API, whose ceiling is per key and shared by every
+ * endpoint (measured 2026-09-16 at 5 rps: two endpoints at 5 rps each got 20 of
+ * 40 through; the raised limit is sized by `BINANCE_RWA_RPS`). One bucket per process is therefore the only shape that matches
  * what the server counts. `acquire` resolves when a token is available and
  * rejects if the caller's signal aborts first, so a timed-out job does not
  * leave waiters queued against the next run.

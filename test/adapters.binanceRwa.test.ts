@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHmac } from "node:crypto";
 import { afterEach, describe, it } from "node:test";
 import {
+  BINANCE_RWA_DEFAULT_RPS,
+  BINANCE_RWA_MAX_RPS,
   RWA_PRICE_BATCH_MAX,
   createSignature,
   fetchRwaPlatforms,
@@ -11,6 +14,7 @@ import {
   hasBinanceRwaCredentials,
   normalizeRwaTokens,
   premiumBps,
+  readBinanceRwaRps,
   signedRequest,
 } from "../src/adapters/binanceRwa.js";
 import { AdapterError, MissingCredentialsError } from "../src/adapters/http.js";
@@ -255,5 +259,40 @@ describe("other RWA endpoints", () => {
     assert.equal(platforms.length, 2);
     assert.deepEqual(platforms[0]!.chainTokenCounts, { "56": 458, "1": 457 });
     assert.equal(platforms[1]!.website, null);
+  });
+});
+
+describe("BINANCE_RWA_RPS", () => {
+  it("defaults to 5 when unset, which is the behaviour before the key was raised", () => {
+    assert.equal(BINANCE_RWA_DEFAULT_RPS, 5);
+    assert.equal(readBinanceRwaRps({}), 5);
+  });
+
+  it("honours a positive integer", () => {
+    assert.equal(readBinanceRwaRps({ BINANCE_RWA_RPS: "18" }), 18);
+    assert.equal(readBinanceRwaRps({ BINANCE_RWA_RPS: " 18 " }), 18);
+    assert.equal(readBinanceRwaRps({ BINANCE_RWA_RPS: String(BINANCE_RWA_MAX_RPS) }), BINANCE_RWA_MAX_RPS);
+  });
+
+  it("refuses a malformed value instead of falling back to the default", () => {
+    for (const bad of ["", "  ", "0", "-3", "1.5", "18rps", "1e1", "0x10", "NaN", "abc", String(BINANCE_RWA_MAX_RPS + 1), "99999999999999999999"]) {
+      assert.throws(() => readBinanceRwaRps({ BINANCE_RWA_RPS: bad }), /invalid BINANCE_RWA_RPS/u, JSON.stringify(bad));
+    }
+  });
+
+  it("sizes the process-wide bucket from the env on first use", () => {
+    const probe =
+      'import("./src/adapters/binanceRwa.js").then(async ({ BINANCE_RWA_LIMITER: l }) => { console.log(l.available()); })';
+    const run = (rps: string | undefined) => {
+      const env = { ...process.env };
+      delete env["BINANCE_RWA_RPS"];
+      if (rps !== undefined) env["BINANCE_RWA_RPS"] = rps;
+      return spawnSync(process.execPath, ["--import", "tsx", "-e", probe], { env, encoding: "utf8" });
+    };
+    assert.equal(run(undefined).stdout.trim(), "5");
+    assert.equal(run("18").stdout.trim(), "18");
+    const bad = run("lots");
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /invalid BINANCE_RWA_RPS/u);
   });
 });

@@ -13,7 +13,7 @@ export const BINANCE_FLASH_LOCAL_VALIDITY_MS = 15_000;
 export const BINANCE_FLASH_MAX_RESPONSE_BYTES = 256 * 1024;
 export const BINANCE_FLASH_MAX_CALLDATA_BYTES = 64 * 1024;
 /**
- * Longest a quote waits for the shared 5 rps key bucket. Measured quote latency
+ * Longest a quote waits for the shared key bucket (`BINANCE_RWA_RPS`). Measured quote latency
  * is p95 ~250 ms, so this leaves the 5 s deadline for the upstream itself.
  */
 export const BINANCE_FLASH_BUDGET_WAIT_MS = 1_000;
@@ -287,9 +287,9 @@ export interface FetchBinanceFlashOptions {
 }
 
 /**
- * Waits for a slot in the shared 5 rps key bucket for at most `budgetWaitMs`,
- * then gives up with {@link BinanceFlashRateBudgetError}. Queueing for the whole
- * 5 s upstream deadline would turn a burst into timeouts that read as outages.
+ * Waits for a slot in the shared key bucket (`BINANCE_RWA_RPS`) for at most
+ * `budgetWaitMs`, then gives up with {@link BinanceFlashRateBudgetError}.
+ * Queueing for the whole 5 s upstream deadline would turn a burst into timeouts that read as outages.
  */
 async function acquireFlashSlot(limiter: RateLimiter, budgetWaitMs: number, signal: AbortSignal | undefined): Promise<void> {
   const budget = AbortSignal.timeout(budgetWaitMs);

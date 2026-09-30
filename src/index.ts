@@ -7,7 +7,7 @@ import { binancePricesJob } from "./jobs/binancePrices.js";
 import { binanceRwaJob } from "./jobs/binanceRwa.js";
 import { binanceUniverseJob } from "./jobs/binanceUniverse.js";
 import { bstockTrendingJob } from "./jobs/bstockTrending.js";
-import { hasBinanceRwaCredentials } from "./adapters/binanceRwa.js";
+import { hasBinanceRwaCredentials, readBinanceRwaRps } from "./adapters/binanceRwa.js";
 import { stockVenuesJob } from "./jobs/stockVenues.js";
 import { spreadHistoryJob } from "./jobs/spreadHistory.js";
 import { flapLaunchesJob } from "./jobs/flapLaunches.js";
@@ -29,6 +29,7 @@ import { readBinanceFlashConfig } from "./config/binanceFlash.js";
 loadDotEnv();
 const studio = studioConfig(process.env);
 if (process.env["STUDIO_DISCOVERY_ENABLED"] === "true" && !studio) console.warn("[studio] invalid configuration; integration disabled" );
+readBinanceRwaRps(process.env); // a malformed BINANCE_RWA_RPS stops the boot instead of the first Binance call
 const binanceFlash = readBinanceFlashConfig(process.env);
 if (binanceFlash === null) console.warn("[binance-flash] verified guard configuration absent; route unavailable");
 

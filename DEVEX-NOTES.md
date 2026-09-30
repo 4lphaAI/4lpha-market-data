@@ -68,7 +68,28 @@ friction · **OK**: something that worked first time and deserves credit.
   immediately, and the error reads like a clock problem, not a concurrency one.
   The header should be documented as *required* for concurrent use.
 
-### PITFALL-6 · The 5 RPS limit is per **key**, shared across endpoints — not per endpoint
+### PITFALL-6 · The rate limit is per **key**, shared across endpoints — not per endpoint
+- **Update 2026-10-01 (measured 2026-09-30 17:47–17:54 UTC, after the key was raised): the 5 rps
+  per-second cap is gone. The binding limit is now about 1 200 requests per 60 s, ~20 rps
+  sustained, still one bucket per key.** `scripts/binance-rate-ceiling.ts`, read-only
+  (`/tokens` and `/platforms` alternating), plus the old `binance-rwa-probe.ts --rps 5,10,20,30`.
+  - Header `x-oc-ratelimit-limit` now reads **1200** (was 5). `x-oc-ratelimit-remaining` is *not* the
+    binding counter: it reads 1200 minus what was sent in the current second (1160 at 40 rps,
+    1170 at 30, 1182 at 18) and resets every second, while the 429 came from a longer window.
+  - No per-second cap: `/tokens` 5/10/20/30 rps × 4 s, 0 of 260 rejected; a 40-request same-tick
+    burst across two endpoints, 40 of 40 ok; 40 rps sustained for 28 s, no 429.
+  - 40 rps: first 429 at request 1 129 of the run (~1 170 sent in the trailing 60 s), then
+    `429 42900`, `Retry-After: 10`, `x-oc-blocked-by: RateLimitFilter/42900`, recovered ~9 s later.
+    30 rps started right after an 18 rps run: first 429 at request 980, ~32 s in, with ~1 200
+    sent in the trailing 60 s and `Retry-After: 1`. **18 rps for 100 s (1 800 requests): 0 rejected.**
+  - Still per key across endpoints: with `/tokens` and `/platforms` alternating, the two together
+    hit 1 200; per-endpoint buckets would have allowed 1 200 each.
+  - Latency unchanged (p50 135–150 ms, p95 150–230 ms from Vietnam).
+  - Not established: whether the window is sliding or fixed (the 10 s block after a heavy overshoot
+    is shorter than a sliding 60 s would suggest), whether rejected requests count against it, and
+    per key vs per IP (needs a second host).
+  - Decision: the plane's bucket is `BINANCE_RWA_RPS` (default 5); Railway runs **18** = 90 % of 20.
+- Original measurement, 2026-09-16, key at its first limit (kept for the record):
 - Page: https://web3.binance.com/en/dev-docs/authentication — "Per Endpoint: 5 RPS (default)".
 - Measured (staggered sends, nonce on):
   - `/tokens` alone: 3 rps → 15/15 ok; 5 rps → 25/25 ok; 6 rps → exactly 1 rejected
@@ -81,8 +102,8 @@ friction · **OK**: something that worked first time and deserves credit.
   present on 200s and also decrement across different endpoints (platforms → tokens
   → underlying-market read remaining 4, 3, 2). None of these headers are documented.
 - Budget arithmetic for this plane: 5 rps = 300/min, well under the 1 200/60 s key
-  limit, so the per-second bucket is the only one that binds. A rate-limit increase
-  has been requested; re-run `--rps 5,8,12,20` after it lands and record the new ceiling here.
+  limit, so the per-second bucket was the only one that bound. (The increase landed; see the
+  2026-10-01 update above.)
 - Latency at ≤5 rps: p50 107–150 ms, p95 ~155–240 ms from a residential connection
   in Vietnam (CloudFront PoP HAN51). Comparable to OKX OnchainOS (~90–155 ms).
 
@@ -284,8 +305,8 @@ friction · **OK**: something that worked first time and deserves credit.
   set at startup.
 
 ## Open items to measure next
-- Rate ceiling after the limit increase is granted (re-run the ramp, update PITFALL-6).
-- Whether the 5 rps bucket is per key or per IP (needs a second key or a second host).
+- ~~Rate ceiling after the limit increase~~ measured 2026-10-01: ~1 200 requests / 60 s per key (PITFALL-6).
+- Whether the key's bucket is per key or per IP (needs a second key or a second host).
 - `/tokens` `tabId` semantics and the 77-vs-46 bstock discrepancy (QUIRK-9).
 - ~~Market API candles for stock tokens~~ measured 2026-09-17 (QUIRK-17): exists, plane chain already serves stocks, not adopting now.
 - `/quote` read-only cross-check for Ondo (RFQ-only) vs bStock vs xStock routing.

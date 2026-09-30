@@ -3,6 +3,7 @@ import { afterEach, describe, it } from "node:test";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import {
+  BINANCE_FLASH_BUDGET_WAIT_MS,
   BinanceFlashInvalidResponseError,
   BinanceFlashRateBudgetError,
   fetchBinanceFlashQuote,
@@ -170,6 +171,25 @@ describe("Binance Flash adapter", () => {
       (error: unknown) => error instanceof BinanceFlashRateBudgetError,
     );
     assert.ok(Date.now() - started < 1_000);
+    assert.equal(calls, 0);
+  });
+
+  it("waits the default budget, then refuses, when the shared bucket is empty", async () => {
+    armCredentials();
+    let calls = 0;
+    const fetchFn: typeof globalThis.fetch = async () => {
+      calls += 1;
+      return providerResponse();
+    };
+    const limiter = createRateLimiter({ capacity: 1, refillPerSecond: 0.001 });
+    await limiter.acquire();
+    const started = Date.now();
+    await assert.rejects(
+      fetchBinanceFlashQuote(REQUEST, CONFIG, { fetchFn, limiter, requestStartedAt: 1_900_000_000_000 }),
+      (error: unknown) => error instanceof BinanceFlashRateBudgetError,
+    );
+    const waited = Date.now() - started;
+    assert.ok(waited >= BINANCE_FLASH_BUDGET_WAIT_MS - 50 && waited < BINANCE_FLASH_BUDGET_WAIT_MS + 500, `waited ${waited}ms`);
     assert.equal(calls, 0);
   });
 

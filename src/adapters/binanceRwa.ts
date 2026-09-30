@@ -11,8 +11,10 @@
  *   and the server keys anti-replay on `X-OC-NONCE` *falling back to the
  *   signature*, so the second is `401 40103 Duplicate request detected`. A
  *   fresh nonce goes on every request.
- * - The rate limit is 5 rps **per key across all endpoints**, not per endpoint
- *   as documented. One module-level bucket paces every caller in the process.
+ * - The rate limit is **per key across all endpoints**, not per endpoint as
+ *   documented: 5 rps when measured on 2026-09-16, and after the key was raised
+ *   a sliding 1 200 requests / 60 s (see PITFALL-6). One module-level bucket,
+ *   sized by `BINANCE_RWA_RPS` (default 5), paces every caller in the process.
  * - `/price` with 100 addresses (the documented maximum) is a bare `HTTP 414`
  *   from the gateway; 80 fits. Batches are chunked at {@link RWA_PRICE_BATCH_MAX}.
  *
@@ -47,20 +49,52 @@ export const BSC_CHAIN_ID = "56";
 
 /** Measured ceiling: 80 addresses → 200, 90 → 414. */
 export const RWA_PRICE_BATCH_MAX = 80;
-/** Binance's per-key ceiling, shared by every endpoint. */
-export const BINANCE_RWA_RPS = 5;
+/** Bucket rate when `BINANCE_RWA_RPS` is unset: the ceiling measured 2026-09-16, before the key was raised. */
+export const BINANCE_RWA_DEFAULT_RPS = 5;
+/** Sanity bound: the key's window is 1 200 requests per 60 s, so no per-second rate above it can be right. */
+export const BINANCE_RWA_MAX_RPS = 1200;
 /** Longest a 429 retry will wait, whatever `Retry-After` says. */
 export const RETRY_AFTER_CAP_S = 5;
 
 /**
- * One bucket per process. Every future caller of this adapter — candles,
- * underlying-market sweeps — must go through it, because the server counts
- * the key, not the endpoint.
+ * Reads the bucket rate from `BINANCE_RWA_RPS`: unset means
+ * {@link BINANCE_RWA_DEFAULT_RPS}; anything else must be a positive integer up
+ * to {@link BINANCE_RWA_MAX_RPS}. A malformed value throws rather than falling
+ * back, because a silent 5 after the key was raised hides the mistake and a
+ * silent high value sends the key into 429s.
  */
-export const BINANCE_RWA_LIMITER: RateLimiter = createRateLimiter({
-  capacity: BINANCE_RWA_RPS,
-  refillPerSecond: BINANCE_RWA_RPS,
-});
+export function readBinanceRwaRps(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env["BINANCE_RWA_RPS"];
+  if (raw === undefined) return BINANCE_RWA_DEFAULT_RPS;
+  const text = raw.trim();
+  const rps = /^[1-9][0-9]*$/u.test(text) ? Number(text) : Number.NaN;
+  if (!Number.isSafeInteger(rps) || rps > BINANCE_RWA_MAX_RPS) {
+    throw new Error(`invalid BINANCE_RWA_RPS: expected an integer from 1 to ${BINANCE_RWA_MAX_RPS}`);
+  }
+  return rps;
+}
+
+let sharedLimiter: RateLimiter | undefined;
+
+/**
+ * One bucket per process, built on first use so a `.env` loaded after this
+ * module was imported is still honoured. Every caller of this adapter — RWA
+ * data, candles, the Flash proxy — must go through it, because the server
+ * counts the key, not the endpoint.
+ */
+export const BINANCE_RWA_LIMITER: RateLimiter = {
+  acquire(signal) {
+    return (sharedLimiter ??= buildSharedLimiter()).acquire(signal);
+  },
+  available() {
+    return (sharedLimiter ??= buildSharedLimiter()).available();
+  },
+};
+
+function buildSharedLimiter(): RateLimiter {
+  const rps = readBinanceRwaRps();
+  return createRateLimiter({ capacity: rps, refillPerSecond: rps });
+}
 
 interface Credentials {
   apiKey: string;

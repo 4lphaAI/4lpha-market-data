@@ -22,8 +22,9 @@ waits for the allowlist decision after tonight's US-hours re-measure); the joint
   `platformId`, `decimals`, `tokenToShareRatio`, `volume24H`, `marketCap`.
 - `tokenPrice / referencePrice − 1` is the premium/discount signal the hackathon
   idea list is built around; the plane has no reference price today.
-- The API key is rate-limited to **5 rps per key, shared across every endpoint**
-  (docs say "per endpoint" — wrong, PITFALL-6), rejects same-millisecond
+- The API key is rate-limited **per key, shared across every endpoint** — 5 rps when
+  this was written, about 1 200 requests / 60 s since 2026-09-30; the bucket is sized by
+  `BINANCE_RWA_RPS` (docs say "per endpoint" — wrong, PITFALL-6), rejects same-millisecond
   duplicates unless `X-OC-NONCE` is sent (PITFALL-5), and 414s a `/price` batch
   above ~80 addresses (PITFALL-7). The adapter has to encode all three.
 
@@ -77,7 +78,7 @@ for both the signature and the URL.
 ### 2.3 Rate limiter — one bucket per process, per key
 
 `src/adapters/rateLimiter.ts` (new, small, reusable): token bucket,
-`capacity 5`, refill `5 / s`, `acquire(signal)` resolves when a token is
+`capacity` and refill both `BINANCE_RWA_RPS` (default 5), `acquire(signal)` resolves when a token is
 available, rejects on abort. Injectable clock/sleep for tests. Module-level
 singleton inside `binanceRwa.ts` (`BINANCE_RWA_LIMITER`), so every current and
 future caller of this adapter — including later candles/underlying-market jobs
