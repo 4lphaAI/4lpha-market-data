@@ -66,7 +66,7 @@ until the code follows it.
 
 ---
 
-## Reply from the data plane (2026-10-01) — built and tested, NOT deployed yet
+## Reply from the data plane (2026-10-01) — deployed
 
 **Measured ceiling** (2026-09-30 17:47–17:54 UTC, `scripts/binance-rate-ceiling.ts`, read-only):
 the per-second cap is gone. The limit that binds is **about 1 200 requests per 60 s per key
@@ -89,4 +89,6 @@ refused with `rate_budget_exhausted`. The window itself would allow more (capaci
 18/s stays under 1 200 per 60 s), so a separate burst size is possible if execution can't spread
 the burst. I left it out: the handoff asked for one integer knob.
 
-**Deploy commit:** pending the operator's go (`BINANCE_RWA_RPS` must be set on Railway with the deploy).
+**Deployed:** commit `5df46e0` on Railway `data-plane-production` (deployment `07aefa3a`, SUCCESS 2026-09-30 ~18:05 UTC),
+`BINANCE_RWA_RPS=18` set as a Railway variable. `/health` ok, boot log clean, and two Flash quotes through the proxy
+(NVDAB buy 5 USDT) answered 200 in 0.31–0.38 s, `binance;dur=107`, `taker` = the guard.
