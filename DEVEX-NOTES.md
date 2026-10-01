@@ -304,6 +304,50 @@ friction · **OK**: something that worked first time and deserves credit.
   or 13:31 UTC for the same address); the execution plane must not pin the "open"
   set at startup.
 
+## 2026-09-23 — Flash aggregator vs direct PancakeSwap V3, measured
+
+`scripts/flash-vs-amm.ts`, read-only: `quote-and-swap` (LiquidMesh, taker `0x…dead`,
+0.5 % slippage) against PancakeSwap V3 QuoterV2 `quoteExactInputSingle` over every
+fee tier of the direct USDT pool, same pair and size fired together. 5 bStocks ×
+{100, 1k, 10k} USD × buy/sell, two passes 36 s apart at 02:40 ET (US overnight).
+**60/60 Flash quotes answered, 0 errors.** Edge = Flash out / best Pancake V3 out − 1.
+
+| Token | buy 100 | buy 1k | buy 10k | sell 100 | sell 1k | sell 10k |
+|---|---:|---:|---:|---:|---:|---:|
+| SPYB | 0.2 | 0.1 | 1.4 | 2.4 | 2.2 | 2.7 |
+| QQQB | −0.1 / 1.4 | 0.7 / 2.3 | 12.6 / 16.2 | 1.9 / 0.5 | 2.7 / 1.4 | 6.4 / 6.9 |
+| NVDAB | 1.0 | 0.9 | 0.6 | 7.7 | 13.7 | 45.3 |
+| TSLAB | 17.5 | 19.9 | 26.1 | 26.9 | 28.1 | 39.7 |
+| GOOGLB | 0.5 / 3.1 | 3.3 / 2.1 | 2.5 / 1.9 | 2.3 / 0 | 6.8 / 4.9 | 39.0 |
+
+(bps, pass 1 / pass 2 where they differ by >1 bp.) One negative in 60: QQQB buy $100, −0.1 bp.
+
+What drives it:
+
+- **Not an aggregator fee.** `feeAmount`/`feeToken` were `null` on every quote.
+- **Venues the direct path cannot see.** Flash split across Pancake V3, **Pancake V4 (Infinity)**,
+  Uniswap V3/V4, and non-AMM liquidity: `Metric`, `Elfomofi`, `Tessera V` and RFQ makers
+  (`Rfq Neptunex`, `Rfq Neptune`, `Rfq Halfmoon`, `Rfq Native`). TSLAB sells went 100 % to one
+  RFQ maker at every size. The direct path is stuck on the 0.25 % / 1 % tier for TSLAB and
+  NVDAB, which is most of their edge.
+- **Depth at size.** Edges grow with size on the thin books: NVDAB/GOOGLB/TSLAB sells at $10k
+  are 39–45 bps better, QQQB buys 13–16. SPYB and NVDAB buys are within 2 bps at all sizes.
+- **Speed is not the differentiator.** Flash quote p50 160 ms / p95 255 / max 440; the V3 quoter
+  over public RPC p50 216 / p95 819 / max 9,103 ms (one GOOGLB sell). Similar at the median; the
+  public-RPC tail is worse. A quote is not a fill either way.
+
+Friction worth reporting:
+
+- `tx.gas` is **450,000 on every quote** regardless of route (1–6 legs); it reads as a fixed limit,
+  not an estimate. `routerResult.tradeFee` is that limit × gas price in USD (~$0.02).
+- A route with RFQ legs still reports top-level `rfq: null` and `executionMode: "SWAP"`: the maker
+  quotes are embedded in the calldata (1.6–5.7 KB), so the 15 s validity is load-bearing.
+- `userWalletAddress` accepts an unfunded address and still builds calldata, which is what makes
+  a read-only comparison possible at all.
+
+Not measured: fills, RFQ rejection rate, and the guard's own gas. At ~0.06 gwei the whole gas
+difference is ≤ ~$0.015, i.e. ~1.5 bps at $100 and noise from $1k up.
+
 ## Open items to measure next
 - ~~Rate ceiling after the limit increase~~ measured 2026-10-01: ~1 200 requests / 60 s per key (PITFALL-6).
 - Whether the key's bucket is per key or per IP (needs a second key or a second host).
