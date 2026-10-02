@@ -24,6 +24,8 @@ import {
   type BinanceFlashQuoteRequest,
 } from "./adapters/binanceFlash.js";
 import { BINANCE_FLASH_USDT_ADDRESS, type BinanceFlashConfig } from "./config/binanceFlash.js";
+import { BINANCE_SIMULATE_MAX_REQUEST_BYTES, BinanceSimulateInvalidResponseError,
+  BinanceSimulateRateBudgetError, fetchBinanceSimulate, parseBinanceSimulateRequest } from "./adapters/binanceSimulate.js";
 import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "./query/klines.js";
 import { getPoolOhlcv, poolOhlcvDiagnostics } from "./query/poolOhlcv.js";
 import { FEATURE_INDEX_KEY, FEATURE_INDEX_KEY_V2, FEATURE_VERSION, FEATURE_VERSION_V2, featureKey, isFeatureInterval, readTradingFeatures, readFeatureAttempt,
@@ -63,6 +65,8 @@ import {
 
 /** Collaborators the HTTP layer reads from. Injected so the app stays testable. */
 export interface ServerDeps {
+  binanceSimulateEnabled?: boolean;
+  fetchBinanceSimulate?: FetchFn;
   studio?: StudioConfig | null;
   scheduler: Scheduler;
   store: SnapshotStore;
@@ -514,6 +518,46 @@ export function createServer(deps: ServerDeps): Hono {
       },
     }),
   );
+
+  app.post("/internal/binance/pre-transaction/simulate", async (c) => {
+    let upstreamCode = "none";
+    const fail = (status: 400 | 502 | 503, code: string, reason: string, error?: unknown, ms = 0) => {
+      console.warn(`[binance-simulate] failure reason=${reason} status=${error instanceof AdapterError ? error.status ?? "none" : "none"} code=${upstreamCode} ms=${ms}`);
+      return c.json({ data: null, error: { code, reason } }, status);
+    };
+    if (deps.binanceSimulateEnabled !== true) return fail(503, "simulate_unavailable", "disabled");
+    let text: string | null;
+    try { text = await readBoundedBody(c.req.raw, BINANCE_SIMULATE_MAX_REQUEST_BYTES); }
+    catch { return fail(400, "simulate_invalid_request", "request_body_unreadable"); }
+    if (text === null) return fail(400, "simulate_invalid_request", "request_body_too_large");
+    let body: unknown;
+    try { body = JSON.parse(text) as unknown; } catch { return fail(400, "simulate_invalid_request", "request_json_invalid"); }
+    const request = parseBinanceSimulateRequest(body);
+    if (typeof request === "string") return fail(400, "simulate_invalid_request", request);
+    let deadline: AbortSignal | undefined;
+    let upstreamMs = 0;
+    try {
+      const data = await fetchBinanceSimulate(request, { fetchFn: deps.fetchBinanceSimulate, signal: c.req.raw.signal,
+        onDeadline: value => { deadline = value; }, onUpstreamMs: ms => { upstreamMs = ms; c.header("server-timing", `binance;dur=${ms}`); } });
+      return c.json({ data, meta: { upstreamMs } });
+    } catch (error) {
+      if (error instanceof AdapterError && error.upstreamCode !== undefined) {
+        upstreamCode = /^[0-9A-Za-z_-]{1,16}$/u.test(error.upstreamCode) ? error.upstreamCode : "other";
+      }
+      let status: 502 | 503 = 503, code = "simulate_unavailable", reason = "upstream_unavailable";
+      if (error instanceof MissingCredentialsError) reason = "credentials_unavailable";
+      else if (error instanceof BinanceSimulateRateBudgetError) reason = "rate_budget_exhausted";
+      else if (deadline?.aborted) reason = "upstream_timeout";
+      else if (error instanceof BinanceSimulateInvalidResponseError) { status = 502; code = "simulate_invalid_response"; reason = error.reason; }
+      else if (error instanceof AdapterError) {
+        if (error.status === 429) reason = "upstream_rate_limited";
+        else if (error.status === 401 || error.status === 403) reason = "auth_rejected";
+        else if (error.status === 200 || error.status === 413) { status = 502; code = "simulate_invalid_response"; reason = error.status === 413 ? "response_too_large" : "upstream_payload_invalid"; }
+        else if (error.upstreamCode !== undefined) { status = 502; code = "simulate_upstream_error"; reason = `code:${upstreamCode}`; }
+      }
+      return fail(status, code, reason, error, upstreamMs);
+    }
+  });
 
   app.post("/trading/binance/quote-and-swap", async (c) => {
     const config = deps.binanceFlash ?? null;

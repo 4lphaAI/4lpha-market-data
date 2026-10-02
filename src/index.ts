@@ -25,12 +25,16 @@ import {
 import { studioConfig } from "./studio/config.js";
 import { studioJob } from "./studio/catalog.js";
 import { readBinanceFlashConfig } from "./config/binanceFlash.js";
+import { readBinanceSimulateEnabled } from "./adapters/binanceSimulate.js";
 
 loadDotEnv();
 const studio = studioConfig(process.env);
 if (process.env["STUDIO_DISCOVERY_ENABLED"] === "true" && !studio) console.warn("[studio] invalid configuration; integration disabled" );
 readBinanceRwaRps(process.env); // a malformed BINANCE_RWA_RPS stops the boot instead of the first Binance call
 const binanceFlash = readBinanceFlashConfig(process.env);
+const binanceSimulateEnabled = readBinanceSimulateEnabled(process.env);
+console.log(`[binance-simulate] route ${binanceSimulateEnabled ? "enabled" : "disabled"}`);
+if (binanceSimulateEnabled && !process.env["DP_AUTH_TOKEN"]?.trim()) console.warn("[binance-simulate] DP_AUTH_TOKEN unset: the internal route answers 503");
 if (binanceFlash === null) console.warn("[binance-flash] verified guard configuration absent; route unavailable");
 
 const DEFAULT_PORT = 8080;
@@ -94,7 +98,7 @@ if (studio) scheduler.register(studioJob(store, studio));
 
 scheduler.start();
 
-const app = createServer({ scheduler, store, studio, binanceFlash });
+const app = createServer({ scheduler, store, studio, binanceFlash, binanceSimulateEnabled });
 const port = resolvePort(process.env["PORT"]);
 const server = serve({ fetch: app.fetch, port });
 
