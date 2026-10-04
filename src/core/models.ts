@@ -80,6 +80,12 @@ export interface RwaToken {
   reasonCode: string | null;
   nextOpenMs: number | null;
   nextCloseMs: number | null;
+  /**
+   * `per-address` for an allowlisted stock Binance's `/rwa/tokens` list does not
+   * carry (it lists 46 of the issuer's 87 BSC bStocks), assembled from
+   * `/rwa/price` + `/rwa/underlying-market`; absent on list rows.
+   */
+  origin?: "per-address";
 }
 
 import type { Staleness } from "./types.js";

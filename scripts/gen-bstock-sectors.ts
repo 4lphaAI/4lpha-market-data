@@ -34,6 +34,16 @@ for (const token of allBstocks) {
   const key = token.underlyingTicker.toUpperCase();
   bstocksByTicker.set(key, [...(bstocksByTicker.get(key) ?? []), token]);
 }
+// Allowlisted bStocks the list omits (read per address by `binance-rwa`, e.g.
+// AAPLB) get labels too: the tab names a ticker, not an address.
+const { allowlistedStocks } = await import("../src/allowlist.js");
+for (const entry of allowlistedStocks()) {
+  if (entry.platform !== "bstock" || !entry.readPerAddress || entry.underlyingTicker === null) continue;
+  const key = entry.underlyingTicker.toUpperCase();
+  const existing = bstocksByTicker.get(key) ?? [];
+  if (existing.some((token) => token.address === entry.address)) continue;
+  bstocksByTicker.set(key, [...existing, { ...allBstocks[0]!, address: entry.address, symbol: entry.symbol, underlyingTicker: entry.underlyingTicker }]);
+}
 
 const byAddress: Record<string, { symbol: string; sectors: string[] }> = {};
 const counts: Record<string, number> = {};

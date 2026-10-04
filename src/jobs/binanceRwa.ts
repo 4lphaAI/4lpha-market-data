@@ -1,8 +1,10 @@
 /**
  * `binance-rwa` job — the tokenized-stock list from the Binance Web3 RWA API.
  *
- * One signed call per cycle (`/tokens?binanceChainId=56`, 488 rows measured)
- * is the whole product's Binance load: consumers read the snapshot, never the
+ * One signed list call per cycle (`/tokens?binanceChainId=56`, 488 rows
+ * measured), plus a per-address read for allowlisted stocks that list omits
+ * (one `/price` batch and one `/underlying-market` each — 5 calls for 4 stocks
+ * as of 2026-10-04), is the whole product's Binance load: consumers read the snapshot, never the
  * API. Every row carries the on-chain price, the underlying's reference price
  * and the issuer's session state, so this one snapshot feeds the `bstocks` and
  * `ondo` lanes, the premium/discount signal, and (later) the halted-token rule
@@ -16,9 +18,18 @@
 import type { RwaToken, TokenSnapshot, Venue } from "../core/models.js";
 import type { SnapshotStore } from "../core/store.js";
 import type { JobSpec } from "../core/types.js";
-import { BINANCE_RWA_SOURCE, fetchRwaTokens } from "../adapters/binanceRwa.js";
+import {
+  BINANCE_RWA_SOURCE,
+  fetchRwaPrices,
+  fetchRwaTokens,
+  fetchRwaUnderlyingMarket,
+  premiumBps,
+  type RwaPrice,
+  type RwaUnderlyingMarket,
+} from "../adapters/binanceRwa.js";
 import type { FetchFn } from "../adapters/http.js";
-import { normalizeAddress } from "../adapters/http.js";
+import { normalizeAddress, sanitizeMessage } from "../adapters/http.js";
+import { allowlistedStocks } from "../allowlist.js";
 import { RWA_MEMBERS_KEY, RWA_UNIVERSE_KEY, RWA_VENUES_KEY } from "../universe.js";
 import { mergeTokenIntoStore } from "./tokenStore.js";
 
@@ -73,6 +84,10 @@ export interface BinanceRwaCycle {
   dropped: number;
   /** Token snapshots that received a price. */
   priced: number;
+  /** Allowlisted stocks off the list, read per address this cycle. */
+  perAddress: number;
+  /** Symbols whose per-address read failed — vetoed `rwa_stale` until it succeeds. */
+  perAddressMissed: string[];
 }
 
 /** Runs one cycle. Exported so tests and scripts can drive it directly. */
@@ -81,10 +96,13 @@ export async function runBinanceRwa(
   signal: AbortSignal,
   options: RunBinanceRwaOptions = {},
 ): Promise<BinanceRwaCycle> {
-  const { tokens, dropped } = await fetchRwaTokens({ signal, fetchFn: options.fetchFn });
+  const listed = await fetchRwaTokens({ signal, fetchFn: options.fetchFn });
+  const { dropped } = listed;
   // An empty list is an outage or a shape change, not a real universe; keeping
   // the previous snapshot is strictly better than publishing nothing.
-  if (tokens.length === 0) throw new Error("rwa token list returned no BSC rows");
+  if (listed.tokens.length === 0) throw new Error("rwa token list returned no BSC rows");
+  const extras = await fetchUnlistedAllowlisted(listed.tokens, signal, options.fetchFn);
+  const tokens = [...listed.tokens, ...extras.rows];
 
   const byPlatform: Record<string, number> = {};
   for (const token of tokens) byPlatform[token.platform] = (byPlatform[token.platform] ?? 0) + 1;
@@ -130,7 +148,76 @@ export async function runBinanceRwa(
     priced++;
   }
 
-  return { rows: tokens.length, byPlatform, dropped, priced };
+  return { rows: tokens.length, byPlatform, dropped, priced, perAddress: extras.rows.length, perAddressMissed: extras.missed };
+}
+
+/**
+ * Allowlisted stocks marked `listedInBinanceRwaTokens: false`, read per address
+ * (skipped once the list carries them).
+ *
+ * Measured 2026-10-04: the list returns 46 bStocks while `/rwa/platforms` counts
+ * 87 on BSC, and no paging parameter changes that — but `/rwa/price` and
+ * `/rwa/underlying-market` answer the unlisted ones (PYPLB, AAPLB, CRDOB, COHRB)
+ * with the same `platformId`, `openState` and `reasonCode` the list carries.
+ * Session state is what rule 5 decides on, so a stock whose underlying-market
+ * read fails is left out of the snapshot: as an allowlisted stock it is still a
+ * member, and a member with no fresh row is vetoed `rwa_stale`. A missing price
+ * only leaves the price null. Never throws.
+ */
+async function fetchUnlistedAllowlisted(
+  listed: readonly RwaToken[],
+  signal: AbortSignal,
+  fetchFn: FetchFn | undefined,
+): Promise<{ rows: RwaToken[]; missed: string[] }> {
+  const known = new Set(listed.map((token) => token.address));
+  const wanted = allowlistedStocks().filter((entry) => entry.readPerAddress && !known.has(entry.address));
+  if (wanted.length === 0) return { rows: [], missed: [] };
+
+  let prices = new Map<string, RwaPrice>();
+  try {
+    prices = await fetchRwaPrices({ addresses: wanted.map((entry) => entry.address), signal, fetchFn });
+  } catch (error) {
+    console.warn(`[${BINANCE_RWA_JOB}] per-address prices failed: ${sanitizeMessage(error)}`);
+  }
+
+  const rows: RwaToken[] = [];
+  const missed: string[] = [];
+  for (const entry of wanted) {
+    if (signal.aborted) break;
+    let market: RwaUnderlyingMarket;
+    try {
+      market = await fetchRwaUnderlyingMarket({ address: entry.address, signal, fetchFn });
+    } catch (error) {
+      missed.push(entry.symbol);
+      console.warn(`[${BINANCE_RWA_JOB}] underlying-market failed for ${entry.symbol}: ${sanitizeMessage(error)}`);
+      continue;
+    }
+    const price = prices.get(entry.address);
+    const tokenPriceUsd = price?.tokenPriceUsd ?? null;
+    const referencePriceUsd = price?.referencePriceUsd ?? market.referencePriceUsd;
+    rows.push({
+      address: entry.address,
+      symbol: entry.symbol,
+      name: entry.name,
+      platform: market.platform ?? price?.platform ?? "unknown",
+      underlyingTicker: entry.underlyingTicker,
+      underlyingName: null,
+      decimals: null,
+      tokenToShareRatio: null,
+      tokenPriceUsd,
+      referencePriceUsd,
+      navPremiumBps: premiumBps(tokenPriceUsd, referencePriceUsd),
+      underlyingMarketCapUsd: market.marketCapUsd,
+      underlyingVolume24hUsd: null,
+      openState: market.openState,
+      marketStatus: market.marketStatus,
+      reasonCode: market.reasonCode,
+      nextOpenMs: market.nextOpenMs,
+      nextCloseMs: market.nextCloseMs,
+      origin: "per-address",
+    });
+  }
+  return { rows, missed };
 }
 
 /** Deepest venue's 24h volume per token, from the `stock-venues` snapshot; empty when unswept. */

@@ -83,10 +83,10 @@ describe("loadAllowlist", () => {
   it("indexes the frozen snapshot by lowercased address", () => {
     const allowlist = loadAllowlist();
     assert.notEqual(allowlist, null);
-    // 229 of the snapshot's 230 (revisions 2026-09-17 and 2026-09-19: stock subset = the 34 with
-    // an AMM pool or a Binance aggregator route): the BNB entry is the sentinel `"native"`, which has no
+    // 235 of the snapshot's 236 (revisions 2026-09-17/19: the 34 stocks with a real venue;
+    // 2026-10-04: +6 bStocks on operator request): the BNB entry is the sentinel `"native"`, which has no
     // contract address and is therefore never asked about by address.
-    assert.equal(allowlist!.size, 229);
+    assert.equal(allowlist!.size, 235);
     assert.equal(allowlist!.has("native"), false);
     assert.ok(allowlist!.has(USDT));
     // The snapshot itself is lowercase; a checksummed address only hits because

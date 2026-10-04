@@ -25,6 +25,25 @@ export interface AllowlistEntry {
    * came from.
    */
   source: string;
+  /** `bstock` | `ondo` on tokenized-stock rows; `null` on everything else. */
+  platform: string | null;
+  name: string | null;
+  underlyingTicker: string | null;
+  /**
+   * True on a stock whose entry says `listedInBinanceRwaTokens: false` — one the
+   * `/rwa/tokens` list does not carry, so the `binance-rwa` job reads it per
+   * address. Explicit rather than inferred from "missing from the list": a
+   * listed stock that drops off is a change worth a veto (`rwa_stale`), not a
+   * reason to start polling it another way.
+   */
+  readPerAddress: boolean;
+}
+
+/** Tokenized stocks on the allowlist — the rows rule 5 must always see. */
+export function allowlistedStocks(): AllowlistEntry[] {
+  const allowlist = loadAllowlist();
+  if (allowlist === null) return [];
+  return [...allowlist.values()].filter((entry) => entry.platform === "bstock" || entry.platform === "ondo");
 }
 
 /** Reported for an entry whose `sources` array is missing or unusable. */
@@ -74,6 +93,10 @@ export function loadAllowlist(): ReadonlyMap<string, AllowlistEntry> | null {
         address,
         symbol: typeof record["symbol"] === "string" ? record["symbol"] : "",
         source,
+        platform: typeof record["platform"] === "string" ? record["platform"] : null,
+        name: typeof record["name"] === "string" ? record["name"] : null,
+        underlyingTicker: typeof record["underlyingTicker"] === "string" ? record["underlyingTicker"] : null,
+        readPerAddress: record["listedInBinanceRwaTokens"] === false,
       });
     }
     if (index.size === 0) throw new Error("snapshot has no usable entries");

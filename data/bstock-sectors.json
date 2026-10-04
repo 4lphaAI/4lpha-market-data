@@ -1,6 +1,6 @@
 {
   "meta": {
-    "generatedAt": "2026-09-26T06:16:12.672Z",
+    "generatedAt": "2026-10-04T16:06:05.035Z",
     "source": "binance-web3 /api/v1/dex/market/rwa/tokens?tabId=",
     "note": "Labels are ours: the API filters by tabId but returns no tab names, so each name was inferred from the tickers in the tab. bStocks only. Regenerate with scripts/gen-bstock-sectors.ts.",
     "tabs": {
@@ -46,19 +46,27 @@
       }
     },
     "counts": {
-      "mag7": 5,
+      "mag7": 6,
       "ai-chips": 7,
-      "big-tech": 16,
+      "big-tech": 18,
       "crypto-stocks": 4,
       "memory": 5,
       "etf": 3,
       "sector-etf": 6,
       "space-defense": 3,
       "china": 1,
-      "buffett": 1
+      "buffett": 2
     }
   },
   "byAddress": {
+    "0x431a3bee82e2ca41e49895cbece5bb0f76a89b7a": {
+      "symbol": "AAPLB",
+      "sectors": [
+        "mag7",
+        "big-tech",
+        "buffett"
+      ]
+    },
     "0x75fd4cf6f8392e41e70391d60c90c0d5211603a1": {
       "symbol": "AMDB",
       "sectors": [
@@ -200,6 +208,12 @@
     },
     "0x0ca5d51d0277bd006fd9607d3e560785ebad8222": {
       "symbol": "PLTRB",
+      "sectors": [
+        "big-tech"
+      ]
+    },
+    "0x2806a561fc1f9259b2d54a281796bde0d92762ae": {
+      "symbol": "PYPLB",
       "sectors": [
         "big-tech"
       ]

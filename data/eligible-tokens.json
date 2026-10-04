@@ -3,12 +3,12 @@
     "snapshotAt": "2026-08-11T15:19:53.615Z",
     "description": "Static eligible-token allowlist for trade/LP gating. Four.Meme-launched tokens are eligible by factory rule, not enumerated here. Deliberately frozen; regenerate only by explicit decision.",
     "counts": {
-      "eligible": 230,
+      "eligible": 236,
       "needsReview": 3,
       "bySource": {
         "cmc-top200-bsc": 197,
-        "stocks-tier-a": 26,
-        "bstocks": 26,
+        "stocks-tier-a": 32,
+        "bstocks": 32,
         "stocks-tier-b": 8,
         "ondo": 7,
         "static": 4
@@ -76,6 +76,19 @@
           "LITEB"
         ],
         "removed": []
+      },
+      {
+        "at": "2026-10-04T13:30:00Z",
+        "decision": "Operator call: the agentic wallet removes the cap on how many stocks the product carries, so six bStocks are added to tier A on request rather than by the 0.5%-at-$10k rule. Each was checked through the Binance Web3 RWA API (per-address /rwa/price and /rwa/underlying-market: platform bstock, openState true, TRADING) and on chain (DEFAULT_ADMIN_ROLE member 0 = the bStock issuer admin 0x45e35fe9...679d). PYPLB, AAPLB, CRDOB and COHRB are NOT in /rwa/tokens (46 of the issuer's 87 BSC bStocks are listed there), so the binance-rwa job now reads allowlisted stocks missing from the list per address, and rule 5 treats every allowlisted stock as a member: one without a fresh row is vetoed rwa_stale, never admitted unchecked. Measured aggregator cost at $10k (Sunday): COHRB 0.12/0.10%, AAPLB 0.16/-0.02%, GLWB 0.33/0.24%, CRDOB 0.19/0.66% (sell over 0.5%), PYPLB 0.70/0.02% (buy over 0.5%), MUUB 0.57/-0.19% (buy over 0.5%); no route at $50k on the sell side for GLWB, AAPLB, CRDOB. PYPLB exists now although the 2026-09-19 revision found no PYPL bStock.",
+        "added": [
+          "GLWB",
+          "PYPLB",
+          "AAPLB",
+          "CRDOB",
+          "COHRB",
+          "MUUB"
+        ],
+        "removed": []
       }
     ]
   },
@@ -92,6 +105,35 @@
       "addressSource": "coingecko",
       "onChainSymbol": "1INCH",
       "verifiedOnChain": true
+    },
+    {
+      "address": "0x431a3bee82e2ca41e49895cbece5bb0f76a89b7a",
+      "symbol": "AAPLB",
+      "name": "Apple (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa/price+underlying-market",
+      "onChainSymbol": "AAPLB",
+      "verifiedOnChain": true,
+      "issuerAdminVerified": true,
+      "listedInBinanceRwaTokens": false,
+      "platform": "bstock",
+      "underlyingTicker": "AAPL",
+      "tier": "A",
+      "measured": {
+        "at": "2026-10-04T13:30:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "vsNavPct": {
+          "buy10k": 0.16,
+          "sell10k": -0.02,
+          "buy50k": 0.17,
+          "sell50k": null
+        },
+        "note": "Sunday; RFQ-led routes; null = no route at that size. Positive = cost vs Binance tokenPrice (NAV)."
+      }
     },
     {
       "address": "0xfb6115445bff7b52feb98650c87f44907e58f802",
@@ -729,6 +771,35 @@
       "verifiedOnChain": true
     },
     {
+      "address": "0x5131859a059b2446abeefe0f5d313b3c54ff3d36",
+      "symbol": "COHRB",
+      "name": "Coherent (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa/price+underlying-market",
+      "onChainSymbol": "COHRB",
+      "verifiedOnChain": true,
+      "issuerAdminVerified": true,
+      "listedInBinanceRwaTokens": false,
+      "platform": "bstock",
+      "underlyingTicker": "COHR",
+      "tier": "A",
+      "measured": {
+        "at": "2026-10-04T13:30:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "vsNavPct": {
+          "buy10k": 0.12,
+          "sell10k": 0.1,
+          "buy50k": 0.16,
+          "sell50k": 0.14
+        },
+        "note": "Sunday; RFQ-led routes; null = no route at that size. Positive = cost vs Binance tokenPrice (NAV)."
+      }
+    },
+    {
       "address": "0x585bde7c54abb5ccd7791f923d6c2187635f3952",
       "symbol": "COINB",
       "name": "Coinbase (bStocks)",
@@ -820,6 +891,35 @@
       "addressSource": "coingecko",
       "onChainSymbol": "CRCLx",
       "verifiedOnChain": true
+    },
+    {
+      "address": "0x6e7d451f9d30327d32020f116fa79c23b24e9c8d",
+      "symbol": "CRDOB",
+      "name": "Credo Technology (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa/price+underlying-market",
+      "onChainSymbol": "CRDOB",
+      "verifiedOnChain": true,
+      "issuerAdminVerified": true,
+      "listedInBinanceRwaTokens": false,
+      "platform": "bstock",
+      "underlyingTicker": "CRDO",
+      "tier": "A",
+      "measured": {
+        "at": "2026-10-04T13:30:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "vsNavPct": {
+          "buy10k": 0.19,
+          "sell10k": 0.66,
+          "buy50k": 0.27,
+          "sell50k": null
+        },
+        "note": "Sunday; RFQ-led routes; null = no route at that size. Positive = cost vs Binance tokenPrice (NAV)."
+      }
     },
     {
       "address": "0x6bf62ca91e397b5a7d1d6bce97d9092065d7a510",
@@ -1189,6 +1289,35 @@
       "verifiedOnChain": true
     },
     {
+      "address": "0x740e075cbbea22a082b9d6679e65e82767875b6a",
+      "symbol": "GLWB",
+      "name": "Corning (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa",
+      "onChainSymbol": "GLWB",
+      "verifiedOnChain": true,
+      "issuerAdminVerified": true,
+      "listedInBinanceRwaTokens": true,
+      "platform": "bstock",
+      "underlyingTicker": "GLW",
+      "tier": "A",
+      "measured": {
+        "at": "2026-10-04T13:30:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "vsNavPct": {
+          "buy10k": 0.33,
+          "sell10k": 0.24,
+          "buy50k": 0.39,
+          "sell50k": null
+        },
+        "note": "Sunday; RFQ-led routes; null = no route at that size. Positive = cost vs Binance tokenPrice (NAV)."
+      }
+    },
+    {
       "address": "0xdabb9aff4cf02f26d2014e4ca9f94ac6fe6572a3",
       "symbol": "GMEon",
       "name": "GameStop (Ondo)",
@@ -1532,6 +1661,64 @@
       "addressSource": "coingecko",
       "onChainSymbol": "LIon",
       "verifiedOnChain": true
+    },
+    {
+      "address": "0x0bb3fa77e0809f42948e435f04883c25415e8263",
+      "symbol": "MUUB",
+      "name": "Direxion Daily MU Bull 2X (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa",
+      "onChainSymbol": "MUUB",
+      "verifiedOnChain": true,
+      "issuerAdminVerified": true,
+      "listedInBinanceRwaTokens": true,
+      "platform": "bstock",
+      "underlyingTicker": "MUU",
+      "tier": "A",
+      "measured": {
+        "at": "2026-10-04T13:30:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "vsNavPct": {
+          "buy10k": 0.57,
+          "sell10k": -0.19,
+          "buy50k": 0.6,
+          "sell50k": -0.16
+        },
+        "note": "Sunday; RFQ-led routes; null = no route at that size. Positive = cost vs Binance tokenPrice (NAV)."
+      }
+    },
+    {
+      "address": "0x2806a561fc1f9259b2d54a281796bde0d92762ae",
+      "symbol": "PYPLB",
+      "name": "PayPal (bStocks)",
+      "sources": [
+        "stocks-tier-a",
+        "bstocks"
+      ],
+      "addressSource": "binance-rwa/price+underlying-market",
+      "onChainSymbol": "PYPLB",
+      "verifiedOnChain": true,
+      "issuerAdminVerified": true,
+      "listedInBinanceRwaTokens": false,
+      "platform": "bstock",
+      "underlyingTicker": "PYPL",
+      "tier": "A",
+      "measured": {
+        "at": "2026-10-04T13:30:00Z",
+        "venue": "binance-aggregator/liquidmesh",
+        "mode": "SWAP",
+        "vsNavPct": {
+          "buy10k": 0.7,
+          "sell10k": 0.02,
+          "buy50k": 0.99,
+          "sell50k": 0.22
+        },
+        "note": "Sunday; RFQ-led routes; null = no route at that size. Positive = cost vs Binance tokenPrice (NAV)."
+      }
     },
     {
       "address": "0x0782b6d8c4551b9760e74c0545a9bcd90bdc41e5",

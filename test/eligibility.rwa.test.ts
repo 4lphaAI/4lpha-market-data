@@ -303,3 +303,60 @@ describe("premiumBps on the universe row", () => {
     assert.equal(universe.entries.find((e) => e.address === NVDAB)?.premiumBps, 100);
   });
 });
+
+describe("allowlisted stocks Binance's /rwa/tokens list omits (2026-10-04)", () => {
+  // Real addresses: the allowlist file is what makes them stocks.
+  const COHRB = "0x5131859a059b2446abeefe0f5d313b3c54ff3d36";
+  const PYPLB = "0x2806a561fc1f9259b2d54a281796bde0d92762ae";
+
+  /** List without them; per-address reads answer COHRB and fail PYPLB. */
+  function upstream(): ReturnType<typeof fakeFetch> {
+    return fakeFetch((call) => {
+      if (call.url.includes("/rwa/tokens")) return ok([NVDAB_ROW]);
+      if (call.url.includes("/rwa/price")) {
+        return ok([
+          { tokenContractAddress: COHRB, platformId: "bstock", tokenPrice: "336.96", referencePrice: "336.96" },
+          { tokenContractAddress: PYPLB, platformId: "bstock", tokenPrice: "53.05", referencePrice: "52.95" },
+        ]);
+      }
+      if (call.url.includes("/rwa/underlying-market") && call.url.includes(COHRB)) {
+        return ok({ tokenContractAddress: COHRB, platformId: "bstock", statusInfo: { openState: true, marketStatus: null, reasonCode: "TRADING" }, marketData: { marketCap: "1" } });
+      }
+      return jsonResponse({ code: 500, msg: "upstream down", data: null }, 500);
+    });
+  }
+
+  it("reads them per address into the snapshot, and leaves out one whose session read failed", async () => {
+    setCredentials();
+    const store = new MemoryStore(now);
+    const result = await runBinanceRwa(store, signal(), { fetchFn: upstream().fetch });
+    assert.ok(result.perAddressMissed.includes("PYPLB"));
+    const snapshot = (await store.get<{ rows: Array<Record<string, unknown>> }>(RWA_UNIVERSE_KEY))!.data;
+    const cohrb = snapshot.rows.find((row) => row["address"] === COHRB);
+    assert.equal(cohrb?.["origin"], "per-address");
+    assert.equal(cohrb?.["platform"], "bstock");
+    assert.equal(cohrb?.["openState"], true);
+    assert.equal(cohrb?.["tokenPriceUsd"], 336.96);
+    assert.equal(cohrb?.["symbol"], "COHRB");
+    assert.equal(snapshot.rows.some((row) => row["address"] === PYPLB), false);
+  });
+
+  it("admits the one read as TRADING and vetoes the unread one rwa_stale, never the allowlist unchecked", async () => {
+    setCredentials();
+    const store = new MemoryStore(now);
+    await runBinanceRwa(store, signal(), { fetchFn: upstream().fetch });
+    const cohrb = await verdict(store, COHRB);
+    assert.equal(cohrb.eligible, true);
+    assert.equal(cohrb.reason, "allowlist");
+    const pyplb = await verdict(store, PYPLB);
+    assert.equal(pyplb.eligible, false);
+    assert.equal(pyplb.reason, "rwa_stale");
+  });
+
+  it("vetoes an allowlisted stock with no snapshot at all, though it was never in rwa:members", async () => {
+    const store = new MemoryStore(now);
+    const result = await verdict(store, COHRB);
+    assert.equal(result.eligible, false);
+    assert.equal(result.reason, "rwa_stale");
+  });
+});

@@ -135,10 +135,10 @@ describe("binance-prices job", () => {
     const allowlist = loadAllowlist();
     assert.notEqual(allowlist, null);
 
-    // 229 allowlisted addresses (the BNB row is the `"native"` sentinel and
-    // carries none) plus the 7 static bStocks still outside the allowlist after the
-    // 2026-09-17/19 revisions — still priced, since the static lane still serves them.
-    assert.equal(tracked.length, 236);
+    // 235 allowlisted addresses (the BNB row is the `"native"` sentinel and
+    // carries none) plus the 6 static bStocks still outside the allowlist (GLWB
+    // joined it 2026-10-04) — still priced, since the static lane still serves them.
+    assert.equal(tracked.length, 241);
     assert.equal(new Set(tracked).size, tracked.length);
     for (const address of allowlist!.keys()) assert.ok(tracked.includes(address), address);
     for (const address of bstockAddresses()) assert.ok(tracked.includes(address), address);

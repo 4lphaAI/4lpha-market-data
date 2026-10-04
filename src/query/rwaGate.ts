@@ -26,6 +26,7 @@ import type { SnapshotStore } from "../core/store.js";
 import type { Staleness } from "../core/types.js";
 import { normalizeAddress, sanitizeMessage } from "../adapters/http.js";
 import { RWA_MEMBERS_KEY, RWA_UNIVERSE_KEY, bstockAddresses } from "../universe.js";
+import { allowlistedStocks } from "../allowlist.js";
 
 const SOURCE = "eligibility";
 
@@ -48,7 +49,7 @@ export interface RwaGateContext {
   rows: Map<string, RwaToken> | null;
   /** Staleness of the snapshot record, for diagnostics; `null` when absent. */
   snapshotStaleness: Staleness | null;
-  /** Static bStocks ∪ `rwa:members` ∪ current snapshot rows. */
+  /** Static bStocks ∪ allowlisted stocks ∪ `rwa:members` ∪ current snapshot rows. */
   members: Set<string>;
 }
 
@@ -58,7 +59,12 @@ export interface RwaGateContext {
  * both of which are the fail-closed direction for the tokens they cover.
  */
 export async function loadRwaGateContext(store: SnapshotStore): Promise<RwaGateContext> {
-  const members = new Set<string>(bstockAddresses());
+  // Allowlisted stocks are members by construction. Four of them (PYPLB, AAPLB,
+  // CRDOB, COHRB — added 2026-10-04) are missing from Binance's /rwa/tokens list
+  // and only reach the snapshot through a per-address read; were they not
+  // members, a failed read would leave them admitted by the allowlist with no
+  // halt check at all. As members, no fresh row means `rwa_stale`.
+  const members = new Set<string>([...bstockAddresses(), ...allowlistedStocks().map((entry) => entry.address)]);
   let rows: Map<string, RwaToken> | null = null;
   let snapshotStaleness: Staleness | null = null;
 
