@@ -1069,7 +1069,7 @@ export function createServer(deps: ServerDeps): Hono {
         backfilled: shortlist.backfilled,
         applied: query,
         defaults: SHORTLIST_DEFAULTS,
-        order: "runner first, then txs5m desc, then volume1hUsd desc",
+        order: "runner first; then 5-min trades by doubling band (1, 2-3, 4-7, ...); within a band smartMoney desc; then txs5m, then volume1hUsd",
         asOf: record?.asOf ?? null,
         staleness: record?.staleness ?? null,
       },

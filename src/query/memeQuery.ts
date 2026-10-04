@@ -200,8 +200,12 @@ export const SHORTLIST_DEFAULTS = {
    */
   flapShare: 0.7,
   statuses: ["runner", "active"] as readonly MemeStatus[],
-  /** Volume that is not demand: wash-trading tags, and 1h volume at 10x market cap or more. */
-  excludeFlags: ["churn", "wash_trading"] as readonly MemeFlag[],
+  /**
+   * Volume that is not demand (wash-trading tags; 1h volume at 10x market cap or
+   * more), and charts the smart money has already left (`smart_exit`: the
+   * newest signal's wallets sold at least 80% of what they bought).
+   */
+  excludeFlags: ["churn", "wash_trading", "smart_exit"] as readonly MemeFlag[],
   /** At least one trade in the last 5 minutes: a chart, not a memory of one. */
   minTxs5m: 1,
   minLiquidityUsd: 3_000,
@@ -219,6 +223,8 @@ export interface ShortlistQuery {
   excludeFlags: readonly MemeFlag[];
   minTxs5m: number;
   minLiquidityUsd: number;
+  /** Floor on {@link smartMoneyCount}; none by default — coverage is too thin to require it. */
+  minSmartMoney: number | undefined;
   maxAgeMinutes: number | undefined;
 }
 
@@ -248,6 +254,7 @@ export function parseShortlistQuery(get: (name: string) => string | undefined): 
     excludeFlags,
     minTxs5m: numberParam(get("minTxs5m"), "minTxs5m") ?? SHORTLIST_DEFAULTS.minTxs5m,
     minLiquidityUsd: numberParam(get("minLiquidityUsd"), "minLiquidityUsd") ?? SHORTLIST_DEFAULTS.minLiquidityUsd,
+    minSmartMoney: numberParam(get("minSmartMoney"), "minSmartMoney"),
     maxAgeMinutes: numberParam(get("maxAgeMinutes"), "maxAgeMinutes"),
   };
 }
@@ -294,18 +301,33 @@ export interface Shortlist {
 }
 
 /**
- * Runners before active charts; inside each, the busiest last 5 minutes, then
- * the last hour's volume. Momentum the agent can still act on, ranked by how
- * much of it there is right now.
+ * Runners before active charts; inside each, by 5-minute trades — momentum the
+ * agent can still act on, ranked by how much of it there is right now.
+ *
+ * Smart money breaks ties between charts of the same activity, and only those.
+ * "Same activity" is the same doubling band of 5-minute trades (1, 2–3, 4–7,
+ * 8–15, …): exact ties are too rare to matter, while a band keeps a chart with
+ * twice the trades ahead whatever its smart money. Kept this light on purpose —
+ * on 2026-10-04 OKX carried ~2.4 signals an hour on BSC and ~87 of ~720 board
+ * tokens had a tagged holder, so weighting it harder would rank by coverage
+ * rather than by quality.
  */
 export function compareShortlist(a: MemeBoardRow, b: MemeBoardRow): number {
   const rank = (row: MemeBoardRow) => (row.status === "runner" ? 0 : 1);
   return (
     rank(a) - rank(b) ||
+    activityBand(b) - activityBand(a) ||
+    smartMoneyCount(b) - smartMoneyCount(a) ||
     compareMemes(a, b, "txs5m") ||
     compareMemes(a, b, "volume1hUsd") ||
     a.address.localeCompare(b.address)
   );
+}
+
+/** Doubling band of 5-minute trades: 0 for none or unknown, 1 for one, 2 for 2–3, 3 for 4–7, … */
+export function activityBand(row: MemeBoardRow): number {
+  const txs = row.activity?.txs5m ?? 0;
+  return txs <= 0 ? 0 : Math.floor(Math.log2(txs)) + 1;
 }
 
 export function matchesShortlist(row: MemeBoardRow, query: ShortlistQuery, now: number): boolean {
@@ -315,6 +337,7 @@ export function matchesShortlist(row: MemeBoardRow, query: ShortlistQuery, now: 
   if (query.excludeFlags.some((flag) => row.flags.includes(flag))) return false;
   if (!atLeast(row.activity?.txs5m ?? null, query.minTxs5m)) return false;
   if (!atLeast(row.market.liquidityUsd, query.minLiquidityUsd)) return false;
+  if (query.minSmartMoney !== undefined && smartMoneyCount(row) < query.minSmartMoney) return false;
   if (query.maxAgeMinutes !== undefined && (now - row.createdAt) / 60_000 > query.maxAgeMinutes) return false;
   return true;
 }

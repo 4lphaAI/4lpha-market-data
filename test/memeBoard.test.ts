@@ -530,10 +530,10 @@ describe("quiet", () => {
 });
 
 /** A board row for the shortlist tests: live by default, override what matters. */
-function boardRow(n: number, overrides: { launchpad?: MemeLaunchpad; txs5m?: number; quote?: QuoteInfo; status?: "runner" | "active" | "quiet" | "dead"; liquidityUsd?: number; flags?: MemeBoardRow["flags"] } = {}): MemeBoardRow {
+function boardRow(n: number, overrides: { launchpad?: MemeLaunchpad; txs5m?: number; quote?: QuoteInfo; status?: "runner" | "active" | "quiet" | "dead"; liquidityUsd?: number; flags?: MemeBoardRow["flags"]; smartMoneyHolders?: number } = {}): MemeBoardRow {
   const row = classifyMeme(
     input({
-      rush: rush({ address: addr(n), symbol: `T${n}`, launchpad: overrides.launchpad ?? "flap", createdAt: NOW - HOUR }),
+      rush: rush({ address: addr(n), symbol: `T${n}`, launchpad: overrides.launchpad ?? "flap", createdAt: NOW - HOUR, smartMoneyHolders: overrides.smartMoneyHolders ?? 0 }),
       activity: activity({ address: addr(n), txs5m: overrides.txs5m ?? 10, liquidityUsd: overrides.liquidityUsd ?? 10_000 }),
       quote: overrides.quote ?? { kind: "bnb", symbol: "BNB" },
     }),
@@ -583,6 +583,32 @@ describe("buildShortlist", () => {
     assert.deepEqual(list.rows.map((r) => r.address), [addr(1), addr(2)]);
     const unscreened = buildShortlist(rows, parseShortlistQuery((n) => (n === "excludeFlags" ? "none" : undefined)), NOW);
     assert.ok(unscreened.rows.some((r) => r.address === addr(5)));
+  });
+
+  it("lets smart money break ties inside a band of 5-minute trades, never across bands", () => {
+    const rows = [
+      boardRow(1, { txs5m: 12 }),
+      boardRow(2, { txs5m: 9, smartMoneyHolders: 3 }), // same band (8–15) as 12: smart money lifts it
+      boardRow(3, { txs5m: 16 }), // next band up: ahead whatever the smart money
+      boardRow(4, { txs5m: 15 }),
+    ];
+    const list = buildShortlist(rows, defaults, NOW);
+    assert.deepEqual(list.rows.map((r) => r.address), [addr(3), addr(2), addr(4), addr(1)]);
+    assert.equal(list.rows[1]!.smartMoney, 3);
+  });
+
+  it("drops charts the smart money already left, unless asked not to", () => {
+    const rows = [boardRow(1, { flags: ["smart_money", "smart_exit"] }), boardRow(2)];
+    assert.deepEqual(buildShortlist(rows, defaults, NOW).rows.map((r) => r.address), [addr(2)]);
+    const all = buildShortlist(rows, parseShortlistQuery((n) => (n === "excludeFlags" ? "churn" : undefined)), NOW);
+    assert.equal(all.rows.length, 2);
+  });
+
+  it("requires smart money only when the caller sets minSmartMoney", () => {
+    const rows = [boardRow(1, { smartMoneyHolders: 2 }), boardRow(2)];
+    assert.equal(buildShortlist(rows, defaults, NOW).rows.length, 2);
+    const strict = buildShortlist(rows, parseShortlistQuery((n) => (n === "minSmartMoney" ? "1" : undefined)), NOW);
+    assert.deepEqual(strict.rows.map((r) => r.address), [addr(1)]);
   });
 
   it("keeps only bStock-quoted memes in the memestock segment, and names the stock", () => {
