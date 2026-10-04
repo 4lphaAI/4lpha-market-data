@@ -23,6 +23,7 @@ import {
   classifyStage,
   classifyStatus,
   findClones,
+  classifyCategory,
   type ClassifyInput,
   type MemeBoardRow,
 } from "../src/query/memeClassify.js";
@@ -699,11 +700,11 @@ describe("memestock segment gates", () => {
   type Flow = NonNullable<MemeBoardRow["flow1h"]>;
   const goodFlow: Flow = { buys: 120, sells: 80, uniqueTraders: 90, inflowUsd: 1_000 };
   /** A live meme quoted in `stock`, with an hour of flow unless told otherwise. */
-  const ms = (n: number, stock: string, symbol: string, o: { flow?: Flow | null; chg1h?: number; txs5m?: number } = {}): MemeBoardRow =>
+  const ms = (n: number, stock: string, symbol: string, o: { flow?: Flow | null; chg1h?: number; txs5m?: number; txs1h?: number } = {}): MemeBoardRow =>
     classifyMeme(
       input({
         rush: rush({ address: addr(n), symbol: `M${n}`, quote: stock, createdAt: NOW - HOUR }),
-        activity: activity({ address: addr(n), txs5m: o.txs5m ?? 10, priceChange1hPct: o.chg1h ?? 5 }),
+        activity: activity({ address: addr(n), txs5m: o.txs5m ?? 10, txs1h: o.txs1h ?? 60, priceChange1hPct: o.chg1h ?? 5 }),
         quote: { kind: "bstock", symbol },
         flow1h: o.flow === undefined ? goodFlow : o.flow,
       }),
@@ -715,12 +716,12 @@ describe("memestock segment gates", () => {
     assert.deepEqual(list.rows[0]!.quote, { address: NVDAB, kind: "bstock", symbol: "NVDAB", stock: { priceUsd: 235, openState: true } });
   });
 
-  it("keeps out no flow data, sellers winning, a dump in progress, thin trading, and a closed or unread stock", () => {
+  it("keeps out thin unranked charts, sellers winning, a dump in progress, thin trading, and a closed or unread stock", () => {
     const rows = [
-      ms(1, NVDAB, "NVDAB", { flow: null }),
-      ms(2, NVDAB, "NVDAB", { flow: { ...goodFlow, buys: 488, sells: 512 } }),
+      ms(1, NVDAB, "NVDAB", { flow: null, txs1h: 40 }), // no flow: 40 trades < 20 traders × 3
+      ms(2, NVDAB, "NVDAB", { flow: { ...goodFlow, buys: 300, sells: 512 } }),
       ms(3, NVDAB, "NVDAB", { chg1h: -68 }),
-      ms(4, NVDAB, "NVDAB", { flow: { ...goodFlow, uniqueTraders: 21 } }),
+      ms(4, NVDAB, "NVDAB", { flow: { ...goodFlow, uniqueTraders: 12 } }),
       ms(5, BNCB_ADDR, "BNCB"),
       ms(6, "0x00000000000000000000000000000000000000ff", "XYZB"),
       ms(7, NVDAB, "NVDAB"),
@@ -729,22 +730,91 @@ describe("memestock segment gates", () => {
     assert.deepEqual(buildShortlist(rows, memestock, NOW, closed).rows.map((r) => r.address), [addr(7)]);
   });
 
-  it("caps each stock at three memes, the best three, unless the caller lifts it", () => {
-    const rows = [1, 2, 3, 4, 5].map((n) => ms(n, BNCB_ADDR, "BNCB", { txs5m: 10 * n }));
+  it("judges an unranked meme on its hour of trades, and skips only the buy/sell split it has no stand-in for", () => {
+    const busy = ms(1, NVDAB, "NVDAB", { flow: null, txs1h: 60 });
+    assert.deepEqual(buildShortlist([busy], memestock, NOW, stocksOpen).rows.map((r) => r.address), [addr(1)]);
+    const dumping = ms(2, NVDAB, "NVDAB", { flow: null, txs1h: 600, chg1h: -45 });
+    assert.equal(buildShortlist([dumping], memestock, NOW, stocksOpen).rows.length, 0);
+  });
+
+  it("caps each stock at five memes, the best five, unless the caller lifts it", () => {
+    const rows = [1, 2, 3, 4, 5, 6, 7].map((n) => ms(n, BNCB_ADDR, "BNCB", { txs5m: 10 * n }));
     const capped = buildShortlist(rows, memestock, NOW, stocksOpen);
-    assert.deepEqual(capped.rows.map((r) => r.txs5m), [50, 40, 30]);
+    assert.deepEqual(capped.rows.map((r) => r.txs5m), [70, 60, 50, 40, 30]);
     const lifted = buildShortlist(rows, parseShortlistQuery((n) => ({ segment: "memestock", maxPerQuote: "none" })[n]), NOW, stocksOpen);
-    assert.equal(lifted.rows.length, 5);
+    assert.equal(lifted.rows.length, 7);
+    assert.equal(memestock.size, 30);
+    assert.equal(parseShortlistQuery(() => undefined).size, 20);
   });
 
   it("lets every gate be overridden, and leaves the default segment as it was", () => {
-    const thin = ms(1, NVDAB, "NVDAB", { flow: { ...goodFlow, uniqueTraders: 21 } });
+    const thin = ms(1, NVDAB, "NVDAB", { flow: { ...goodFlow, uniqueTraders: 12 } });
     const loose = parseShortlistQuery((n) => ({ segment: "memestock", minUniqueTraders1h: "none", requireQuoteOpen: "false" })[n]);
     assert.equal(buildShortlist([thin], loose, NOW).rows.length, 1);
     const defaults = parseShortlistQuery(() => undefined);
     assert.deepEqual(defaults.gates, { minUniqueTraders1h: undefined, minBuySellRatio1h: undefined, minPriceChange1hPct: undefined, maxPerQuote: undefined, requireQuoteOpen: false });
     assert.equal(buildShortlist([ms(1, NVDAB, "NVDAB", { flow: null })], defaults, NOW).rows.length, 1);
     assert.throws(() => parseShortlistQuery((n) => (n === "maxPerQuote" ? "0" : undefined)), /maxPerQuote/);
+  });
+});
+
+describe("classifyCategory", () => {
+  const DAY = 24 * HOUR;
+  const big = { marketCapUsd: 20_000_000, liquidityUsd: 1_000_000 };
+  const small = { marketCapUsd: 200_000, liquidityUsd: 40_000 };
+  const steady = activity({ volume24hUsd: 500_000, priceChange24hPct: 5, txs1h: 200, priceChange1hPct: -1 });
+  const climbing = activity({ volume24hUsd: 300_000, priceChange24hPct: 160, txs1h: 180, priceChange1hPct: 4 });
+
+  it("names a runner a daily runner, and gives nothing to a chart that is not live", () => {
+    assert.equal(classifyCategory("runner", NOW - HOUR, climbing, small, NOW), "daily_runner");
+    assert.equal(classifyCategory("quiet", NOW - 30 * DAY, steady, big, NOW), null);
+    assert.equal(classifyCategory("dead", NOW - 30 * DAY, steady, big, NOW), null);
+  });
+
+  it("calls a large, liquid, settled, traded meme a blue chip — and not one that is too young or too quiet", () => {
+    assert.equal(classifyCategory("active", NOW - 30 * DAY, steady, big, NOW), "bluechip");
+    assert.equal(classifyCategory("active", NOW - 3 * DAY, steady, big, NOW), null); // 次第花开 at 3 days
+    assert.equal(classifyCategory("active", NOW - 30 * DAY, { ...steady, volume24hUsd: 55_000 }, big, NOW), null);
+  });
+
+  it("calls a climbing token past its first day a long runner, unless it is collapsing this hour", () => {
+    assert.equal(classifyCategory("active", NOW - 3 * DAY, climbing, small, NOW), "long_runner");
+    assert.equal(classifyCategory("active", NOW - 3 * DAY, { ...climbing, priceChange1hPct: -20 }, small, NOW), null);
+    assert.equal(classifyCategory("active", NOW - 3 * DAY, { ...climbing, priceChange24hPct: 19 }, small, NOW), null);
+    assert.equal(classifyCategory("active", NOW - 12 * HOUR, climbing, small, NOW), null);
+    // A large token that is also climbing reads as a blue chip.
+    assert.equal(classifyCategory("active", NOW - 30 * DAY, climbing, big, NOW), "bluechip");
+  });
+});
+
+describe("shortlist category mix", () => {
+  const withCategory = (row: MemeBoardRow, category: MemeBoardRow["category"]): MemeBoardRow => ({ ...row, category });
+  const rows = [
+    ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => withCategory(boardRow(n, { txs5m: 100 - n }), null)),
+    ...[11, 12].map((n) => withCategory(boardRow(n, { txs5m: 5 }), "daily_runner")),
+    ...[21, 22, 23].map((n) => withCategory(boardRow(n, { txs5m: 4 }), "long_runner")),
+    ...[31, 32, 33, 34].map((n) => withCategory(boardRow(n, { txs5m: 3 }), "bluechip")),
+  ];
+
+  it("gives each category its share, hands unfilled slots to the best of the rest, and reads category by category", () => {
+    const list = buildShortlist(rows, { ...parseShortlistQuery(() => undefined), size: 8 }, NOW);
+    // 8 × 0.5 = 4 daily (only 2 exist), 8 × 0.25 = 2 long, 2 blue chip; 2 slots left → best uncategorised.
+    assert.deepEqual(list.byCategory, { daily_runner: 2, long_runner: 2, bluechip: 2, fill: 2 });
+    assert.deepEqual(list.rows.map((r) => r.category), ["daily_runner", "daily_runner", "long_runner", "long_runner", "bluechip", "bluechip", null, null]);
+    assert.deepEqual(list.rows.slice(6).map((r) => r.txs5m), [99, 98]);
+  });
+
+  it("is one ranked list with mix=none, and filters with category=", () => {
+    const flat = buildShortlist(rows, { ...parseShortlistQuery((n) => (n === "mix" ? "none" : undefined)), size: 3 }, NOW);
+    assert.deepEqual(flat.rows.map((r) => r.txs5m), [99, 98, 97]);
+    const chips = buildShortlist(rows, parseShortlistQuery((n) => (n === "category" ? "bluechip" : undefined)), NOW);
+    assert.deepEqual(new Set(chips.rows.map((r) => r.category)), new Set(["bluechip"]));
+    assert.equal(chips.rows.length, 4);
+  });
+
+  it("rejects a mix that names an unknown category or over-allocates", () => {
+    assert.throws(() => parseShortlistQuery((n) => (n === "mix" ? "moon:0.5" : undefined)), /mix categories/);
+    assert.throws(() => parseShortlistQuery((n) => (n === "mix" ? "daily_runner:0.8,bluechip:0.4" : undefined)), /sum/);
   });
 });
 

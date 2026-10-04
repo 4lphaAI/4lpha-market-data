@@ -35,6 +35,15 @@ export type MemeFlag =
 
 export const MEME_STAGES: readonly MemeStage[] = ["new", "bonding", "graduating", "graduated"];
 export const MEME_STATUSES: readonly MemeStatus[] = ["runner", "active", "quiet", "fading", "dead", "unknown"];
+/**
+ * What kind of opportunity a live chart is, beside how alive it is. A daily
+ * runner is young momentum; a long runner is a token past its first day that
+ * is still climbing on real volume; a blue chip is a meme that has become large
+ * and liquid and keeps trading. `null` for everything else, dead charts included.
+ */
+export type MemeCategory = "daily_runner" | "long_runner" | "bluechip";
+export const MEME_CATEGORIES: readonly MemeCategory[] = ["daily_runner", "long_runner", "bluechip"];
+
 export const MEME_FLAGS: readonly MemeFlag[] = [
   "clone",
   "dev_sold_all",
@@ -92,7 +101,62 @@ export const MEME_RULES = {
   smartExitSoldPct: 80,
   /** Signals older than this no longer count toward the row. */
   signalWindowHours: 24,
+  /**
+   * Blue chip: large, liquid, settled, still traded. Measured 2026-10-04 on 74
+   * live tokens past their first day: B ($172M), 牛来 ($80M), $BANANA, mubarak,
+   * 龙虾, Broccoli, TST, 4, FOMO人生, 旺柴… clear it; 次第花开 ($12.6M at 3 days)
+   * does not on age, EGL1 and 比特币 do not on volume.
+   */
+  bluechipMinMarketCapUsd: 5_000_000,
+  bluechipMinLiquidityUsd: 250_000,
+  bluechipMinAgeDays: 7,
+  bluechipMinVolume24hUsd: 100_000,
+  /**
+   * Long runner: past its first day and still climbing on real volume, and not
+   * collapsing right now. Measured the same day: 次第花开 +60%, 但丁 +772%,
+   * Flap +168%, 神秘小K线 +164%, BI +370% clear it; a +19% or a $55k day does not.
+   */
+  longRunnerMinPriceChange24hPct: 30,
+  longRunnerMinVolume24hUsd: 100_000,
+  longRunnerMinTxs1h: 50,
+  /** Exclusive: down 20% or more in the hour is not a run any more. */
+  longRunnerMinPriceChange1hPct: -20,
 } as const;
+
+/**
+ * Daily runner first (it is the `runner` status, ≤24h by rule), then blue chip,
+ * then long runner — a large token that is also climbing reads as a blue chip.
+ * Only live charts (runner/active) get a category.
+ */
+export function classifyCategory(
+  status: MemeStatus,
+  createdAt: number,
+  activity: TokenActivity | null,
+  market: { marketCapUsd: number | null; liquidityUsd: number | null },
+  now: number,
+): MemeCategory | null {
+  if (status === "runner") return "daily_runner";
+  if (status !== "active" || activity === null) return null;
+  const ageDays = (now - createdAt) / 86_400_000;
+  if (
+    ageDays >= MEME_RULES.bluechipMinAgeDays &&
+    (market.marketCapUsd ?? 0) >= MEME_RULES.bluechipMinMarketCapUsd &&
+    (market.liquidityUsd ?? 0) >= MEME_RULES.bluechipMinLiquidityUsd &&
+    (activity.volume24hUsd ?? 0) >= MEME_RULES.bluechipMinVolume24hUsd
+  ) {
+    return "bluechip";
+  }
+  if (
+    ageDays > 1 &&
+    (activity.priceChange24hPct ?? -Infinity) >= MEME_RULES.longRunnerMinPriceChange24hPct &&
+    (activity.volume24hUsd ?? 0) >= MEME_RULES.longRunnerMinVolume24hUsd &&
+    (activity.txs1h ?? 0) >= MEME_RULES.longRunnerMinTxs1h &&
+    (activity.priceChange1hPct ?? -Infinity) > MEME_RULES.longRunnerMinPriceChange1hPct
+  ) {
+    return "long_runner";
+  }
+  return null;
+}
 
 export interface MemeSmartMoney {
   /** Tagged holders as Binance counts them. */
@@ -114,6 +178,8 @@ export interface MemeBoardRow {
   launchpad: MemeLaunchpad;
   stage: MemeStage;
   status: MemeStatus;
+  /** `daily_runner` | `long_runner` | `bluechip` for live charts; `null` otherwise. */
+  category: MemeCategory | null;
   flags: MemeFlag[];
   createdAt: number;
   progress: number | null;
@@ -285,6 +351,16 @@ export function classifyMeme(input: ClassifyInput): MemeBoardRow {
     launchpad: rush.launchpad,
     stage,
     status,
+    category: classifyCategory(
+      status,
+      rush.createdAt,
+      activity,
+      {
+        marketCapUsd: activity?.marketCapUsd ?? rush.marketCapUsd,
+        liquidityUsd: activity?.liquidityUsd ?? rush.liquidityUsd,
+      },
+      now,
+    ),
     flags,
     createdAt: rush.createdAt,
     progress: rush.migrated ? 100 : rush.progress,

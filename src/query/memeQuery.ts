@@ -10,10 +10,12 @@
 import type { MemeLaunchpad } from "../adapters/binanceWeb3.js";
 import type { QuoteKind } from "./quoteKind.js";
 import {
+  MEME_CATEGORIES,
   MEME_FLAGS,
   MEME_STAGES,
   MEME_STATUSES,
   type MemeBoardRow,
+  type MemeCategory,
   type MemeFlag,
   type MemeStage,
   type MemeStatus,
@@ -192,6 +194,7 @@ function listParam<T extends string>(raw: string | undefined, name: string, allo
  */
 export const SHORTLIST_DEFAULTS = {
   size: 20,
+  memestockSize: 30,
   maxSize: 100,
   /**
    * Share of slots for Flap; Four.Meme gets the rest. Operator call 2026-10-04:
@@ -209,6 +212,12 @@ export const SHORTLIST_DEFAULTS = {
   /** At least one trade in the last 5 minutes: a chart, not a memory of one. */
   minTxs5m: 1,
   minLiquidityUsd: 3_000,
+  /**
+   * Slots per category (operator, 2026-10-04: daily runners are not the only
+   * play — long runners and blue chips belong on the list too). Unfilled
+   * slots go to the best remaining live charts. `mix=none` turns it off.
+   */
+  mix: { daily_runner: 0.5, long_runner: 0.25, bluechip: 0.25 } as Readonly<Record<MemeCategory, number>>,
 } as const;
 
 export const MEME_SEGMENTS = ["all", "memestock"] as const;
@@ -221,7 +230,10 @@ export type MemeSegment = (typeof MEME_SEGMENTS)[number];
  * bBroker -50%), charts with 21 traders an hour, five memes with no hour of
  * flow data at all, and eight of the 29 on one stock (BNCB). With these gates
  * the same board gave about a dozen. A gate on a number the row does not carry
- * excludes it — no flow data is not evidence of demand.
+ * excludes it, with one stand-in: a token with no flow data is judged on its
+ * hour's trade count instead of its traders (see `passesGates`). Widened
+ * 2026-10-04 on operator request (the execution plane screens again, so 20–30
+ * candidates beat 16): traders 30 → 20, buy/sell 1.0 → 0.8, 3 → 5 per stock.
  */
 export const SEGMENT_GATES: Record<MemeSegment, SegmentGates> = {
   all: {
@@ -232,13 +244,13 @@ export const SEGMENT_GATES: Record<MemeSegment, SegmentGates> = {
     requireQuoteOpen: false,
   },
   memestock: {
-    minUniqueTraders1h: 30,
-    /** Buys at least match sells over the hour: someone is still arriving. */
-    minBuySellRatio1h: 1,
+    minUniqueTraders1h: 20,
+    /** Buys at least 0.8 of sells over the hour: not a one-way exit. */
+    minBuySellRatio1h: 0.8,
     /** Down 30% or more in an hour is a dump in progress, whatever the volume. */
     minPriceChange1hPct: -30,
     /** No stock fills the list on its own; the narrative is spread. */
-    maxPerQuote: 3,
+    maxPerQuote: 5,
     /**
      * The quote bStock must be known to be open: a meme stock is bought through
      * its stock, and a halted or unread stock is not a route.
@@ -274,6 +286,10 @@ export interface ShortlistQuery {
   /** Floor on {@link smartMoneyCount}; none by default — coverage is too thin to require it. */
   minSmartMoney: number | undefined;
   maxAgeMinutes: number | undefined;
+  /** Only these categories; `undefined` = any, uncategorised live charts included. */
+  categories: readonly MemeCategory[] | undefined;
+  /** Category quotas, or `null` for one ranked list. */
+  mix: Readonly<Partial<Record<MemeCategory, number>>> | null;
   gates: SegmentGates;
 }
 
@@ -295,7 +311,8 @@ export function parseShortlistQuery(get: (name: string) => string | undefined): 
       ? []
       : (listParam(excludeRaw, "excludeFlags", MEME_FLAGS) ?? SHORTLIST_DEFAULTS.excludeFlags);
   return {
-    size: Math.min(size ?? SHORTLIST_DEFAULTS.size, SHORTLIST_DEFAULTS.maxSize),
+    // Meme stocks default wider: the execution plane screens again (operator, 2026-10-04).
+    size: Math.min(size ?? (segment?.[0] === "memestock" ? SHORTLIST_DEFAULTS.memestockSize : SHORTLIST_DEFAULTS.size), SHORTLIST_DEFAULTS.maxSize),
     flapShare: flapShare ?? SHORTLIST_DEFAULTS.flapShare,
     segment: segment?.[0] ?? "all",
     statuses: listParam(get("status"), "status", MEME_STATUSES) ?? SHORTLIST_DEFAULTS.statuses,
@@ -305,8 +322,30 @@ export function parseShortlistQuery(get: (name: string) => string | undefined): 
     minLiquidityUsd: numberParam(get("minLiquidityUsd"), "minLiquidityUsd") ?? SHORTLIST_DEFAULTS.minLiquidityUsd,
     minSmartMoney: numberParam(get("minSmartMoney"), "minSmartMoney"),
     maxAgeMinutes: numberParam(get("maxAgeMinutes"), "maxAgeMinutes"),
+    categories: listParam(get("category"), "category", MEME_CATEGORIES),
+    mix: parseMix(get("mix")),
     gates: parseGates(get, segment?.[0] ?? "all"),
   };
+}
+
+/** `mix=daily_runner:0.5,long_runner:0.25,bluechip:0.25`, or `none`. Shares must sum to at most 1. */
+function parseMix(raw: string | undefined): Readonly<Partial<Record<MemeCategory, number>>> | null {
+  if (raw === undefined || raw.trim() === "") return SHORTLIST_DEFAULTS.mix;
+  if (raw.trim() === "none") return null;
+  const mix: Partial<Record<MemeCategory, number>> = {};
+  let total = 0;
+  for (const part of raw.split(",")) {
+    const [name, share] = part.split(":").map((value) => value.trim());
+    if (!(MEME_CATEGORIES as readonly string[]).includes(name ?? "")) {
+      throw new MemeQueryError(`mix categories must be among ${MEME_CATEGORIES.join(", ")}`);
+    }
+    const value = Number(share);
+    if (!Number.isFinite(value) || value < 0 || value > 1) throw new MemeQueryError("mix shares must be between 0 and 1");
+    mix[name as MemeCategory] = value;
+    total += value;
+  }
+  if (total > 1 + 1e-9) throw new MemeQueryError("mix shares must sum to at most 1");
+  return mix;
 }
 
 /** Segment defaults, each overridable; `none` clears one. */
@@ -338,6 +377,7 @@ export interface MemeShortlistRow {
   launchpad: MemeLaunchpad;
   stage: MemeStage;
   status: MemeStatus;
+  category: MemeCategory | null;
   ageMinutes: number;
   progress: number | null;
   /** For a bStock quote, `stock` carries its price and session state; `null` otherwise or when unknown. */
@@ -369,6 +409,8 @@ export interface Shortlist {
   rows: MemeShortlistRow[];
   candidates: { flap: number; fourmeme: number };
   picked: { flap: number; fourmeme: number };
+  /** Rows taken per category quota, plus `fill` for slots handed to any live chart (`any` without a mix). */
+  byCategory: Record<string, number>;
   /** Slots one launchpad could not fill and the other took. */
   backfilled: number;
 }
@@ -411,6 +453,7 @@ export function matchesShortlist(
 ): boolean {
   if (!query.statuses.includes(row.status)) return false;
   if (query.stages !== undefined && !query.stages.includes(row.stage)) return false;
+  if (query.categories !== undefined && (row.category === null || !query.categories.includes(row.category))) return false;
   if (query.segment === "memestock" && row.quote.kind !== "bstock") return false;
   if (query.excludeFlags.some((flag) => row.flags.includes(flag))) return false;
   if (!atLeast(row.activity?.txs5m ?? null, query.minTxs5m)) return false;
@@ -422,10 +465,21 @@ export function matchesShortlist(
 
 function passesGates(row: MemeBoardRow, gates: SegmentGates, stocks: ReadonlyMap<string, QuoteStockState>): boolean {
   const flow = row.flow1h;
-  if (gates.minUniqueTraders1h !== undefined && !atLeast(flow?.uniqueTraders ?? null, gates.minUniqueTraders1h)) {
-    return false;
+  if (gates.minUniqueTraders1h !== undefined) {
+    // Flow exists only for tokens in OKX's top-100 hot ranking per launchpad,
+    // which measured 2026-10-04 left out live meme stocks for want of a rank,
+    // not of trading. Without it, the hour's trade count stands in at
+    // TRADES_PER_TRADER per trader (live rows ran ~2–4: 706 trades / 240 traders).
+    const traders = flow?.uniqueTraders ?? null;
+    const passes =
+      traders !== null
+        ? traders >= gates.minUniqueTraders1h
+        : atLeast(row.activity?.txs1h ?? null, gates.minUniqueTraders1h * TRADES_PER_TRADER);
+    if (!passes) return false;
   }
-  if (gates.minBuySellRatio1h !== undefined) {
+  // The buy/sell split has no stand-in, so an unranked token skips this gate;
+  // the price-change gate below still catches a dump.
+  if (gates.minBuySellRatio1h !== undefined && flow !== null) {
     const buys = flow?.buys ?? null;
     const sells = flow?.sells ?? null;
     if (buys === null || sells === null || buys === 0) return false;
@@ -443,6 +497,9 @@ function passesGates(row: MemeBoardRow, gates: SegmentGates, stocks: ReadonlyMap
   }
   return true;
 }
+
+/** Trades per unique trader used when a token has no flow data (see `passesGates`). */
+const TRADES_PER_TRADER = 3;
 
 /** Keeps the first `max` rows per quote token, in the order given. */
 function capPerQuote(rows: readonly MemeBoardRow[], max: number | undefined): MemeBoardRow[] {
@@ -467,21 +524,74 @@ export function buildShortlist(
     rows.filter((row) => matchesShortlist(row, query, now, stocks)).sort(compareShortlist),
     query.gates.maxPerQuote,
   );
-  const flap = candidates.filter((row) => row.launchpad === "flap");
-  const fourmeme = candidates.filter((row) => row.launchpad === "fourmeme");
 
-  const flapSlots = Math.round(query.size * query.flapShare);
-  const fourSlots = query.size - flapSlots;
+  const picked: MemeBoardRow[] = [];
+  const byCategory: Record<string, number> = {};
+  let backfilled = 0;
+  const take = (pool: MemeBoardRow[], slots: number, label: string) => {
+    const split = splitByLaunchpad(pool, slots, query.flapShare);
+    picked.push(...split.rows);
+    backfilled += split.backfilled;
+    byCategory[label] = (byCategory[label] ?? 0) + split.rows.length;
+  };
+
+  if (query.mix === null) {
+    take(candidates, query.size, "any");
+  } else {
+    // Each category gets its share of the slots; what one cannot fill goes to
+    // the best remaining candidates of any kind, so the list is never short
+    // while live charts are left over.
+    for (const category of MEME_CATEGORIES) {
+      const slots = Math.round(query.size * (query.mix[category] ?? 0));
+      if (slots === 0) continue;
+      take(candidates.filter((row) => row.category === category), slots, category);
+    }
+    const chosen = new Set(picked.map((row) => row.address));
+    take(candidates.filter((row) => !chosen.has(row.address)), query.size - picked.length, "fill");
+  }
+
+  const ordered = picked.sort(
+    (a, b) => categoryRank(a) - categoryRank(b) || compareShortlist(a, b),
+  );
+  return {
+    rows: ordered.map((row) => toShortlistRow(row, now, stocks)),
+    candidates: {
+      flap: candidates.filter((row) => row.launchpad === "flap").length,
+      fourmeme: candidates.filter((row) => row.launchpad === "fourmeme").length,
+    },
+    picked: {
+      flap: ordered.filter((row) => row.launchpad === "flap").length,
+      fourmeme: ordered.filter((row) => row.launchpad === "fourmeme").length,
+    },
+    byCategory,
+    backfilled,
+  };
+}
+
+/** Daily runners, long runners, blue chips, then the rest — the order the list reads in. */
+function categoryRank(row: MemeBoardRow): number {
+  return row.category === null ? MEME_CATEGORIES.length : MEME_CATEGORIES.indexOf(row.category);
+}
+
+/**
+ * Up to `slots` rows split Flap:Four.Meme by `flapShare` (operator call
+ * 2026-10-04: 7:3), a short launchpad's slots handed to the other.
+ */
+function splitByLaunchpad(
+  pool: readonly MemeBoardRow[],
+  slots: number,
+  flapShare: number,
+): { rows: MemeBoardRow[]; backfilled: number } {
+  if (slots <= 0) return { rows: [], backfilled: 0 };
+  const flap = pool.filter((row) => row.launchpad === "flap");
+  const fourmeme = pool.filter((row) => row.launchpad === "fourmeme");
+  const flapSlots = Math.round(slots * flapShare);
+  const fourSlots = slots - flapSlots;
   const takeFlap = Math.min(flap.length, flapSlots + Math.max(0, fourSlots - fourmeme.length));
   const takeFour = Math.min(fourmeme.length, fourSlots + Math.max(0, flapSlots - flap.length));
-  const picked = [...flap.slice(0, takeFlap), ...fourmeme.slice(0, takeFour)].sort(compareShortlist);
-  const backfilled = Math.max(0, takeFlap - flapSlots) + Math.max(0, takeFour - fourSlots);
-
   return {
-    rows: picked.map((row) => toShortlistRow(row, now, stocks)),
-    candidates: { flap: flap.length, fourmeme: fourmeme.length },
-    picked: { flap: takeFlap, fourmeme: takeFour },
-    backfilled,
+    rows: [...flap.slice(0, takeFlap), ...fourmeme.slice(0, takeFour)],
+    backfilled: Math.max(0, takeFlap - flapSlots) + Math.max(0, takeFour - fourSlots),
   };
 }
 
@@ -497,6 +607,7 @@ export function toShortlistRow(
     launchpad: row.launchpad,
     stage: row.stage,
     status: row.status,
+    category: row.category,
     ageMinutes: Math.round((now - row.createdAt) / 60_000),
     progress: row.progress,
     quote: { ...row.quote, stock: stock === undefined ? null : { priceUsd: stock.priceUsd, openState: stock.openState } },
