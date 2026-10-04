@@ -11,6 +11,7 @@ import {
 } from "../src/adapters/onchainos.js";
 import type { LaunchpadState } from "../src/query/launchpadState.js";
 import { buildShortlist, parseShortlistQuery } from "../src/query/memeQuery.js";
+import { groupMemesByStock, parseMemeStockQuery } from "../src/query/memeStocks.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import { MEME_BOARD_KEY, MEME_STATE_KEY, runMemeBoard } from "../src/jobs/memeBoard.js";
@@ -688,5 +689,63 @@ describe("GET /memes/shortlist", () => {
     assert.equal(body.meta.applied.flapShare, 0.7);
     assert.equal(body.meta.boardTotal, 2);
     assert.equal((await app.request("/memes/shortlist?size=0")).status, 400);
+  });
+});
+
+describe("groupMemesByStock", () => {
+  const SPCXB = "0xbe9d156892e55e7154bcd3cb0fea677f9d3103e1";
+  const stockRow = { address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", tokenPriceUsd: 235, openState: true } as unknown as import("../src/core/models.js").RwaToken;
+  const stocks = new Map([[NVDAB, stockRow]]);
+  const query = parseMemeStockQuery(() => undefined);
+  /** A board row quoted in the stock at `quote`. */
+  const memeOn = (n: number, quote: string, symbol: string, overrides: Parameters<typeof boardRow>[1] = {}): MemeBoardRow => {
+    const row = boardRow(n, { quote: { kind: "bstock", symbol }, ...overrides });
+    return { ...row, quote: { ...row.quote, address: quote } };
+  };
+
+  it("groups by quote stock, counts live memes only for activity, and orders by live 1h volume", () => {
+    const rows = [
+      memeOn(1, NVDAB, "NVDAB", { txs5m: 30 }),
+      memeOn(2, NVDAB, "NVDAB", { status: "dead" }),
+      memeOn(3, NVDAB, "NVDAB", { flags: ["churn"] }),
+      memeOn(4, SPCXB, "SPCXB", { txs5m: 5 }),
+      memeOn(5, SPCXB, "SPCXB", { txs5m: 6, launchpad: "fourmeme" }),
+      boardRow(6), // BNB-quoted: not a meme stock
+    ];
+    const groups = groupMemesByStock(rows, stocks, query, NOW);
+    assert.deepEqual(groups.map((g) => g.stock.symbol), ["SPCXB", "NVDAB"]); // 2 live × $3k beats 1 live × $3k
+    const nvdab = groups[1]!;
+    assert.equal(nvdab.memes.total, 3);
+    assert.equal(nvdab.memes.live, 1); // dead and churned memes are counted, never summed
+    assert.equal(nvdab.memes.byStatus.dead, 1);
+    assert.equal(nvdab.activity.txs5m, 30);
+    assert.deepEqual(nvdab.stock, { address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", priceUsd: 235, openState: true, inRwaSnapshot: true });
+    assert.deepEqual(nvdab.top.map((t) => t.address), [addr(1)]);
+    const spcxb = groups[0]!;
+    assert.equal(spcxb.stock.inRwaSnapshot, false);
+    assert.equal(spcxb.stock.priceUsd, null);
+    assert.deepEqual(spcxb.memes.liveByLaunchpad, { flap: 1, fourmeme: 1 });
+  });
+
+  it("drops stocks under minLive and rejects an unknown order", () => {
+    const rows = [memeOn(1, NVDAB, "NVDAB", { status: "dead" })];
+    assert.equal(groupMemesByStock(rows, stocks, parseMemeStockQuery((n) => (n === "minLive" ? "1" : undefined)), NOW).length, 0);
+    assert.throws(() => parseMemeStockQuery((n) => (n === "orderBy" ? "hype" : undefined)), /orderBy/);
+  });
+
+  it("is served at /memes/stocks ahead of the /memes/:address route", async () => {
+    const store = new MemoryStore();
+    const now = Date.now();
+    const row = classifyMeme(input({ rush: rush({ address: addr(1), quote: NVDAB, createdAt: now - HOUR }), activity: activity({ txs5m: 12 }), quote: { kind: "bstock", symbol: "NVDAB" }, now }));
+    await store.put(MEME_BOARD_KEY, [row], { source: "test", freshForMs: 60_000, deadAfterMs: 600_000 });
+    const app = createServer({ scheduler: createScheduler(store), store });
+    const res = await app.request("/memes/stocks");
+    assert.equal(res.status, 200);
+    const body = (await res.json()) as { data: Array<{ stock: { symbol: string }; memes: { live: number } }>; meta: { memeStocks: number; stocks: number } };
+    assert.equal(body.data[0]!.stock.symbol, "NVDAB");
+    assert.equal(body.data[0]!.memes.live, 1);
+    assert.equal(body.meta.memeStocks, 1);
+    assert.equal(body.meta.stocks, 1);
+    assert.equal((await app.request("/memes/stocks?minLive=-1")).status, 400);
   });
 });

@@ -43,6 +43,14 @@ import { readTokenRecords } from "./jobs/tokenStore.js";
 import { MEME_BOARD_CAP, MEME_BOARD_KEY } from "./jobs/memeBoard.js";
 import { MEME_RULES, type MemeBoardRow } from "./query/memeClassify.js";
 import {
+  MEME_STOCK_RULES,
+  groupMemesByStock,
+  isLiveMeme,
+  parseMemeStockQuery,
+  rwaRowsByAddress,
+  type MemeStockQuery,
+} from "./query/memeStocks.js";
+import {
   MemeQueryError,
   SHORTLIST_DEFAULTS,
   buildShortlist,
@@ -1072,6 +1080,45 @@ export function createServer(deps: ServerDeps): Hono {
         order: "runner first; then 5-min trades by doubling band (1, 2-3, 4-7, ...); within a band smartMoney desc; then txs5m, then volume1hUsd",
         asOf: record?.asOf ?? null,
         staleness: record?.staleness ?? null,
+      },
+    });
+  });
+
+  /**
+   * Meme stocks grouped by the bStock they are quoted in: per stock, meme
+   * counts by status, the live memes' summed activity and its top three memes.
+   * Ordered by live 1h volume unless `orderBy` says otherwise.
+   */
+  app.get("/memes/stocks", async (c) => {
+    let query: MemeStockQuery;
+    try {
+      query = parseMemeStockQuery((name) => c.req.query(name));
+    } catch (error) {
+      if (error instanceof MemeQueryError) {
+        return c.json({ error: { code: "invalid_query", message: error.message } }, 400);
+      }
+      throw error;
+    }
+    const [board, rwa] = await Promise.all([
+      deps.store.get<unknown>(MEME_BOARD_KEY),
+      deps.store.get<unknown>(RWA_UNIVERSE_KEY),
+    ]);
+    const rows = Array.isArray(board?.data) ? (board.data as MemeBoardRow[]) : [];
+    const groups = groupMemesByStock(rows, rwaRowsByAddress(rwa?.data), query, Date.now());
+    const memeStocks = rows.filter((row) => row.quote.kind === "bstock");
+    return c.json({
+      data: groups,
+      meta: {
+        boardTotal: rows.length,
+        memeStocks: memeStocks.length,
+        liveMemeStocks: memeStocks.filter(isLiveMeme).length,
+        stocks: new Set(memeStocks.map((row) => row.quote.address)).size,
+        returned: groups.length,
+        orderBy: query.orderBy,
+        rules: MEME_STOCK_RULES,
+        asOf: board?.asOf ?? null,
+        staleness: board?.staleness ?? null,
+        rwaStaleness: rwa?.staleness ?? null,
       },
     });
   });

@@ -362,7 +362,7 @@ export function buildShortlist(rows: readonly MemeBoardRow[], query: ShortlistQu
   };
 }
 
-function toShortlistRow(row: MemeBoardRow, now: number): MemeShortlistRow {
+export function toShortlistRow(row: MemeBoardRow, now: number): MemeShortlistRow {
   return {
     address: row.address,
     symbol: row.symbol,
