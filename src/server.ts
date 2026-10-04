@@ -46,12 +46,13 @@ import {
   MEME_STOCK_RULES,
   groupMemesByStock,
   isLiveMeme,
+  loadStockInfo,
   parseMemeStockQuery,
-  rwaRowsByAddress,
   type MemeStockQuery,
 } from "./query/memeStocks.js";
 import {
   MemeQueryError,
+  SEGMENT_GATES,
   SHORTLIST_DEFAULTS,
   buildShortlist,
   compareMemes,
@@ -1065,9 +1066,9 @@ export function createServer(deps: ServerDeps): Hono {
       }
       throw error;
     }
-    const record = await deps.store.get<unknown>(MEME_BOARD_KEY);
+    const [record, stocks] = await Promise.all([deps.store.get<unknown>(MEME_BOARD_KEY), loadStockInfo(deps.store)]);
     const rows = Array.isArray(record?.data) ? (record.data as MemeBoardRow[]) : [];
-    const shortlist = buildShortlist(rows, query, Date.now());
+    const shortlist = buildShortlist(rows, query, Date.now(), stocks);
     return c.json({
       data: shortlist.rows,
       meta: {
@@ -1076,7 +1077,7 @@ export function createServer(deps: ServerDeps): Hono {
         picked: shortlist.picked,
         backfilled: shortlist.backfilled,
         applied: query,
-        defaults: SHORTLIST_DEFAULTS,
+        defaults: { ...SHORTLIST_DEFAULTS, gates: SEGMENT_GATES },
         order: "runner first; then 5-min trades by doubling band (1, 2-3, 4-7, ...); within a band smartMoney desc; then txs5m, then volume1hUsd",
         asOf: record?.asOf ?? null,
         staleness: record?.staleness ?? null,
@@ -1099,12 +1100,9 @@ export function createServer(deps: ServerDeps): Hono {
       }
       throw error;
     }
-    const [board, rwa] = await Promise.all([
-      deps.store.get<unknown>(MEME_BOARD_KEY),
-      deps.store.get<unknown>(RWA_UNIVERSE_KEY),
-    ]);
+    const [board, stocks] = await Promise.all([deps.store.get<unknown>(MEME_BOARD_KEY), loadStockInfo(deps.store)]);
     const rows = Array.isArray(board?.data) ? (board.data as MemeBoardRow[]) : [];
-    const groups = groupMemesByStock(rows, rwaRowsByAddress(rwa?.data), query, Date.now());
+    const groups = groupMemesByStock(rows, stocks, query, Date.now());
     const memeStocks = rows.filter((row) => row.quote.kind === "bstock");
     return c.json({
       data: groups,
@@ -1118,7 +1116,6 @@ export function createServer(deps: ServerDeps): Hono {
         rules: MEME_STOCK_RULES,
         asOf: board?.asOf ?? null,
         staleness: board?.staleness ?? null,
-        rwaStaleness: rwa?.staleness ?? null,
       },
     });
   });

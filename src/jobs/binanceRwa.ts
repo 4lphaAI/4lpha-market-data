@@ -30,6 +30,7 @@ import {
 import type { FetchFn } from "../adapters/http.js";
 import { normalizeAddress, sanitizeMessage } from "../adapters/http.js";
 import { allowlistedStocks } from "../allowlist.js";
+import { MEME_BOARD_KEY } from "./memeBoard.js";
 import { RWA_MEMBERS_KEY, RWA_UNIVERSE_KEY, RWA_VENUES_KEY } from "../universe.js";
 import { mergeTokenIntoStore } from "./tokenStore.js";
 
@@ -88,6 +89,8 @@ export interface BinanceRwaCycle {
   perAddress: number;
   /** Symbols whose per-address read failed — vetoed `rwa_stale` until it succeeds. */
   perAddressMissed: string[];
+  /** Meme-quote bStocks outside the snapshot priced into `rwa:quote-stocks` this cycle. */
+  quoteStocks: number;
 }
 
 /** Runs one cycle. Exported so tests and scripts can drive it directly. */
@@ -148,7 +151,114 @@ export async function runBinanceRwa(
     priced++;
   }
 
-  return { rows: tokens.length, byPlatform, dropped, priced, perAddress: extras.rows.length, perAddressMissed: extras.missed };
+  const quoteStocks = await refreshQuoteStocks(store, tokens, signal, options.fetchFn);
+
+  return {
+    rows: tokens.length,
+    byPlatform,
+    dropped,
+    priced,
+    perAddress: extras.rows.length,
+    perAddressMissed: extras.missed,
+    quoteStocks,
+  };
+}
+
+/** Store key for bStocks that quote memes but are not in `universe:rwa` (see {@link refreshQuoteStocks}). */
+export const QUOTE_STOCKS_KEY = "rwa:quote-stocks";
+/** Upper bound on per-address stock reads a cycle; the live board had 6 such stocks on 2026-10-04. */
+const MAX_QUOTE_STOCKS = 25;
+
+/** Price and session state for one meme-quote bStock outside the RWA snapshot. */
+export interface QuoteStock {
+  address: string;
+  symbol: string | null;
+  /**
+   * The underlying ticker, from the symbol: every one of Binance's 46 listed
+   * bStocks is named ticker + "B" (measured 2026-10-04, 46/46), so BNCB → BNC.
+   */
+  underlyingTicker: string | null;
+  priceUsd: number | null;
+  referencePriceUsd: number | null;
+  premiumBps: number | null;
+  /** `null` when the session read failed — unknown, never assumed open. */
+  openState: boolean | null;
+  reasonCode: string | null;
+  marketCapUsd: number | null;
+  high52wUsd: number | null;
+  low52wUsd: number | null;
+  observedAt: number;
+}
+
+/**
+ * Prices the bStocks memes are quoted in that the RWA snapshot does not carry
+ * (BNCB, HIMSB, GMEB, DJTB… — BNCB alone quoted 117 memes on 2026-10-04).
+ *
+ * Written to its own key, **never into `universe:rwa`**: rule 5 admits any open
+ * row of that snapshot, so putting these there would make every meme-quote
+ * bStock tradable without anyone having vetted it. One `/price` batch plus one
+ * `/underlying-market` per stock (session state is what says the quote can be
+ * bought at all). Never throws; a stock whose reads fail keeps no entry.
+ */
+async function refreshQuoteStocks(
+  store: SnapshotStore,
+  snapshotRows: readonly RwaToken[],
+  signal: AbortSignal,
+  fetchFn: FetchFn | undefined,
+): Promise<number> {
+  const inSnapshot = new Set(snapshotRows.map((row) => row.address));
+  const wanted = new Map<string, string | null>();
+  const board = await store.get<unknown>(MEME_BOARD_KEY);
+  if (Array.isArray(board?.data)) {
+    for (const row of board.data as Array<{ quote?: { address?: unknown; kind?: unknown; symbol?: unknown } }>) {
+      const address = normalizeAddress(row?.quote?.address);
+      if (address === null || row.quote?.kind !== "bstock" || inSnapshot.has(address)) continue;
+      wanted.set(address, typeof row.quote.symbol === "string" ? row.quote.symbol : null);
+    }
+  }
+  const addresses = [...wanted.keys()].slice(0, MAX_QUOTE_STOCKS);
+  if (addresses.length === 0) return 0;
+
+  let prices = new Map<string, RwaPrice>();
+  try {
+    prices = await fetchRwaPrices({ addresses, signal, fetchFn });
+  } catch (error) {
+    console.warn(`[${BINANCE_RWA_JOB}] quote-stock prices failed: ${sanitizeMessage(error)}`);
+  }
+  const now = Date.now();
+  const byAddress: Record<string, QuoteStock> = {};
+  for (const address of addresses) {
+    if (signal.aborted) break;
+    let market: RwaUnderlyingMarket | null = null;
+    try {
+      market = await fetchRwaUnderlyingMarket({ address, signal, fetchFn });
+    } catch (error) {
+      console.warn(`[${BINANCE_RWA_JOB}] quote-stock session failed for ${wanted.get(address) ?? address}: ${sanitizeMessage(error)}`);
+    }
+    const price = prices.get(address);
+    if (price === undefined && market === null) continue;
+    const symbol = wanted.get(address) ?? null;
+    byAddress[address] = {
+      address,
+      symbol,
+      underlyingTicker: symbol !== null && symbol.length > 1 && symbol.endsWith("B") ? symbol.slice(0, -1) : null,
+      priceUsd: price?.tokenPriceUsd ?? null,
+      referencePriceUsd: price?.referencePriceUsd ?? market?.referencePriceUsd ?? null,
+      premiumBps: price?.premiumBps ?? null,
+      openState: market?.openState ?? null,
+      reasonCode: market?.reasonCode ?? null,
+      marketCapUsd: market?.marketCapUsd ?? null,
+      high52wUsd: market?.high52wUsd ?? null,
+      low52wUsd: market?.low52wUsd ?? null,
+      observedAt: now,
+    };
+  }
+  await store.put(QUOTE_STOCKS_KEY, { byAddress }, {
+    source: BINANCE_RWA_SOURCE,
+    freshForMs: RWA_FRESH_FOR_MS,
+    deadAfterMs: RWA_DEAD_AFTER_MS,
+  });
+  return Object.keys(byAddress).length;
 }
 
 /**

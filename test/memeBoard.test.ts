@@ -11,7 +11,9 @@ import {
 } from "../src/adapters/onchainos.js";
 import type { LaunchpadState } from "../src/query/launchpadState.js";
 import { buildShortlist, parseShortlistQuery } from "../src/query/memeQuery.js";
-import { groupMemesByStock, parseMemeStockQuery } from "../src/query/memeStocks.js";
+import { groupMemesByStock, loadStockInfo, parseMemeStockQuery, type StockInfo } from "../src/query/memeStocks.js";
+import { QUOTE_STOCKS_KEY } from "../src/jobs/binanceRwa.js";
+import { RWA_UNIVERSE_KEY } from "../src/universe.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import { MEME_BOARD_KEY, MEME_STATE_KEY, runMemeBoard } from "../src/jobs/memeBoard.js";
@@ -612,11 +614,6 @@ describe("buildShortlist", () => {
     assert.deepEqual(strict.rows.map((r) => r.address), [addr(1)]);
   });
 
-  it("keeps only bStock-quoted memes in the memestock segment, and names the stock", () => {
-    const rows = [boardRow(1, { quote: { kind: "bstock", symbol: "NVDAB" } }), boardRow(2)];
-    const list = buildShortlist(rows, parseShortlistQuery((n) => (n === "segment" ? "memestock" : undefined)), NOW);
-    assert.deepEqual(list.rows.map((r) => [r.address, r.quote.symbol]), [[addr(1), "NVDAB"]]);
-  });
 
   it("rejects a share outside 0..1 and an unknown segment", () => {
     assert.throws(() => parseShortlistQuery((n) => (n === "flapShare" ? "1.5" : undefined)), /flapShare/);
@@ -673,9 +670,11 @@ describe("GET /memes/shortlist", () => {
   it("serves compact rows and says what it applied", async () => {
     const store = new MemoryStore();
     const now = Date.now();
-    const live = classifyMeme(input({ rush: rush({ address: addr(1), createdAt: now - HOUR }), activity: activity({ txs5m: 12 }), quote: { kind: "bstock", symbol: "SPCXB" }, now }));
+    const SPCXB = "0xbe9d156892e55e7154bcd3cb0fea677f9d3103e1";
+    const live = classifyMeme(input({ rush: rush({ address: addr(1), quote: SPCXB, createdAt: now - HOUR }), activity: activity({ txs5m: 12 }), quote: { kind: "bstock", symbol: "SPCXB" }, flow1h: { buys: 60, sells: 40, uniqueTraders: 50, inflowUsd: 0 }, now }));
     const dead = classifyMeme(input({ rush: rush({ address: addr(2), createdAt: now - 5 * HOUR }), activity: activity({ address: addr(2), txs1h: 0, txs5m: 0 }), now }));
     await store.put(MEME_BOARD_KEY, [live, dead], { source: "test", freshForMs: 60_000, deadAfterMs: 600_000 });
+    await store.put(RWA_UNIVERSE_KEY, { rows: [{ address: SPCXB, symbol: "SPCXB", underlyingTicker: "SPCX", tokenPriceUsd: 159, openState: true }] }, { source: "test", freshForMs: 60_000, deadAfterMs: 600_000 });
     const app = createServer({ scheduler: createScheduler(store), store });
     const body = (await (await app.request("/memes/shortlist?segment=memestock")).json()) as {
       data: Array<Record<string, unknown>>;
@@ -683,7 +682,7 @@ describe("GET /memes/shortlist", () => {
     };
     assert.equal(body.data.length, 1);
     assert.equal(body.data[0]!["address"], addr(1));
-    assert.deepEqual(body.data[0]!["quote"], { address: BNB, kind: "bstock", symbol: "SPCXB" });
+    assert.deepEqual(body.data[0]!["quote"], { address: SPCXB, kind: "bstock", symbol: "SPCXB", stock: { priceUsd: 159, openState: true } });
     assert.equal("holderMix" in body.data[0]!, false);
     assert.equal(body.meta.applied.segment, "memestock");
     assert.equal(body.meta.applied.flapShare, 0.7);
@@ -692,9 +691,81 @@ describe("GET /memes/shortlist", () => {
   });
 });
 
+describe("memestock segment gates", () => {
+  const BNCB_ADDR = BNCB;
+  const open = { priceUsd: 6.12, openState: true };
+  const stocksOpen = new Map([[NVDAB, { priceUsd: 235, openState: true }], [BNCB_ADDR, open]]);
+  const memestock = parseShortlistQuery((n) => (n === "segment" ? "memestock" : undefined));
+  type Flow = NonNullable<MemeBoardRow["flow1h"]>;
+  const goodFlow: Flow = { buys: 120, sells: 80, uniqueTraders: 90, inflowUsd: 1_000 };
+  /** A live meme quoted in `stock`, with an hour of flow unless told otherwise. */
+  const ms = (n: number, stock: string, symbol: string, o: { flow?: Flow | null; chg1h?: number; txs5m?: number } = {}): MemeBoardRow =>
+    classifyMeme(
+      input({
+        rush: rush({ address: addr(n), symbol: `M${n}`, quote: stock, createdAt: NOW - HOUR }),
+        activity: activity({ address: addr(n), txs5m: o.txs5m ?? 10, priceChange1hPct: o.chg1h ?? 5 }),
+        quote: { kind: "bstock", symbol },
+        flow1h: o.flow === undefined ? goodFlow : o.flow,
+      }),
+    );
+
+  it("admits a live meme on an open stock with buyers arriving, and carries the stock's price", () => {
+    const list = buildShortlist([ms(1, NVDAB, "NVDAB"), boardRow(2)], memestock, NOW, stocksOpen);
+    assert.deepEqual(list.rows.map((r) => r.address), [addr(1)]);
+    assert.deepEqual(list.rows[0]!.quote, { address: NVDAB, kind: "bstock", symbol: "NVDAB", stock: { priceUsd: 235, openState: true } });
+  });
+
+  it("keeps out no flow data, sellers winning, a dump in progress, thin trading, and a closed or unread stock", () => {
+    const rows = [
+      ms(1, NVDAB, "NVDAB", { flow: null }),
+      ms(2, NVDAB, "NVDAB", { flow: { ...goodFlow, buys: 488, sells: 512 } }),
+      ms(3, NVDAB, "NVDAB", { chg1h: -68 }),
+      ms(4, NVDAB, "NVDAB", { flow: { ...goodFlow, uniqueTraders: 21 } }),
+      ms(5, BNCB_ADDR, "BNCB"),
+      ms(6, "0x00000000000000000000000000000000000000ff", "XYZB"),
+      ms(7, NVDAB, "NVDAB"),
+    ];
+    const closed = new Map([[NVDAB, { priceUsd: 235, openState: true }], [BNCB_ADDR, { priceUsd: 6.12, openState: false }]]);
+    assert.deepEqual(buildShortlist(rows, memestock, NOW, closed).rows.map((r) => r.address), [addr(7)]);
+  });
+
+  it("caps each stock at three memes, the best three, unless the caller lifts it", () => {
+    const rows = [1, 2, 3, 4, 5].map((n) => ms(n, BNCB_ADDR, "BNCB", { txs5m: 10 * n }));
+    const capped = buildShortlist(rows, memestock, NOW, stocksOpen);
+    assert.deepEqual(capped.rows.map((r) => r.txs5m), [50, 40, 30]);
+    const lifted = buildShortlist(rows, parseShortlistQuery((n) => ({ segment: "memestock", maxPerQuote: "none" })[n]), NOW, stocksOpen);
+    assert.equal(lifted.rows.length, 5);
+  });
+
+  it("lets every gate be overridden, and leaves the default segment as it was", () => {
+    const thin = ms(1, NVDAB, "NVDAB", { flow: { ...goodFlow, uniqueTraders: 21 } });
+    const loose = parseShortlistQuery((n) => ({ segment: "memestock", minUniqueTraders1h: "none", requireQuoteOpen: "false" })[n]);
+    assert.equal(buildShortlist([thin], loose, NOW).rows.length, 1);
+    const defaults = parseShortlistQuery(() => undefined);
+    assert.deepEqual(defaults.gates, { minUniqueTraders1h: undefined, minBuySellRatio1h: undefined, minPriceChange1hPct: undefined, maxPerQuote: undefined, requireQuoteOpen: false });
+    assert.equal(buildShortlist([ms(1, NVDAB, "NVDAB", { flow: null })], defaults, NOW).rows.length, 1);
+    assert.throws(() => parseShortlistQuery((n) => (n === "maxPerQuote" ? "0" : undefined)), /maxPerQuote/);
+  });
+});
+
+describe("loadStockInfo", () => {
+  it("prefers the RWA row, falls back to the per-address price, and dates neither as open when unread", async () => {
+    const store = new MemoryStore();
+    const TTL = { source: "test", freshForMs: 60_000, deadAfterMs: 600_000 };
+    await store.put(QUOTE_STOCKS_KEY, { byAddress: {
+      [BNCB]: { address: BNCB, symbol: "BNCB", underlyingTicker: "BNC", priceUsd: 6.12, openState: null, observedAt: 1 },
+      [NVDAB]: { address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", priceUsd: 1, openState: false, observedAt: 1 },
+    } }, TTL);
+    await store.put(RWA_UNIVERSE_KEY, { rows: [{ address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", tokenPriceUsd: 235, openState: true }] }, TTL);
+    const stocks = await loadStockInfo(store);
+    assert.deepEqual(stocks.get(NVDAB), { address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", tickerSource: "rwa", priceUsd: 235, openState: true, source: "rwa" });
+    assert.deepEqual(stocks.get(BNCB), { address: BNCB, symbol: "BNCB", underlyingTicker: "BNC", tickerSource: "symbol", priceUsd: 6.12, openState: null, source: "per-address" });
+  });
+});
+
 describe("groupMemesByStock", () => {
   const SPCXB = "0xbe9d156892e55e7154bcd3cb0fea677f9d3103e1";
-  const stockRow = { address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", tokenPriceUsd: 235, openState: true } as unknown as import("../src/core/models.js").RwaToken;
+  const stockRow: StockInfo = { address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", tickerSource: "rwa", priceUsd: 235, openState: true, source: "rwa" };
   const stocks = new Map([[NVDAB, stockRow]]);
   const query = parseMemeStockQuery(() => undefined);
   /** A board row quoted in the stock at `quote`. */
@@ -719,10 +790,10 @@ describe("groupMemesByStock", () => {
     assert.equal(nvdab.memes.live, 1); // dead and churned memes are counted, never summed
     assert.equal(nvdab.memes.byStatus.dead, 1);
     assert.equal(nvdab.activity.txs5m, 30);
-    assert.deepEqual(nvdab.stock, { address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", priceUsd: 235, openState: true, inRwaSnapshot: true });
+    assert.deepEqual(nvdab.stock, stockRow);
     assert.deepEqual(nvdab.top.map((t) => t.address), [addr(1)]);
     const spcxb = groups[0]!;
-    assert.equal(spcxb.stock.inRwaSnapshot, false);
+    assert.equal(spcxb.stock.source, null);
     assert.equal(spcxb.stock.priceUsd, null);
     assert.deepEqual(spcxb.memes.liveByLaunchpad, { flap: 1, fourmeme: 1 });
   });

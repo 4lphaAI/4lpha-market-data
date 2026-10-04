@@ -14,6 +14,9 @@
  */
 
 import type { RwaToken } from "../core/models.js";
+import type { SnapshotStore } from "../core/store.js";
+import { QUOTE_STOCKS_KEY, type QuoteStock } from "../jobs/binanceRwa.js";
+import { RWA_UNIVERSE_KEY } from "../universe.js";
 import type { MemeLaunchpad } from "../adapters/binanceWeb3.js";
 import { MEME_STATUSES, type MemeBoardRow, type MemeFlag, type MemeStatus } from "./memeClassify.js";
 import {
@@ -41,16 +44,7 @@ export const MEME_STOCK_ORDER_FIELDS = ["volume1hUsd", "live", "txs5m", "new1h",
 export type MemeStockOrderField = (typeof MEME_STOCK_ORDER_FIELDS)[number];
 
 export interface MemeStockGroup {
-  stock: {
-    address: string;
-    symbol: string | null;
-    underlyingTicker: string | null;
-    /** Binance's NAV price for the stock token; `null` when Binance has no row for it. */
-    priceUsd: number | null;
-    openState: boolean | null;
-    /** False for issuer bStocks Binance's RWA snapshot does not carry (e.g. BNCB). */
-    inRwaSnapshot: boolean;
-  };
+  stock: StockInfo;
   memes: {
     total: number;
     live: number;
@@ -99,9 +93,67 @@ export function isLiveMeme(row: MemeBoardRow): boolean {
   );
 }
 
+/**
+ * What the plane knows about a bStock that quotes memes. From the RWA snapshot
+ * when Binance lists it (`source: "rwa"`), else from `rwa:quote-stocks`
+ * (`source: "per-address"`, ticker from the symbol), else nothing but the
+ * symbol the board carries (`source: null`).
+ */
+export interface StockInfo {
+  address: string;
+  symbol: string | null;
+  underlyingTicker: string | null;
+  tickerSource: "rwa" | "symbol" | null;
+  /** Binance's NAV price for the stock token. */
+  priceUsd: number | null;
+  /** `null` = unknown, never assumed open. */
+  openState: boolean | null;
+  source: "rwa" | "per-address" | null;
+}
+
+/** Both stock sources, keyed by address; RWA rows win. Never throws. */
+export async function loadStockInfo(store: SnapshotStore): Promise<Map<string, StockInfo>> {
+  const out = new Map<string, StockInfo>();
+  try {
+    const extra = await store.get<unknown>(QUOTE_STOCKS_KEY);
+    const byAddress = (extra?.data as { byAddress?: Record<string, QuoteStock> } | undefined)?.byAddress;
+    if (extra !== null && extra.staleness !== "dead" && typeof byAddress === "object" && byAddress !== null) {
+      for (const stock of Object.values(byAddress)) {
+        if (typeof stock?.address !== "string") continue;
+        out.set(stock.address, {
+          address: stock.address,
+          symbol: stock.symbol ?? null,
+          underlyingTicker: stock.underlyingTicker ?? null,
+          tickerSource: stock.underlyingTicker ? "symbol" : null,
+          priceUsd: stock.priceUsd ?? null,
+          openState: stock.openState ?? null,
+          source: "per-address",
+        });
+      }
+    }
+    const rwa = await store.get<unknown>(RWA_UNIVERSE_KEY);
+    if (rwa !== null && rwa.staleness !== "dead") {
+      for (const [address, row] of rwaRowsByAddress(rwa.data)) {
+        out.set(address, {
+          address,
+          symbol: row.symbol,
+          underlyingTicker: row.underlyingTicker,
+          tickerSource: row.underlyingTicker === null ? null : "rwa",
+          priceUsd: row.tokenPriceUsd,
+          openState: row.openState,
+          source: "rwa",
+        });
+      }
+    }
+  } catch {
+    // A missing stock row only blanks price/state; the board still groups.
+  }
+  return out;
+}
+
 export function groupMemesByStock(
   rows: readonly MemeBoardRow[],
-  stocks: ReadonlyMap<string, RwaToken>,
+  stocks: ReadonlyMap<string, StockInfo>,
   query: MemeStockQuery,
   now: number,
 ): MemeStockGroup[] {
@@ -120,15 +172,16 @@ export function groupMemesByStock(
     for (const meme of memes) byStatus[meme.status] += 1;
     const sum = (pick: (row: MemeBoardRow) => number | null | undefined) =>
       live.reduce((total, row) => total + (pick(row) ?? 0), 0);
-    const rwa = stocks.get(address);
+    const known = stocks.get(address);
     groups.push({
       stock: {
         address,
-        symbol: rwa?.symbol ?? memes.find((meme) => meme.quote.symbol !== null)?.quote.symbol ?? null,
-        underlyingTicker: rwa?.underlyingTicker ?? null,
-        priceUsd: rwa?.tokenPriceUsd ?? null,
-        openState: rwa?.openState ?? null,
-        inRwaSnapshot: rwa !== undefined,
+        symbol: known?.symbol ?? memes.find((meme) => meme.quote.symbol !== null)?.quote.symbol ?? null,
+        underlyingTicker: known?.underlyingTicker ?? null,
+        tickerSource: known?.tickerSource ?? null,
+        priceUsd: known?.priceUsd ?? null,
+        openState: known?.openState ?? null,
+        source: known?.source ?? null,
       },
       memes: {
         total: memes.length,
@@ -147,7 +200,7 @@ export function groupMemesByStock(
         volume1hUsd: sum((row) => row.activity?.volume1hUsd),
         smartMoney: sum(smartMoneyCount),
       },
-      top: [...live].sort(compareShortlist).slice(0, MEME_STOCK_RULES.topPerStock).map((row) => toShortlistRow(row, now)),
+      top: [...live].sort(compareShortlist).slice(0, MEME_STOCK_RULES.topPerStock).map((row) => toShortlistRow(row, now, stocks)),
     });
   }
 

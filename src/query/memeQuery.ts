@@ -214,6 +214,54 @@ export const SHORTLIST_DEFAULTS = {
 export const MEME_SEGMENTS = ["all", "memestock"] as const;
 export type MemeSegment = (typeof MEME_SEGMENTS)[number];
 
+/**
+ * The quality gates, per segment. `all` keeps the original shortlist; the
+ * meme-stock segment adds four, because measured 2026-10-04 its 29 live
+ * candidates included sell-dominated dumps (CZ 488/512 at -68% in the hour,
+ * bBroker -50%), charts with 21 traders an hour, five memes with no hour of
+ * flow data at all, and eight of the 29 on one stock (BNCB). With these gates
+ * the same board gave about a dozen. A gate on a number the row does not carry
+ * excludes it — no flow data is not evidence of demand.
+ */
+export const SEGMENT_GATES: Record<MemeSegment, SegmentGates> = {
+  all: {
+    minUniqueTraders1h: undefined,
+    minBuySellRatio1h: undefined,
+    minPriceChange1hPct: undefined,
+    maxPerQuote: undefined,
+    requireQuoteOpen: false,
+  },
+  memestock: {
+    minUniqueTraders1h: 30,
+    /** Buys at least match sells over the hour: someone is still arriving. */
+    minBuySellRatio1h: 1,
+    /** Down 30% or more in an hour is a dump in progress, whatever the volume. */
+    minPriceChange1hPct: -30,
+    /** No stock fills the list on its own; the narrative is spread. */
+    maxPerQuote: 3,
+    /**
+     * The quote bStock must be known to be open: a meme stock is bought through
+     * its stock, and a halted or unread stock is not a route.
+     */
+    requireQuoteOpen: true,
+  },
+};
+
+export interface SegmentGates {
+  minUniqueTraders1h: number | undefined;
+  minBuySellRatio1h: number | undefined;
+  minPriceChange1hPct: number | undefined;
+  /** At most this many memes per quote token; `undefined` = no cap. */
+  maxPerQuote: number | undefined;
+  requireQuoteOpen: boolean;
+}
+
+/** What the shortlist knows about a quote stock (see `loadStockInfo`). */
+export interface QuoteStockState {
+  priceUsd: number | null;
+  openState: boolean | null;
+}
+
 export interface ShortlistQuery {
   size: number;
   flapShare: number;
@@ -226,6 +274,7 @@ export interface ShortlistQuery {
   /** Floor on {@link smartMoneyCount}; none by default — coverage is too thin to require it. */
   minSmartMoney: number | undefined;
   maxAgeMinutes: number | undefined;
+  gates: SegmentGates;
 }
 
 export function parseShortlistQuery(get: (name: string) => string | undefined): ShortlistQuery {
@@ -256,6 +305,29 @@ export function parseShortlistQuery(get: (name: string) => string | undefined): 
     minLiquidityUsd: numberParam(get("minLiquidityUsd"), "minLiquidityUsd") ?? SHORTLIST_DEFAULTS.minLiquidityUsd,
     minSmartMoney: numberParam(get("minSmartMoney"), "minSmartMoney"),
     maxAgeMinutes: numberParam(get("maxAgeMinutes"), "maxAgeMinutes"),
+    gates: parseGates(get, segment?.[0] ?? "all"),
+  };
+}
+
+/** Segment defaults, each overridable; `none` clears one. */
+function parseGates(get: (name: string) => string | undefined, segment: MemeSegment): SegmentGates {
+  const base = SEGMENT_GATES[segment];
+  const optional = (name: string, fallback: number | undefined) =>
+    get(name)?.trim() === "none" ? undefined : (numberParam(get(name), name) ?? fallback);
+  const maxPerQuote = optional("maxPerQuote", base.maxPerQuote);
+  if (maxPerQuote !== undefined && (!Number.isInteger(maxPerQuote) || maxPerQuote < 1)) {
+    throw new MemeQueryError("maxPerQuote must be a positive integer or none");
+  }
+  const openRaw = get("requireQuoteOpen");
+  if (openRaw !== undefined && openRaw !== "" && openRaw !== "true" && openRaw !== "false") {
+    throw new MemeQueryError("requireQuoteOpen must be true or false");
+  }
+  return {
+    minUniqueTraders1h: optional("minUniqueTraders1h", base.minUniqueTraders1h),
+    minBuySellRatio1h: optional("minBuySellRatio1h", base.minBuySellRatio1h),
+    minPriceChange1hPct: optional("minPriceChange1hPct", base.minPriceChange1hPct),
+    maxPerQuote,
+    requireQuoteOpen: openRaw === "true" ? true : openRaw === "false" ? false : base.requireQuoteOpen,
   };
 }
 
@@ -268,7 +340,8 @@ export interface MemeShortlistRow {
   status: MemeStatus;
   ageMinutes: number;
   progress: number | null;
-  quote: MemeBoardRow["quote"];
+  /** For a bStock quote, `stock` carries its price and session state; `null` otherwise or when unknown. */
+  quote: MemeBoardRow["quote"] & { stock: QuoteStockState | null };
   priceUsd: number | null;
   marketCapUsd: number | null;
   liquidityUsd: number | null;
@@ -330,7 +403,12 @@ export function activityBand(row: MemeBoardRow): number {
   return txs <= 0 ? 0 : Math.floor(Math.log2(txs)) + 1;
 }
 
-export function matchesShortlist(row: MemeBoardRow, query: ShortlistQuery, now: number): boolean {
+export function matchesShortlist(
+  row: MemeBoardRow,
+  query: ShortlistQuery,
+  now: number,
+  stocks: ReadonlyMap<string, QuoteStockState> = new Map(),
+): boolean {
   if (!query.statuses.includes(row.status)) return false;
   if (query.stages !== undefined && !query.stages.includes(row.stage)) return false;
   if (query.segment === "memestock" && row.quote.kind !== "bstock") return false;
@@ -339,11 +417,56 @@ export function matchesShortlist(row: MemeBoardRow, query: ShortlistQuery, now: 
   if (!atLeast(row.market.liquidityUsd, query.minLiquidityUsd)) return false;
   if (query.minSmartMoney !== undefined && smartMoneyCount(row) < query.minSmartMoney) return false;
   if (query.maxAgeMinutes !== undefined && (now - row.createdAt) / 60_000 > query.maxAgeMinutes) return false;
+  return passesGates(row, query.gates, stocks);
+}
+
+function passesGates(row: MemeBoardRow, gates: SegmentGates, stocks: ReadonlyMap<string, QuoteStockState>): boolean {
+  const flow = row.flow1h;
+  if (gates.minUniqueTraders1h !== undefined && !atLeast(flow?.uniqueTraders ?? null, gates.minUniqueTraders1h)) {
+    return false;
+  }
+  if (gates.minBuySellRatio1h !== undefined) {
+    const buys = flow?.buys ?? null;
+    const sells = flow?.sells ?? null;
+    if (buys === null || sells === null || buys === 0) return false;
+    if (sells > 0 && buys / sells < gates.minBuySellRatio1h) return false;
+  }
+  if (
+    gates.minPriceChange1hPct !== undefined &&
+    !atLeast(row.activity?.priceChange1hPct ?? null, gates.minPriceChange1hPct)
+  ) {
+    return false;
+  }
+  if (gates.requireQuoteOpen && row.quote.kind === "bstock") {
+    const stock = row.quote.address === null ? undefined : stocks.get(row.quote.address);
+    if (stock?.openState !== true) return false;
+  }
   return true;
 }
 
-export function buildShortlist(rows: readonly MemeBoardRow[], query: ShortlistQuery, now: number): Shortlist {
-  const candidates = rows.filter((row) => matchesShortlist(row, query, now)).sort(compareShortlist);
+/** Keeps the first `max` rows per quote token, in the order given. */
+function capPerQuote(rows: readonly MemeBoardRow[], max: number | undefined): MemeBoardRow[] {
+  if (max === undefined) return [...rows];
+  const seen = new Map<string, number>();
+  return rows.filter((row) => {
+    const key = row.quote.address ?? "unknown";
+    const count = seen.get(key) ?? 0;
+    if (count >= max) return false;
+    seen.set(key, count + 1);
+    return true;
+  });
+}
+
+export function buildShortlist(
+  rows: readonly MemeBoardRow[],
+  query: ShortlistQuery,
+  now: number,
+  stocks: ReadonlyMap<string, QuoteStockState> = new Map(),
+): Shortlist {
+  const candidates = capPerQuote(
+    rows.filter((row) => matchesShortlist(row, query, now, stocks)).sort(compareShortlist),
+    query.gates.maxPerQuote,
+  );
   const flap = candidates.filter((row) => row.launchpad === "flap");
   const fourmeme = candidates.filter((row) => row.launchpad === "fourmeme");
 
@@ -355,14 +478,19 @@ export function buildShortlist(rows: readonly MemeBoardRow[], query: ShortlistQu
   const backfilled = Math.max(0, takeFlap - flapSlots) + Math.max(0, takeFour - fourSlots);
 
   return {
-    rows: picked.map((row) => toShortlistRow(row, now)),
+    rows: picked.map((row) => toShortlistRow(row, now, stocks)),
     candidates: { flap: flap.length, fourmeme: fourmeme.length },
     picked: { flap: takeFlap, fourmeme: takeFour },
     backfilled,
   };
 }
 
-export function toShortlistRow(row: MemeBoardRow, now: number): MemeShortlistRow {
+export function toShortlistRow(
+  row: MemeBoardRow,
+  now: number,
+  stocks: ReadonlyMap<string, QuoteStockState> = new Map(),
+): MemeShortlistRow {
+  const stock = row.quote.kind === "bstock" && row.quote.address !== null ? stocks.get(row.quote.address) : undefined;
   return {
     address: row.address,
     symbol: row.symbol,
@@ -371,7 +499,7 @@ export function toShortlistRow(row: MemeBoardRow, now: number): MemeShortlistRow
     status: row.status,
     ageMinutes: Math.round((now - row.createdAt) / 60_000),
     progress: row.progress,
-    quote: row.quote,
+    quote: { ...row.quote, stock: stock === undefined ? null : { priceUsd: stock.priceUsd, openState: stock.openState } },
     priceUsd: row.market.priceUsd,
     marketCapUsd: row.market.marketCapUsd,
     liquidityUsd: row.market.liquidityUsd,

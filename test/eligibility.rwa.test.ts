@@ -360,3 +360,39 @@ describe("allowlisted stocks Binance's /rwa/tokens list omits (2026-10-04)", () 
     assert.equal(result.reason, "rwa_stale");
   });
 });
+
+describe("meme-quote bStocks outside the RWA snapshot (2026-10-04)", () => {
+  const BNCB = "0x4902c5ebc598265ed2212b559b042de8a5eeec3f";
+
+  it("prices them into rwa:quote-stocks, never into universe:rwa, so rule 5 does not admit them", async () => {
+    setCredentials();
+    const store = new MemoryStore(now);
+    await store.put("memes:board", [
+      { address: "0x1111111111111111111111111111111111111111", quote: { address: BNCB, kind: "bstock", symbol: "BNCB" } },
+      { address: "0x2222222222222222222222222222222222222222", quote: { address: NVDAB, kind: "bstock", symbol: "NVDAB" } },
+      { address: "0x3333333333333333333333333333333333333333", quote: { address: USDT, kind: "stable", symbol: "USDT" } },
+    ], { source: "test", freshForMs: 60_000, deadAfterMs: 600_000 });
+    const asked: string[] = [];
+    const fake = fakeFetch((call) => {
+      asked.push(call.url);
+      if (call.url.includes("/rwa/tokens")) return ok([NVDAB_ROW]);
+      if (call.url.includes("/rwa/price")) return ok([{ tokenContractAddress: BNCB, platformId: "bstock", tokenPrice: "6.12", referencePriceUsd: null }]);
+      if (call.url.includes("/rwa/underlying-market")) {
+        return ok({ tokenContractAddress: BNCB, platformId: "bstock", statusInfo: { openState: true, reasonCode: "TRADING" }, marketData: { marketCap: "240867023.00" } });
+      }
+      return jsonResponse({ code: 500, msg: "unexpected", data: null }, 500);
+    });
+    const result = await runBinanceRwa(store, signal(), { fetchFn: fake.fetch });
+    assert.equal(result.quoteStocks, 1); // NVDAB is in the snapshot; USDT is not a stock
+    const extra = (await store.get<{ byAddress: Record<string, Record<string, unknown>> }>("rwa:quote-stocks"))!.data.byAddress;
+    assert.deepEqual(Object.keys(extra), [BNCB]);
+    assert.equal(extra[BNCB]!["priceUsd"], 6.12);
+    assert.equal(extra[BNCB]!["underlyingTicker"], "BNC");
+    assert.equal(extra[BNCB]!["openState"], true);
+    const snapshot = (await store.get<{ rows: Array<{ address: string }> }>(RWA_UNIVERSE_KEY))!.data;
+    assert.equal(snapshot.rows.some((row) => row.address === BNCB), false);
+    const context = await loadRwaGateContext(store);
+    assert.equal(context.members.has(BNCB), false);
+    assert.equal(asked.filter((url) => url.includes("underlying-market") && url.includes(BNCB)).length, 1);
+  });
+});
