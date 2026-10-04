@@ -13,6 +13,7 @@ import { spreadHistoryJob } from "./jobs/spreadHistory.js";
 import { flapLaunchesJob } from "./jobs/flapLaunches.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { majorsPricesJob } from "./jobs/majorsPrices.js";
+import { memeBoardJob } from "./jobs/memeBoard.js";
 import { pancakePoolsJob } from "./jobs/pancakePools.js";
 import { tradingFeaturesJob } from "./jobs/tradingFeatures.js";
 import {
@@ -71,6 +72,9 @@ scheduler.register(fourmemeRankingJob(store));
 // The other half of the meme lane. Independent of the Four.Meme job on purpose:
 // they write different keys, so one launchpad going dark cannot blank the other.
 scheduler.register(flapLaunchesJob(store));
+// The classified meme board (Binance Meme Rush + OnchainOS activity/signals).
+// Writes its own keys; the two lanes above are untouched by it.
+scheduler.register(memeBoardJob(store));
 scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
 // Tokenized stocks: the Binance Web3 RWA list (needs the signed key) and the

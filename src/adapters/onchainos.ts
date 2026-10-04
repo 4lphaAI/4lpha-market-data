@@ -389,3 +389,160 @@ function toRiskLevel(value: unknown): RiskLevel {
       return "unavailable";
   }
 }
+
+/**
+ * Windowed trading activity for one token, from the same `price-info` call the
+ * price path already makes. Measured 2026-10-04: OKX answers for Four.Meme and
+ * Flap tokens still on their bonding curve too, not only graduated ones — about
+ * half of tokens 1–3 minutes old, and every token past that.
+ *
+ * `tradeNum` is deliberately not read: it measured 777,427,995.88 on one token,
+ * a token amount rather than a count. The `txs*` fields are the trade counts.
+ */
+export interface TokenActivity {
+  address: string;
+  /** Upstream observation time, epoch ms. */
+  observedAt: number | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+  liquidityUsd: number | null;
+  holders: number | null;
+  txs5m: number | null;
+  txs1h: number | null;
+  txs4h: number | null;
+  txs24h: number | null;
+  volume5mUsd: number | null;
+  volume1hUsd: number | null;
+  volume4hUsd: number | null;
+  volume24hUsd: number | null;
+  priceChange5mPct: number | null;
+  priceChange1hPct: number | null;
+  priceChange4hPct: number | null;
+  priceChange24hPct: number | null;
+}
+
+/** Activity for many tokens, keyed by the response's own address (OKX drops what it has not indexed). */
+export async function fetchOnchainosActivity(
+  params: OnchainosPricesParams,
+): Promise<Map<string, TokenActivity>> {
+  const addresses = [...new Set(params.addresses.map((value) => value.toLowerCase()))];
+  const out = new Map<string, TokenActivity>();
+  for (let index = 0; index < addresses.length; index += MAX_PRICE_BATCH) {
+    const chunk = addresses.slice(index, index + MAX_PRICE_BATCH);
+    const data = await signedRequest({
+      method: "POST",
+      path: "/api/v6/dex/market/price-info",
+      body: chunk.map((address) => ({ chainIndex: BSC_CHAIN_INDEX, tokenContractAddress: address })),
+      fetchFn: params.fetchFn ?? globalThis.fetch,
+      signal: params.signal,
+    });
+    for (const [address, activity] of normalizeActivityRows(data)) out.set(address, activity);
+  }
+  return out;
+}
+
+/** Exported for tests. */
+export function normalizeActivityRows(data: unknown): Map<string, TokenActivity> {
+  const out = new Map<string, TokenActivity>();
+  for (const raw of asArray(data)) {
+    if (!isRecord(raw)) continue;
+    const address = normalizeAddress(raw["tokenContractAddress"]);
+    if (address === null) continue;
+    out.set(address, {
+      address,
+      observedAt: parseNum(raw["time"]),
+      priceUsd: parseNum(raw["price"]),
+      marketCapUsd: parseNum(raw["marketCap"]),
+      liquidityUsd: parseNum(raw["liquidity"]),
+      holders: parseNum(raw["holders"]),
+      txs5m: parseNum(raw["txs5M"]),
+      txs1h: parseNum(raw["txs1H"]),
+      txs4h: parseNum(raw["txs4H"]),
+      txs24h: parseNum(raw["txs24H"]),
+      volume5mUsd: parseNum(raw["volume5M"]),
+      volume1hUsd: parseNum(raw["volume1H"]),
+      volume4hUsd: parseNum(raw["volume4H"]),
+      volume24hUsd: parseNum(raw["volume24H"]),
+      priceChange5mPct: parseNum(raw["priceChange5M"]),
+      priceChange1hPct: parseNum(raw["priceChange1H"]),
+      priceChange4hPct: parseNum(raw["priceChange4H"]),
+      priceChange24hPct: parseNum(raw["priceChange24H"]),
+    });
+  }
+  return out;
+}
+
+/** OKX `walletType` codes on the signal feed. */
+export const SIGNAL_WALLET_TYPES = { "1": "smart_money", "2": "kol", "3": "whale" } as const;
+export type SignalWalletType = (typeof SIGNAL_WALLET_TYPES)[keyof typeof SIGNAL_WALLET_TYPES];
+
+/**
+ * One buy signal: `walletCount` tagged wallets bought the token around `at`.
+ * Token-level aggregate, not wallet tracking — the trigger addresses are not
+ * kept. `soldRatioPct` is how much of that buy the wallets have since sold
+ * (measured 91.37 on one row), so a signal whose wallets already left says so.
+ */
+export interface SmartSignal {
+  id: string;
+  address: string;
+  symbol: string | null;
+  walletType: SignalWalletType;
+  walletCount: number;
+  amountUsd: number | null;
+  soldRatioPct: number | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+  at: number;
+}
+
+export interface OnchainosSignalsParams {
+  limit?: number;
+  signal?: AbortSignal | undefined;
+  fetchFn?: FetchFn;
+}
+
+/**
+ * The newest signals on BSC across smart money, KOL and whale wallets.
+ * Measured 2026-10-04: 100 signals span ~41 h on BSC (~2.4/h), newest 22–35 min old.
+ */
+export async function fetchOnchainosSignals(params: OnchainosSignalsParams = {}): Promise<SmartSignal[]> {
+  const data = await signedRequest({
+    method: "POST",
+    path: "/api/v6/dex/market/signal/list",
+    body: {
+      chainIndex: BSC_CHAIN_INDEX,
+      walletType: Object.keys(SIGNAL_WALLET_TYPES).join(","),
+      limit: String(Math.min(Math.max(1, Math.trunc(params.limit ?? 100)), 100)),
+    },
+    fetchFn: params.fetchFn ?? globalThis.fetch,
+    signal: params.signal,
+  });
+  return normalizeSignals(data);
+}
+
+/** Exported for tests. */
+export function normalizeSignals(data: unknown): SmartSignal[] {
+  const out: SmartSignal[] = [];
+  for (const raw of asArray(data)) {
+    if (!isRecord(raw)) continue;
+    const token = isRecord(raw["token"]) ? raw["token"] : {};
+    const address = normalizeAddress(token["tokenAddress"]);
+    const at = parseNum(raw["timestamp"]);
+    const typeCode = parseStr(raw["walletType"]) ?? String(parseNum(raw["walletType"]) ?? "");
+    const walletType = (SIGNAL_WALLET_TYPES as Record<string, SignalWalletType>)[typeCode];
+    if (address === null || at === null || walletType === undefined) continue;
+    out.push({
+      id: `${walletType}:${address}:${at}`,
+      address,
+      symbol: parseStr(token["symbol"]),
+      walletType,
+      walletCount: parseNum(raw["triggerWalletCount"]) ?? 0,
+      amountUsd: parseNum(raw["amountUsd"]),
+      soldRatioPct: parseNum(raw["soldRatioPercent"]),
+      priceUsd: parseNum(raw["price"]),
+      marketCapUsd: parseNum(token["marketCapUsd"]),
+      at,
+    });
+  }
+  return out;
+}

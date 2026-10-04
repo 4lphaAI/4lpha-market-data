@@ -40,6 +40,9 @@ import { isEligible, isEligibleBatch } from "./query/eligibility.js";
 import { buildUniverse, RWA_UNIVERSE_KEY } from "./universe.js";
 import { isSector, SECTORS, TRENDING_KEY } from "./query/bstockSectors.js";
 import { readTokenRecords } from "./jobs/tokenStore.js";
+import { MEME_BOARD_CAP, MEME_BOARD_KEY } from "./jobs/memeBoard.js";
+import { MEME_RULES, type MemeBoardRow } from "./query/memeClassify.js";
+import { MemeQueryError, compareMemes, matchesMemeQuery, parseMemeQuery, type MemeQuery } from "./query/memeQuery.js";
 import {
   SPREAD_HISTORY_KEY,
   SPREAD_MIN_LIQUIDITY_USD,
@@ -975,6 +978,73 @@ export function createServer(deps: ServerDeps): Hono {
         staleness: lane?.staleness ?? null,
         source: lane?.source ?? null,
       },
+    });
+  });
+
+  /**
+   * The classified meme board: Four.Meme and Flap tokens from Binance Meme Rush,
+   * each labelled with a lifecycle `stage`, a chart `status` and risk/smart-money
+   * `flags`, raw numbers alongside. `dead` is hidden unless asked for; every
+   * other screen is a query parameter. `meta.rules` publishes the thresholds the
+   * labels were computed with.
+   */
+  app.get("/memes", async (c) => {
+    let query: MemeQuery;
+    try {
+      query = parseMemeQuery((name) => c.req.query(name), MEME_BOARD_CAP);
+    } catch (error) {
+      if (error instanceof MemeQueryError) {
+        return c.json({ error: { code: "invalid_query", message: error.message } }, 400);
+      }
+      throw error;
+    }
+
+    const record = await deps.store.get<unknown>(MEME_BOARD_KEY);
+    const rows = Array.isArray(record?.data) ? (record.data as MemeBoardRow[]) : [];
+    const now = Date.now();
+    const matched = rows.filter((row) => matchesMemeQuery(row, query, now));
+    const data = [...matched].sort((a, b) => compareMemes(a, b, query.orderBy)).slice(0, query.limit);
+
+    const byStatus: Record<string, number> = {};
+    const byStage: Record<string, number> = {};
+    for (const row of rows) {
+      byStatus[row.status] = (byStatus[row.status] ?? 0) + 1;
+      byStage[row.stage] = (byStage[row.stage] ?? 0) + 1;
+    }
+
+    return c.json({
+      data,
+      meta: {
+        total: rows.length,
+        matched: matched.length,
+        returned: data.length,
+        cap: MEME_BOARD_CAP,
+        orderBy: query.orderBy,
+        statuses: query.statuses,
+        byStatus,
+        byStage,
+        rules: MEME_RULES,
+        asOf: record?.asOf ?? null,
+        staleness: record?.staleness ?? null,
+        source: record?.source ?? null,
+      },
+    });
+  });
+
+  app.get("/memes/:address", async (c) => {
+    const address = normalizeAddress(c.req.param("address"));
+    if (address === null) {
+      return c.json({ error: { code: "invalid_address", message: "address must be an EVM address" } }, 400);
+    }
+    const record = await deps.store.get<unknown>(MEME_BOARD_KEY);
+    const rows = Array.isArray(record?.data) ? (record.data as MemeBoardRow[]) : [];
+    const row = rows.find((candidate) => candidate.address === address);
+    if (row === undefined) {
+      return c.json({ error: { code: "not_on_board", message: "token is not on the meme board" } }, 404);
+    }
+    return c.json({
+      data: row,
+      meta: { rules: MEME_RULES, asOf: record?.asOf ?? null, staleness: record?.staleness ?? null },
     });
   });
 

@@ -308,3 +308,164 @@ export function isPlausiblePrice(reference: number | null, live: number): boolea
   const ratio = live / reference;
   return ratio >= MIN_PLAUSIBLE_RATIO && ratio <= MAX_PLAUSIBLE_RATIO;
 }
+
+const MEME_RUSH_URL =
+  "https://web3.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/pulse/rank/list/ai";
+
+/** Meme Rush lifecycle lists: freshly created, nearly graduated, just migrated. */
+export const MEME_RUSH_STAGES = { new: 10, finalizing: 20, migrated: 30 } as const;
+export type MemeRushStage = keyof typeof MEME_RUSH_STAGES;
+
+/** Meme Rush launchpad codes on BSC. Other codes (2006/2007 seen) are not ours to label. */
+export const MEME_RUSH_PROTOCOLS = { fourmeme: 2001, flap: 2002 } as const;
+export type MemeLaunchpad = keyof typeof MEME_RUSH_PROTOCOLS;
+
+/**
+ * The server answers at most 100 rows whatever `limit` says (documented 200,
+ * measured 2026-10-04), so asking for more only costs payload.
+ */
+const MEME_RUSH_LIMIT = 100;
+
+/**
+ * One Meme Rush row, narrowed to what the meme board classifies on. Percentages
+ * stay as the upstream formats them (`23.57` means 23.57%); trade counts cover
+ * 24h, which for a token minutes old is its whole life.
+ */
+export interface MemeRushRow {
+  address: string;
+  symbol: string;
+  name: string | null;
+  launchpad: MemeLaunchpad;
+  stage: MemeRushStage;
+  createdAt: number;
+  /** Bonding-curve progress, 0–100. */
+  progress: number | null;
+  migrated: boolean;
+  migratedAt: number | null;
+  /** Quote token of the curve/pair, lowercased; `0xeeee…` means native BNB. */
+  quote: string | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+  liquidityUsd: number | null;
+  volume24hUsd: number | null;
+  priceChange24hPct: number | null;
+  holders: number | null;
+  count24h: number | null;
+  buys24h: number | null;
+  sells24h: number | null;
+  netBuy24hUsd: number | null;
+  top10Pct: number | null;
+  devPct: number | null;
+  sniperPct: number | null;
+  insiderPct: number | null;
+  bundlerPct: number | null;
+  newWalletPct: number | null;
+  smartMoneyHolders: number | null;
+  kolHolders: number | null;
+  devAddress: string | null;
+  devSoldAll: boolean;
+  devMigrateCount: number | null;
+  washTrading: boolean;
+  socials: { website: string | null; twitter: string | null; telegram: string | null };
+}
+
+export interface MemeRushParams extends BaseParams {
+  stage: MemeRushStage;
+}
+
+/** Fetches one Meme Rush list for the BSC launchpads we serve. Keyless. */
+export async function fetchMemeRush(params: MemeRushParams): Promise<MemeRushRow[]> {
+  const payload = await withBinanceLimit(() =>
+    fetchJson({
+      source: SOURCE,
+      url: MEME_RUSH_URL,
+      method: "POST",
+      body: JSON.stringify({
+        chainId: BSC_CHAIN_ID,
+        rankType: MEME_RUSH_STAGES[params.stage],
+        limit: MEME_RUSH_LIMIT,
+        protocol: Object.values(MEME_RUSH_PROTOCOLS),
+      }),
+      fetchFn: params.fetchFn ?? globalThis.fetch,
+      signal: params.signal,
+    }),
+  );
+  return normalizeMemeRush(payload, params.stage);
+}
+
+/** Exported for tests. Rows from a launchpad we do not serve are dropped, not mislabelled. */
+export function normalizeMemeRush(payload: unknown, stage: MemeRushStage): MemeRushRow[] {
+  const data = unwrapEnvelope(payload);
+  const rows: MemeRushRow[] = [];
+  const seen = new Set<string>();
+  for (const raw of asArray(data)) {
+    if (!isRecord(raw)) continue;
+    const address = normalizeAddress(raw["contractAddress"]);
+    if (address === null || seen.has(address)) continue;
+    const launchpad = launchpadOf(parseNum(raw["protocol"]));
+    if (launchpad === null) continue;
+    const createdAt = toEpochMs(raw["createTime"]);
+    if (createdAt === null) continue;
+    seen.add(address);
+
+    const socials = isRecord(raw["socials"]) ? raw["socials"] : {};
+    const migrateStatus = parseNum(raw["migrateStatus"]);
+    rows.push({
+      address,
+      symbol: parseStr(raw["symbol"]) ?? "",
+      name: parseStr(raw["name"]),
+      launchpad,
+      stage,
+      createdAt,
+      progress: parseNum(raw["progress"]),
+      migrated: migrateStatus === 1,
+      migratedAt: positiveOrNull(toEpochMs(raw["migrateTime"])),
+      quote: normalizeAddress(raw["pairAnchorAddress"]),
+      priceUsd: parseNum(raw["price"]),
+      marketCapUsd: parseNum(raw["marketCap"]),
+      liquidityUsd: parseNum(raw["liquidity"]),
+      volume24hUsd: parseNum(raw["volume"]),
+      priceChange24hPct: parseNum(raw["priceChange"]),
+      holders: parseNum(raw["holders"]),
+      count24h: parseNum(raw["count"]),
+      buys24h: parseNum(raw["countBuy"]),
+      sells24h: parseNum(raw["countSell"]),
+      netBuy24hUsd: parseNum(raw["netBuy"]),
+      top10Pct: parseNum(raw["holdersTop10Percent"]),
+      devPct: parseNum(raw["holdersDevPercent"]),
+      sniperPct: parseNum(raw["holdersSniperPercent"]),
+      insiderPct: parseNum(raw["holdersInsiderPercent"]),
+      bundlerPct: parseNum(raw["bundlerHoldingPercent"]),
+      newWalletPct: parseNum(raw["newWalletHoldingPercent"]),
+      smartMoneyHolders: parseNum(raw["smartMoneyHolders"]),
+      kolHolders: parseNum(raw["kolHolders"]),
+      devAddress: normalizeAddress(raw["devAddress"]),
+      // `devPosition: 2` is the documented "dev sold all".
+      devSoldAll: parseNum(raw["devPosition"]) === 2,
+      devMigrateCount: parseNum(raw["devMigrateCount"]),
+      washTrading: isTruthyTag(raw["tagDevWashTrading"]) || isTruthyTag(raw["tagInsiderWashTrading"]),
+      socials: {
+        website: parseStr(socials["website"]),
+        twitter: parseStr(socials["twitter"]),
+        telegram: parseStr(socials["telegram"]),
+      },
+    });
+  }
+  return rows;
+}
+
+function launchpadOf(code: number | null): MemeLaunchpad | null {
+  if (code === MEME_RUSH_PROTOCOLS.fourmeme) return "fourmeme";
+  if (code === MEME_RUSH_PROTOCOLS.flap) return "flap";
+  return null;
+}
+
+function positiveOrNull(value: number | null): number | null {
+  return value === null || value <= 0 ? null : value;
+}
+
+/** Tags arrive as `null` when unset; anything set and not falsy counts. */
+function isTruthyTag(value: unknown): boolean {
+  if (value === null || value === undefined || value === false || value === 0 || value === "0") return false;
+  return value !== "";
+}
