@@ -15,10 +15,10 @@
 
 import type { MemeLaunchpad, MemeRushRow } from "../adapters/binanceWeb3.js";
 import type { SignalWalletType, SmartSignal, TokenActivity } from "../adapters/onchainos.js";
-import type { QuoteKind } from "./quoteKind.js";
+import type { QuoteInfo, QuoteKind } from "./quoteKind.js";
 
 export type MemeStage = "new" | "bonding" | "graduating" | "graduated";
-export type MemeStatus = "runner" | "active" | "fading" | "dead" | "unknown";
+export type MemeStatus = "runner" | "active" | "quiet" | "fading" | "dead" | "unknown";
 export type MemeFlag =
   | "clone"
   | "dev_sold_all"
@@ -34,7 +34,7 @@ export type MemeFlag =
   | "bstock_quote";
 
 export const MEME_STAGES: readonly MemeStage[] = ["new", "bonding", "graduating", "graduated"];
-export const MEME_STATUSES: readonly MemeStatus[] = ["runner", "active", "fading", "dead", "unknown"];
+export const MEME_STATUSES: readonly MemeStatus[] = ["runner", "active", "quiet", "fading", "dead", "unknown"];
 export const MEME_FLAGS: readonly MemeFlag[] = [
   "clone",
   "dev_sold_all",
@@ -71,6 +71,14 @@ export const MEME_RULES = {
   runnerMinTxs5m: 20,
   runnerMinTxs1h: 100,
   runnerMinVolume1hUsd: 10_000,
+  /**
+   * Below either of these a chart that trades is `quiet`, not `active`.
+   * Measured 2026-10-04: before this split, the median "active" token had $4 of
+   * volume in its last hour — mostly launches whose only trade was the
+   * creation buy (txs 1, liquidity $0.002).
+   */
+  activeMinTxs1h: 10,
+  activeMinVolume1hUsd: 1_000,
   /**
    * 1h volume at or above this multiple of market cap is churn, not demand.
    * Measured 2026-10-04: SHEN traded $127k in an hour on a $5.3k cap (24x)
@@ -111,7 +119,8 @@ export interface MemeBoardRow {
   progress: number | null;
   migrated: boolean;
   migratedAt: number | null;
-  quote: { address: string | null; kind: QuoteKind | null };
+  /** `kind`/`symbol` are `null` until the quote contract could be read. */
+  quote: { address: string | null; kind: QuoteKind | null; symbol: string | null };
   market: {
     priceUsd: number | null;
     marketCapUsd: number | null;
@@ -135,8 +144,13 @@ export interface MemeBoardRow {
   /** Earliest token on the board with the same symbol, when this is not it. */
   cloneOf: string | null;
   socials: MemeRushRow["socials"];
-  /** Which Meme Rush list last carried it, and when. */
-  rushStage: MemeRushRow["stage"];
+  /**
+   * Which sources carried it this cycle — `meme-rush:<stage>`, `okx-hot:<5m|1h>`
+   * — empty when it is only being tracked after leaving every list.
+   */
+  listedOn: string[];
+  /** The last hour's trade split from OKX's hot ranking, when it ranked there. */
+  flow1h: { buys: number | null; sells: number | null; uniqueTraders: number | null; inflowUsd: number | null } | null;
   lastListedAt: number;
   firstSeenAt: number;
   /** When `status` first became `dead`; cleared when it trades again. */
@@ -148,8 +162,10 @@ export interface ClassifyInput {
   rush: MemeRushRow;
   activity: TokenActivity | null;
   signals: readonly SmartSignal[];
-  quoteKind: QuoteKind | null;
+  quote: QuoteInfo | null;
   cloneOf: string | null;
+  listedOn?: string[] | undefined;
+  flow1h?: MemeBoardRow["flow1h"] | undefined;
   lastListedAt: number;
   firstSeenAt: number;
   previousDeadSince: number | null;
@@ -164,8 +180,9 @@ export function classifyStage(rush: MemeRushRow, now: number): MemeStage {
 }
 
 /**
- * Whether the chart is alive. Order matters: dead before fading before runner,
- * so a token cannot be a runner on a stale 5-minute burst while its pool is gone.
+ * Whether the chart is alive. Order matters: dead, fading, runner, active, quiet —
+ * so a token cannot be a runner on a stale 5-minute burst while its pool is gone,
+ * and `active` means real trading rather than the creation buy alone.
  */
 export function classifyStatus(
   rush: MemeRushRow,
@@ -202,7 +219,13 @@ export function classifyStatus(
   ) {
     return "runner";
   }
-  return "active";
+  if (
+    (activity.txs1h ?? 0) >= MEME_RULES.activeMinTxs1h &&
+    (activity.volume1hUsd ?? 0) >= MEME_RULES.activeMinVolume1hUsd
+  ) {
+    return "active";
+  }
+  return "quiet";
 }
 
 /** Signals for one token inside the window, newest first. */
@@ -252,7 +275,7 @@ export function classifyMeme(input: ClassifyInput): MemeBoardRow {
   if ((rush.kolHolders ?? 0) > 0 || signalCounts.kol > 0) flags.push("kol");
   if (signalCounts.whale > 0) flags.push("whale");
   if (lastSoldRatioPct !== null && lastSoldRatioPct >= MEME_RULES.smartExitSoldPct) flags.push("smart_exit");
-  if (input.quoteKind === "bstock") flags.push("bstock_quote");
+  if (input.quote?.kind === "bstock") flags.push("bstock_quote");
 
   const { address: _address, ...activityFields } = activity ?? { address: "" };
   return {
@@ -267,7 +290,7 @@ export function classifyMeme(input: ClassifyInput): MemeBoardRow {
     progress: rush.migrated ? 100 : rush.progress,
     migrated: rush.migrated,
     migratedAt: rush.migratedAt,
-    quote: { address: rush.quote, kind: input.quoteKind },
+    quote: { address: rush.quote, kind: input.quote?.kind ?? null, symbol: input.quote?.symbol ?? null },
     market: {
       priceUsd: activity?.priceUsd ?? rush.priceUsd,
       marketCapUsd: activity?.marketCapUsd ?? rush.marketCapUsd,
@@ -300,7 +323,8 @@ export function classifyMeme(input: ClassifyInput): MemeBoardRow {
     dev: { address: rush.devAddress, soldAll: rush.devSoldAll, migrateCount: rush.devMigrateCount },
     cloneOf: input.cloneOf,
     socials: rush.socials,
-    rushStage: rush.stage,
+    listedOn: input.listedOn ?? [],
+    flow1h: input.flow1h ?? null,
     lastListedAt: input.lastListedAt,
     firstSeenAt: input.firstSeenAt,
     deadSince: status === "dead" ? (input.previousDeadSince ?? now) : null,

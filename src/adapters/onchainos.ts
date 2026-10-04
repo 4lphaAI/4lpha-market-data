@@ -546,3 +546,103 @@ export function normalizeSignals(data: unknown): SmartSignal[] {
   }
   return out;
 }
+
+/**
+ * OKX launchpad protocol ids on BSC, from `memepump/supported/chainsProtocol`
+ * (measured 2026-10-04).
+ */
+export const OKX_LAUNCHPAD_PROTOCOLS = { fourmeme: "135086", flap: "129826" } as const;
+export type OkxLaunchpad = keyof typeof OKX_LAUNCHPAD_PROTOCOLS;
+
+/** `rankingTimeFrame` codes. */
+export const HOT_TIMEFRAMES = { "5m": "1", "1h": "2" } as const;
+export type HotTimeframe = keyof typeof HOT_TIMEFRAMES;
+
+/**
+ * One row of OKX's hot-token ranking. Trade fields cover the requested
+ * timeframe only. Measured 2026-10-04, ranked by trade count over 1h: Four.Meme
+ * had 45 tokens with ≥10 trades and ≥$1k in the hour against 4 found through
+ * Meme Rush, because the ranking keeps graduated tokens of any age (quq,
+ * mubarak) that the lifecycle lists have long dropped.
+ */
+export interface HotToken {
+  address: string;
+  symbol: string;
+  launchpad: OkxLaunchpad;
+  timeframe: HotTimeframe;
+  txs: number | null;
+  txsBuy: number | null;
+  txsSell: number | null;
+  uniqueTraders: number | null;
+  volumeUsd: number | null;
+  changePct: number | null;
+  inflowUsd: number | null;
+  liquidityUsd: number | null;
+  marketCapUsd: number | null;
+  holders: number | null;
+  firstTradeAt: number | null;
+  top10Pct: number | null;
+  devPct: number | null;
+  insiderPct: number | null;
+  bundlerPct: number | null;
+}
+
+export interface OnchainosHotParams {
+  launchpad: OkxLaunchpad;
+  timeframe: HotTimeframe;
+  signal?: AbortSignal | undefined;
+  fetchFn?: FetchFn;
+}
+
+/** The 100 most-traded tokens of one launchpad over one timeframe. */
+export async function fetchOnchainosHotTokens(params: OnchainosHotParams): Promise<HotToken[]> {
+  const data = await signedRequest({
+    method: "GET",
+    path: "/api/v6/dex/market/token/hot-token",
+    query: [
+      ["chainIndex", BSC_CHAIN_INDEX],
+      ["rankingType", "4"],
+      ["rankBy", "3"],
+      ["rankingTimeFrame", HOT_TIMEFRAMES[params.timeframe]],
+      ["protocolId", OKX_LAUNCHPAD_PROTOCOLS[params.launchpad]],
+      ["limit", "100"],
+    ],
+    fetchFn: params.fetchFn ?? globalThis.fetch,
+    signal: params.signal,
+  });
+  return normalizeHotTokens(data, params.launchpad, params.timeframe);
+}
+
+/** Exported for tests. */
+export function normalizeHotTokens(data: unknown, launchpad: OkxLaunchpad, timeframe: HotTimeframe): HotToken[] {
+  const out: HotToken[] = [];
+  const seen = new Set<string>();
+  for (const raw of asArray(data)) {
+    if (!isRecord(raw)) continue;
+    const address = normalizeAddress(raw["tokenContractAddress"]);
+    if (address === null || seen.has(address)) continue;
+    seen.add(address);
+    out.push({
+      address,
+      symbol: parseStr(raw["tokenSymbol"]) ?? "",
+      launchpad,
+      timeframe,
+      txs: parseNum(raw["txs"]),
+      txsBuy: parseNum(raw["txsBuy"]),
+      txsSell: parseNum(raw["txsSell"]),
+      uniqueTraders: parseNum(raw["uniqueTraders"]),
+      volumeUsd: parseNum(raw["volume"]),
+      changePct: parseNum(raw["change"]),
+      inflowUsd: parseNum(raw["inflowUsd"]),
+      liquidityUsd: parseNum(raw["liquidity"]),
+      marketCapUsd: parseNum(raw["marketCap"]),
+      holders: parseNum(raw["holders"]),
+      firstTradeAt: parseNum(raw["firstTradeTime"]),
+      top10Pct: parseNum(raw["top10HoldPercent"]),
+      devPct: parseNum(raw["devHoldPercent"]),
+      insiderPct: parseNum(raw["insiderHoldPercent"]),
+      bundlerPct: parseNum(raw["bundleHoldPercent"]),
+    });
+  }
+  return out;
+}

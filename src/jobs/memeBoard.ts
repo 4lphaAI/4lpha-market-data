@@ -1,32 +1,49 @@
 /**
  * `meme-board` job — the classified meme board behind `GET /memes`.
  *
- * Discovery is Binance's keyless Meme Rush (New / Finalizing / Migrated, Four.Meme
- * and Flap, bonding-curve tokens included): three calls a cycle, each a list the
- * upstream already screens for launch stage. Liveness is OnchainOS `price-info`
+ * Discovery has two sources because they see different tokens. Binance's keyless
+ * Meme Rush (New / Finalizing / Migrated, bonding-curve tokens included) is the
+ * launch lifecycle: six calls a cycle, one per stage per launchpad, because a
+ * shared call caps both launchpads at 100 rows together and Flap crowds
+ * Four.Meme out. OKX's hot-token ranking (most trades over 5m and 1h, per
+ * launchpad — four calls) is what is trading now at any age: measured
+ * 2026-10-04 it found 45 live Four.Meme charts where Meme Rush found 4, mostly
+ * graduated tokens the lifecycle lists dropped long ago. Liveness is OnchainOS `price-info`
  * (windowed trade counts, 100 tokens a call) and the OKX smart-money/KOL/whale
  * signal feed — one more call. GMGN is deliberately not on this path: its per-IP
  * ban is host-wide (decided 2026-10-04).
  *
  * The board outlives the lists. Meme Rush's New list turns over in ~2.6 minutes,
  * so a token that starts running after it scrolled off would be lost if the board
- * were only the current lists. Each token is therefore tracked for 24h after it
- * was last listed and re-classified every cycle, and dropped early once it has
- * been dead for 2h — the board is for finding runners, not for an obituary.
+ * were only the current lists. A token that leaves the lists is kept while it is
+ * still alive (up to 24h), and dropped as soon as it is dead or, if OKX never
+ * indexed it, once it is past the new-token grace period. Listed tokens dead for
+ * 2h are dropped too — the board is for finding runners, not for an obituary.
+ * When the cap binds, listed tokens come first and retained ones by last hour's
+ * trades, so the slots go to tokens that are trading rather than to the newest.
  */
 
 import type { SnapshotStore } from "../core/store.js";
 import type { JobSpec } from "../core/types.js";
-import { fetchMemeRush, type MemeRushRow, type MemeRushStage } from "../adapters/binanceWeb3.js";
+import {
+  fetchMemeRush,
+  type MemeLaunchpad,
+  type MemeRushRow,
+  type MemeRushStage,
+} from "../adapters/binanceWeb3.js";
 import { sanitizeMessage } from "../adapters/http.js";
 import {
   fetchOnchainosActivity,
+  fetchOnchainosHotTokens,
   fetchOnchainosSignals,
+  type HotTimeframe,
+  type HotToken,
   type SmartSignal,
   type TokenActivity,
 } from "../adapters/onchainos.js";
+import { readLaunchpadStates, type LaunchpadState, type LaunchpadStateReader } from "../query/launchpadState.js";
 import { MEME_RULES, classifyMeme, findClones, type MemeBoardRow } from "../query/memeClassify.js";
-import { resolveQuoteKinds, type IssuerReader } from "../query/quoteKind.js";
+import { resolveQuotes, type IssuerReader } from "../query/quoteKind.js";
 
 export const MEME_BOARD_JOB = "meme-board";
 /** Public board, served by `GET /memes`. */
@@ -34,7 +51,11 @@ export const MEME_BOARD_KEY = "memes:board";
 /** Internal tracking state: the last Meme Rush row per token, and the signal window. */
 export const MEME_STATE_KEY = "memes:state";
 
-export const MEME_BOARD_CAP = 400;
+/**
+ * Six Meme Rush lists return ~520 distinct tokens and the four hot rankings add
+ * up to ~200 more; the cap leaves room for the ones still running off-list.
+ */
+export const MEME_BOARD_CAP = 800;
 const TRACK_FOR_MS = 24 * 3_600_000;
 const DROP_DEAD_AFTER_MS = 2 * 3_600_000;
 const MAX_SIGNALS = 1_000;
@@ -44,8 +65,16 @@ const BOARD_DEAD_MS = 30 * 60_000;
 
 /** Later lists win when a token is on two at once: migrated is more news than new. */
 const STAGE_ORDER: MemeRushStage[] = ["new", "finalizing", "migrated"];
+const LAUNCHPADS: MemeLaunchpad[] = ["flap", "fourmeme"];
+/** 1h first: its trade split is the one carried on the row as `flow1h`. */
+const HOT_TIMEFRAMES: HotTimeframe[] = ["1h", "5m"];
 
 interface TrackedToken {
+  /**
+   * The token's facts. From Meme Rush when it was ever listed there; for a token
+   * only OKX's hot ranking has carried, synthesised from that row plus the
+   * launchpad's on-chain state (see {@link seedFromHot}).
+   */
   rush: MemeRushRow;
   firstSeenAt: number;
   lastListedAt: number;
@@ -67,9 +96,15 @@ export interface MemeBoardResult {
 }
 
 export interface RunMemeBoardOptions {
-  fetchRush?: ((stage: MemeRushStage, signal: AbortSignal) => Promise<MemeRushRow[]>) | undefined;
+  fetchRush?:
+    | ((stage: MemeRushStage, launchpad: MemeLaunchpad, signal: AbortSignal) => Promise<MemeRushRow[]>)
+    | undefined;
   fetchActivity?: ((addresses: string[], signal: AbortSignal) => Promise<Map<string, TokenActivity>>) | undefined;
   fetchSignals?: ((signal: AbortSignal) => Promise<SmartSignal[]>) | undefined;
+  fetchHot?:
+    | ((launchpad: MemeLaunchpad, timeframe: HotTimeframe, signal: AbortSignal) => Promise<HotToken[]>)
+    | undefined;
+  readStates?: LaunchpadStateReader | undefined;
   readIssuer?: IssuerReader | undefined;
   now?: (() => number) | undefined;
 }
@@ -80,27 +115,73 @@ export async function runMemeBoard(
   options: RunMemeBoardOptions = {},
 ): Promise<MemeBoardResult> {
   const now = (options.now ?? Date.now)();
-  const fetchRush = options.fetchRush ?? ((stage, s) => fetchMemeRush({ stage, signal: s }));
+  const fetchRush =
+    options.fetchRush ?? ((stage, launchpad, s) => fetchMemeRush({ stage, launchpad, signal: s }));
   const fetchActivity =
     options.fetchActivity ?? ((addresses, s) => fetchOnchainosActivity({ addresses, signal: s }));
   const fetchSignals = options.fetchSignals ?? ((s) => fetchOnchainosSignals({ signal: s }));
+  const fetchHot =
+    options.fetchHot ?? ((launchpad, timeframe, s) => fetchOnchainosHotTokens({ launchpad, timeframe, signal: s }));
+  const readStates = options.readStates ?? readLaunchpadStates;
   const failures: string[] = [];
 
-  // 1. Discovery. A partial cycle still publishes; only a total failure throws,
-  // and then nothing is restamped — the board's own age says it is stale.
+  // 1. Discovery, from two sources that see different tokens. Meme Rush is the
+  // launch lifecycle (new, about to graduate, just graduated); OKX's hot ranking
+  // is whatever is trading most right now, at any age. A partial cycle still
+  // publishes; only a total failure throws, and then nothing is restamped.
   const listed = new Map<string, MemeRushRow>();
+  const listedOn = new Map<string, string[]>();
+  const tag = (address: string, label: string) => {
+    const labels = listedOn.get(address) ?? [];
+    if (!labels.includes(label)) labels.push(label);
+    listedOn.set(address, labels);
+  };
   for (const stage of STAGE_ORDER) {
-    try {
-      for (const row of await fetchRush(stage, signal)) listed.set(row.address, row);
-    } catch (error) {
-      failures.push(`rush:${stage}: ${sanitizeMessage(error)}`);
+    for (const launchpad of LAUNCHPADS) {
+      try {
+        for (const row of await fetchRush(stage, launchpad, signal)) {
+          listed.set(row.address, row);
+          tag(row.address, `meme-rush:${stage}`);
+        }
+      } catch (error) {
+        failures.push(`rush:${launchpad}:${stage}: ${sanitizeMessage(error)}`);
+      }
     }
   }
-  if (listed.size === 0) throw new Error(`no meme rush list available (${failures.join("; ")})`);
+  const hot1h = new Map<string, HotToken>();
+  const hotOnly = new Map<string, HotToken>();
+  for (const launchpad of LAUNCHPADS) {
+    for (const timeframe of HOT_TIMEFRAMES) {
+      try {
+        for (const row of await fetchHot(launchpad, timeframe, signal)) {
+          tag(row.address, `okx-hot:${timeframe}`);
+          if (timeframe === "1h") hot1h.set(row.address, row);
+          if (!listed.has(row.address) && !hotOnly.has(row.address)) hotOnly.set(row.address, row);
+        }
+      } catch (error) {
+        failures.push(`hot:${launchpad}:${timeframe}: ${sanitizeMessage(error)}`);
+      }
+    }
+  }
+  if (listed.size === 0 && hotOnly.size === 0) {
+    throw new Error(`no discovery source available (${failures.join("; ")})`);
+  }
 
-  // 2. Merge into what is already tracked, then prune and cap.
+  // 2. Merge into what is already tracked, then prune and cap. A hot-only token
+  // is placed in its life cycle by the launchpad itself, read on chain every
+  // cycle (graduation is the one fact that moves); one the launchpad does not
+  // know, or a batch no endpoint served, is skipped rather than guessed.
   const state = await readState(store);
   const previousBoard = await readBoard(store);
+  const states = await readStates(
+    [...hotOnly.values()].map((row) => ({ address: row.address, launchpad: row.launchpad })),
+    signal,
+  );
+  for (const [address, hot] of hotOnly) {
+    const launchpadState = states.get(address);
+    if (launchpadState === undefined) continue;
+    listed.set(address, seedFromHot(hot, launchpadState, state.tracked[address]?.rush, now));
+  }
   for (const [address, rush] of listed) {
     const previous = state.tracked[address];
     state.tracked[address] = {
@@ -111,9 +192,8 @@ export async function runMemeBoard(
     };
   }
   const tracked = Object.values(state.tracked)
-    .filter((token) => now - token.lastListedAt <= TRACK_FOR_MS)
-    .filter((token) => token.deadSince === null || now - token.deadSince <= DROP_DEAD_AFTER_MS)
-    .sort((a, b) => b.lastListedAt - a.lastListedAt || b.rush.createdAt - a.rush.createdAt)
+    .filter((token) => keepTracking(token, previousBoard.get(token.rush.address), now))
+    .sort((a, b) => retentionOrder(a, b, previousBoard, now))
     .slice(0, MEME_BOARD_CAP);
   const addresses = tracked.map((token) => token.rush.address);
 
@@ -152,7 +232,7 @@ export async function runMemeBoard(
   }
 
   // 5. Quote kinds (cached forever) and clones (relative to what is tracked).
-  const quoteKinds = await resolveQuoteKinds(
+  const quotes = await resolveQuotes(
     store,
     tracked.flatMap((token) => (token.rush.quote === null ? [] : [token.rush.quote])),
     { signal, readIssuer: options.readIssuer },
@@ -165,8 +245,10 @@ export async function runMemeBoard(
       rush: token.rush,
       activity: activity.get(token.rush.address) ?? null,
       signals: signalsByToken.get(token.rush.address) ?? [],
-      quoteKind: token.rush.quote === null ? null : (quoteKinds.get(token.rush.quote) ?? null),
+      quote: token.rush.quote === null ? null : (quotes.get(token.rush.quote) ?? null),
       cloneOf: clones.get(token.rush.address) ?? null,
+      listedOn: listedOn.get(token.rush.address) ?? [],
+      flow1h: flowOf(hot1h.get(token.rush.address)),
       lastListedAt: token.lastListedAt,
       firstSeenAt: token.firstSeenAt,
       previousDeadSince: token.deadSince,
@@ -186,7 +268,7 @@ export async function runMemeBoard(
     deadAfterMs: TRACK_FOR_MS,
   });
   await store.put(MEME_BOARD_KEY, rows, {
-    source: "binance-meme-rush+onchainos",
+    source: "binance-meme-rush+okx-hot+onchainos",
     freshForMs: BOARD_FRESH_MS,
     deadAfterMs: BOARD_DEAD_MS,
   });
@@ -203,6 +285,106 @@ export async function runMemeBoard(
     signals: state.signals.length,
     failures,
   };
+}
+
+/**
+ * A Meme Rush-shaped row for a token only the hot ranking carries. Lifecycle
+ * facts come from the launchpad's own on-chain state; market and holder-mix
+ * fields from the OKX row. Fields only Meme Rush supplies (tagged-holder
+ * counts, dev-sold, wash tags, sniper share) keep what an earlier Meme Rush
+ * listing said, else stay unknown — `null`, or `false` for the two booleans,
+ * which is why a hot-only row cannot raise `dev_sold_all` or `wash_trading`.
+ */
+export function seedFromHot(
+  hot: HotToken,
+  launchpadState: LaunchpadState,
+  previous: MemeRushRow | undefined,
+  now: number,
+): MemeRushRow {
+  const base: MemeRushRow = previous ?? {
+    address: hot.address,
+    symbol: hot.symbol,
+    name: null,
+    launchpad: hot.launchpad,
+    stage: "finalizing",
+    createdAt: launchpadState.launchedAt ?? hot.firstTradeAt ?? now,
+    progress: null,
+    migrated: false,
+    migratedAt: null,
+    quote: null,
+    priceUsd: null,
+    marketCapUsd: null,
+    liquidityUsd: null,
+    volume24hUsd: null,
+    priceChange24hPct: null,
+    holders: null,
+    count24h: null,
+    buys24h: null,
+    sells24h: null,
+    netBuy24hUsd: null,
+    top10Pct: null,
+    devPct: null,
+    sniperPct: null,
+    insiderPct: null,
+    bundlerPct: null,
+    newWalletPct: null,
+    smartMoneyHolders: null,
+    kolHolders: null,
+    devAddress: null,
+    devSoldAll: false,
+    devMigrateCount: null,
+    washTrading: false,
+    socials: { website: null, twitter: null, telegram: null },
+  };
+  return {
+    ...base,
+    stage: launchpadState.migrated ? "migrated" : base.stage,
+    progress: launchpadState.progress,
+    migrated: launchpadState.migrated,
+    quote: launchpadState.quote ?? base.quote,
+    marketCapUsd: hot.marketCapUsd ?? base.marketCapUsd,
+    liquidityUsd: hot.liquidityUsd ?? base.liquidityUsd,
+    holders: hot.holders ?? base.holders,
+    top10Pct: hot.top10Pct ?? base.top10Pct,
+    devPct: hot.devPct ?? base.devPct,
+    insiderPct: hot.insiderPct ?? base.insiderPct,
+    bundlerPct: hot.bundlerPct ?? base.bundlerPct,
+  };
+}
+
+function flowOf(hot: HotToken | undefined): MemeBoardRow["flow1h"] {
+  if (hot === undefined) return null;
+  return { buys: hot.txsBuy, sells: hot.txsSell, uniqueTraders: hot.uniqueTraders, inflowUsd: hot.inflowUsd };
+}
+
+/** Whether a tracked token stays on the board this cycle. */
+function keepTracking(token: TrackedToken, last: MemeBoardRow | undefined, now: number): boolean {
+  if (now - token.lastListedAt > TRACK_FOR_MS) return false;
+  if (token.deadSince !== null && now - token.deadSince > DROP_DEAD_AFTER_MS) return false;
+  if (token.lastListedAt === now) return true;
+  // Off every list: kept only while it is worth watching.
+  if (last === undefined || last.status === "dead") return false;
+  // Unindexed or barely-traded launches scroll off by the hundred; one that has
+  // not woken up by the end of the grace period is not worth a slot.
+  if (last.status === "unknown" || last.status === "quiet") {
+    return now - token.rush.createdAt <= MEME_RULES.deadMinAgeMin * 60_000;
+  }
+  return true;
+}
+
+/** Listed first; then whoever traded most in the last hour. */
+function retentionOrder(
+  a: TrackedToken,
+  b: TrackedToken,
+  previous: Map<string, MemeBoardRow>,
+  now: number,
+): number {
+  const listedA = a.lastListedAt === now ? 1 : 0;
+  const listedB = b.lastListedAt === now ? 1 : 0;
+  if (listedA !== listedB) return listedB - listedA;
+  const txsA = previous.get(a.rush.address)?.activity?.txs1h ?? -1;
+  const txsB = previous.get(b.rush.address)?.activity?.txs1h ?? -1;
+  return txsB - txsA || b.rush.createdAt - a.rush.createdAt;
 }
 
 async function readState(store: SnapshotStore): Promise<MemeState> {
@@ -257,7 +439,7 @@ export function memeBoardJob(store: SnapshotStore): JobSpec {
     name: MEME_BOARD_JOB,
     intervalMs: 60_000,
     jitterMs: 5_000,
-    // Three Meme Rush lists, four 100-token price-info batches, one signal call,
+    // Six Meme Rush lists, up to six 100-token price-info batches, one signal call,
     // and at most one batched issuer read for quote tokens never seen before.
     timeoutMs: 45_000,
     run: async (signal) => {

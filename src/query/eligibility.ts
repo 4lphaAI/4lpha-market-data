@@ -102,7 +102,7 @@ const SUPPORTED_TOKEN_MANAGER_VERSION = 2;
  * whole shape is declared because viem decodes positionally — a short ABI would
  * silently misalign every field after the first omission.
  */
-const helperAbi = [
+export const helperAbi = [
   {
     name: "getTokenInfo",
     type: "function",

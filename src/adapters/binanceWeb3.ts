@@ -371,9 +371,15 @@ export interface MemeRushRow {
 
 export interface MemeRushParams extends BaseParams {
   stage: MemeRushStage;
+  /**
+   * One launchpad per call. Asked for both at once the 100-row cap is shared,
+   * and Flap crowds Four.Meme out (78/100 of New, 2026-10-04); asked
+   * separately the six lists returned 517 tokens instead of 300.
+   */
+  launchpad: MemeLaunchpad;
 }
 
-/** Fetches one Meme Rush list for the BSC launchpads we serve. Keyless. */
+/** Fetches one Meme Rush list for one BSC launchpad. Keyless. */
 export async function fetchMemeRush(params: MemeRushParams): Promise<MemeRushRow[]> {
   const payload = await withBinanceLimit(() =>
     fetchJson({
@@ -384,7 +390,7 @@ export async function fetchMemeRush(params: MemeRushParams): Promise<MemeRushRow
         chainId: BSC_CHAIN_ID,
         rankType: MEME_RUSH_STAGES[params.stage],
         limit: MEME_RUSH_LIMIT,
-        protocol: Object.values(MEME_RUSH_PROTOCOLS),
+        protocol: [MEME_RUSH_PROTOCOLS[params.launchpad]],
       }),
       fetchFn: params.fetchFn ?? globalThis.fetch,
       signal: params.signal,

@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { normalizeMemeRush, type MemeRushRow, type MemeRushStage } from "../src/adapters/binanceWeb3.js";
-import { normalizeActivityRows, normalizeSignals, type SmartSignal, type TokenActivity } from "../src/adapters/onchainos.js";
+import { normalizeMemeRush, type MemeLaunchpad, type MemeRushRow, type MemeRushStage } from "../src/adapters/binanceWeb3.js";
+import {
+  normalizeActivityRows,
+  normalizeHotTokens,
+  normalizeSignals,
+  type HotToken,
+  type SmartSignal,
+  type TokenActivity,
+} from "../src/adapters/onchainos.js";
+import type { LaunchpadState } from "../src/query/launchpadState.js";
+import { buildShortlist, parseShortlistQuery } from "../src/query/memeQuery.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import { MEME_BOARD_KEY, MEME_STATE_KEY, runMemeBoard } from "../src/jobs/memeBoard.js";
@@ -14,7 +23,7 @@ import {
   type ClassifyInput,
   type MemeBoardRow,
 } from "../src/query/memeClassify.js";
-import { QUOTE_KINDS_KEY, resolveQuoteKinds, type QuoteKind } from "../src/query/quoteKind.js";
+import { QUOTE_KINDS_KEY, resolveQuotes, type QuoteInfo } from "../src/query/quoteKind.js";
 import { createServer } from "../src/server.js";
 
 const NOW = 1_791_120_000_000;
@@ -116,7 +125,7 @@ function input(overrides: Partial<ClassifyInput> = {}): ClassifyInput {
     rush: rush(),
     activity: activity(),
     signals: [],
-    quoteKind: "bnb",
+    quote: { kind: "bnb", symbol: "BNB" },
     cloneOf: null,
     lastListedAt: NOW,
     firstSeenAt: NOW - HOUR,
@@ -221,7 +230,7 @@ describe("classifyStatus", () => {
   it("calls a chart dead when it has not traded for an hour, but only past the grace period", () => {
     assert.equal(classifyStatus(row, activity({ txs1h: 0, txs5m: 0 }), "bonding", NOW), "dead");
     const young = rush({ createdAt: NOW - 10 * MIN });
-    assert.equal(classifyStatus(young, activity({ txs1h: 0, txs5m: 0 }), "new", NOW), "active");
+    assert.equal(classifyStatus(young, activity({ txs1h: 0, txs5m: 0 }), "new", NOW), "quiet");
   });
 
   it("calls a graduated token with its pool pulled dead even while it still trades", () => {
@@ -272,7 +281,7 @@ describe("classifyMeme flags", () => {
 
   it("flags a bStock quote and carries the dead timestamp forward", () => {
     const row = classifyMeme(
-      input({ quoteKind: "bstock", activity: activity({ txs1h: 0, txs5m: 0 }), previousDeadSince: NOW - HOUR }),
+      input({ quote: { kind: "bstock", symbol: "NVDAB" }, activity: activity({ txs1h: 0, txs5m: 0 }), previousDeadSince: NOW - HOUR }),
     );
     assert.ok(row.flags.includes("bstock_quote"));
     assert.equal(row.status, "dead");
@@ -296,47 +305,54 @@ describe("findClones", () => {
   });
 });
 
-describe("resolveQuoteKinds", () => {
+describe("resolveQuotes", () => {
   it("answers native, stables and static bStocks without touching the chain", async () => {
     const store = new MemoryStore();
     let asked = 0;
-    const kinds = await resolveQuoteKinds(store, [BNB, USDT, NVDAB], {
+    const kinds = await resolveQuotes(store, [BNB, USDT, NVDAB], {
       readIssuer: async () => {
         asked += 1;
         return new Map();
       },
     });
     assert.equal(asked, 0);
-    assert.deepEqual([...kinds.entries()], [[BNB, "bnb"], [USDT, "stable"], [NVDAB, "bstock"]]);
+    assert.deepEqual([...kinds.entries()], [
+      [BNB, { kind: "bnb", symbol: "BNB" }],
+      [USDT, { kind: "stable", symbol: "USDT" }],
+      [NVDAB, { kind: "bstock", symbol: "NVDAB" }],
+    ]);
   });
 
   it("asks the chain once, caches the verdict forever, and never caches an unanswered read", async () => {
     const store = new MemoryStore();
     const other = addr(77);
     const asked: string[][] = [];
-    const reader = async (addresses: string[]): Promise<Map<string, QuoteKind>> => {
+    const reader = async (addresses: string[]): Promise<Map<string, QuoteInfo>> => {
       asked.push(addresses);
-      return new Map([[BNCB, "bstock" as QuoteKind]]); // `other` unanswered (transport failure)
+      return new Map([[BNCB, { kind: "bstock", symbol: "BNCB" } as QuoteInfo]]); // `other` unanswered (transport failure)
     };
-    const first = await resolveQuoteKinds(store, [BNCB, other], { readIssuer: reader });
-    assert.equal(first.get(BNCB), "bstock");
+    const first = await resolveQuotes(store, [BNCB, other], { readIssuer: reader });
+    assert.deepEqual(first.get(BNCB), { kind: "bstock", symbol: "BNCB" });
     assert.equal(first.has(other), false);
     const cached = (await store.get<Record<string, string>>(QUOTE_KINDS_KEY))!.data;
-    assert.deepEqual(cached, { [BNCB]: "bstock" });
+    assert.deepEqual(cached, { [BNCB]: { kind: "bstock", symbol: "BNCB" } });
 
-    await resolveQuoteKinds(store, [BNCB, other], { readIssuer: reader });
+    await resolveQuotes(store, [BNCB, other], { readIssuer: reader });
     assert.deepEqual(asked, [[BNCB, other], [other]]);
   });
 });
 
+/** Meme Rush lists served for one launchpad (rows carry their own); hot ranking and chain reads silent. */
 function fakeUpstreams(lists: Partial<Record<MemeRushStage, MemeRushRow[] | Error>>) {
   return {
-    fetchRush: async (stage: MemeRushStage) => {
+    fetchRush: async (stage: MemeRushStage, launchpad: MemeLaunchpad) => {
       const value = lists[stage] ?? [];
       if (value instanceof Error) throw value;
-      return value;
+      return value.filter((row) => row.launchpad === launchpad);
     },
-    readIssuer: async () => new Map<string, QuoteKind>(),
+    fetchHot: async () => [] as HotToken[],
+    readStates: async () => new Map<string, LaunchpadState>(),
+    readIssuer: async () => new Map<string, QuoteInfo>(),
   };
 }
 
@@ -354,7 +370,7 @@ describe("runMemeBoard", () => {
       now: () => NOW,
     });
     assert.equal(result.rows, 1);
-    assert.equal(result.failures.length, 2);
+    assert.equal(result.failures.length, 4); // new and migrated, on both launchpads
     const asOf = (await store.get(MEME_BOARD_KEY))!.asOf;
 
     await assert.rejects(
@@ -362,45 +378,51 @@ describe("runMemeBoard", () => {
         ...fakeUpstreams({ new: new Error("x"), finalizing: new Error("x"), migrated: new Error("x") }),
         now: () => NOW + MIN,
       }),
-      /no meme rush list/,
+      /no discovery source/,
     );
     assert.equal((await store.get(MEME_BOARD_KEY))!.asOf, asOf);
   });
 
-  it("keeps tracking a token after it scrolls off the lists, and drops it once dead for two hours", async () => {
+  it("keeps a live token after it scrolls off, drops it once dead, and drops a listed one dead for two hours", async () => {
     const store = new MemoryStore();
     const base = {
       fetchSignals: async () => [] as SmartSignal[],
-      readIssuer: async () => new Map<string, QuoteKind>(),
+      fetchHot: async () => [] as HotToken[],
+      readStates: async () => new Map<string, LaunchpadState>(),
+      readIssuer: async () => new Map<string, QuoteInfo>(),
     };
-    await runMemeBoard(store, AbortSignal.timeout(5_000), {
-      ...base,
-      fetchRush: async (stage) => (stage === "new" ? [rush({ address: addr(1) }), rush({ address: addr(2), symbol: "B" })] : []),
-      fetchActivity: async () => new Map([[addr(1), activity()], [addr(2), activity({ address: addr(2) })]]),
-      now: () => NOW,
-    });
+    const run = (t: number, listed: number[], txs1h: Record<number, number>) =>
+      runMemeBoard(store, AbortSignal.timeout(5_000), {
+        ...base,
+        fetchRush: async (stage: MemeRushStage) =>
+          stage === "new" ? listed.map((n) => rush({ address: addr(n), symbol: `T${n}` })) : [],
+        fetchActivity: async () =>
+          new Map(
+            [1, 2, 3].map((n) => {
+              const count = txs1h[n] ?? 60;
+              return [addr(n), activity({ address: addr(n), txs1h: count, txs5m: count === 0 ? 0 : 5 })];
+            }),
+          ),
+        now: () => t,
+      });
+    const statusOf = async (n: number) => (await board(store)).find((r) => r.address === addr(n))?.status;
 
-    // Token 1 scrolls off and stops trading; token 2 is still listed.
-    const later = (t: number) => ({
-      ...base,
-      fetchRush: async (stage: MemeRushStage) => (stage === "new" ? [rush({ address: addr(2), symbol: "B" })] : []),
-      fetchActivity: async () =>
-        new Map([[addr(1), activity({ txs1h: 0, txs5m: 0 })], [addr(2), activity({ address: addr(2) })]]),
-      now: () => t,
-    });
-    await runMemeBoard(store, AbortSignal.timeout(5_000), later(NOW + 10 * MIN));
-    let rows = await board(store);
-    assert.equal(rows.find((r) => r.address === addr(1))?.status, "dead");
-    assert.equal(rows.find((r) => r.address === addr(1))?.deadSince, NOW + 10 * MIN);
+    await run(NOW, [1, 2, 3], {});
+    // 1 and 3 scroll off; 1 keeps trading, 3 stops. 2 stays listed and stops too.
+    await run(NOW + 10 * MIN, [2], { 2: 0, 3: 0 });
+    assert.equal(await statusOf(1), "active");
+    assert.equal(await statusOf(3), "dead");
+    assert.equal(await statusOf(2), "dead");
 
-    await runMemeBoard(store, AbortSignal.timeout(5_000), later(NOW + HOUR));
-    rows = await board(store);
-    assert.equal(rows.find((r) => r.address === addr(1))?.deadSince, NOW + 10 * MIN);
+    await run(NOW + 20 * MIN, [2], { 2: 0, 3: 0 });
+    assert.equal(await statusOf(1), "active"); // off-list but alive: kept
+    assert.equal(await statusOf(3), undefined); // off-list and dead: gone
+    assert.equal(await statusOf(2), "dead"); // listed and dead: kept for now
+    assert.equal((await board(store)).find((r) => r.address === addr(2))?.deadSince, NOW + 10 * MIN);
 
-    await runMemeBoard(store, AbortSignal.timeout(5_000), later(NOW + 10 * MIN + 2 * HOUR + 1));
-    rows = await board(store);
-    assert.equal(rows.some((r) => r.address === addr(1)), false);
-    assert.equal(rows.some((r) => r.address === addr(2)), true);
+    await run(NOW + 10 * MIN + 2 * HOUR + 1, [2], { 2: 0, 3: 0 });
+    assert.equal(await statusOf(2), undefined); // dead for two hours: gone even while listed
+    assert.equal(await statusOf(1), "active");
   });
 
   it("falls back to the previous activity when OKX fails, rather than turning the board unknown", async () => {
@@ -453,7 +475,7 @@ describe("GET /memes", () => {
   async function seeded(): Promise<ReturnType<typeof createServer>> {
     const store = new MemoryStore();
     const rows = [
-      classifyMeme(input({ rush: rush({ address: addr(1), symbol: "RUN", createdAt: Date.now() - HOUR }), activity: activity({ txs5m: 40, txs1h: 400, volume1hUsd: 50_000, priceChange1hPct: 80 }), quoteKind: "bstock", now: Date.now() })),
+      classifyMeme(input({ rush: rush({ address: addr(1), symbol: "RUN", createdAt: Date.now() - HOUR }), activity: activity({ txs5m: 40, txs1h: 400, volume1hUsd: 50_000, priceChange1hPct: 80 }), quote: { kind: "bstock", symbol: "NVDAB" }, now: Date.now() })),
       classifyMeme(input({ rush: rush({ address: addr(2), symbol: "DEAD", createdAt: Date.now() - 5 * HOUR }), activity: activity({ address: addr(2), txs1h: 0, txs5m: 0 }), now: Date.now() })),
       classifyMeme(input({ rush: rush({ address: addr(3), symbol: "SLOW", createdAt: Date.now() - 2 * HOUR, devSoldAll: true }), activity: activity({ address: addr(3), txs5m: 3 }), now: Date.now() })),
     ];
@@ -492,5 +514,153 @@ describe("GET /memes", () => {
     assert.equal(one.data.symbol, "RUN");
     assert.equal((await app.request(`/memes/${addr(9)}`)).status, 404);
     assert.equal((await app.request("/memes/nope")).status, 400);
+  });
+});
+
+describe("quiet", () => {
+  it("is what a chart that trades but barely is gets called, so active means real trading", () => {
+    // The 2026-10-04 median "active": the creation buy and nothing else.
+    const creationOnly = activity({ txs5m: 1, txs1h: 1, volume1hUsd: 0, volume4hUsd: 0 });
+    assert.equal(classifyStatus(rush({ createdAt: NOW - 5 * MIN }), creationOnly, "new", NOW), "quiet");
+    const thin = activity({ txs5m: 2, txs1h: MEME_RULES.activeMinTxs1h - 1, volume1hUsd: 50_000, volume4hUsd: 60_000 });
+    assert.equal(classifyStatus(rush(), thin, "bonding", NOW), "quiet");
+    const cheap = activity({ txs5m: 2, txs1h: 50, volume1hUsd: MEME_RULES.activeMinVolume1hUsd - 1, volume4hUsd: 2_000 });
+    assert.equal(classifyStatus(rush(), cheap, "bonding", NOW), "quiet");
+  });
+});
+
+/** A board row for the shortlist tests: live by default, override what matters. */
+function boardRow(n: number, overrides: { launchpad?: MemeLaunchpad; txs5m?: number; quote?: QuoteInfo; status?: "runner" | "active" | "quiet" | "dead"; liquidityUsd?: number; flags?: MemeBoardRow["flags"] } = {}): MemeBoardRow {
+  const row = classifyMeme(
+    input({
+      rush: rush({ address: addr(n), symbol: `T${n}`, launchpad: overrides.launchpad ?? "flap", createdAt: NOW - HOUR }),
+      activity: activity({ address: addr(n), txs5m: overrides.txs5m ?? 10, liquidityUsd: overrides.liquidityUsd ?? 10_000 }),
+      quote: overrides.quote ?? { kind: "bnb", symbol: "BNB" },
+    }),
+  );
+  return {
+    ...row,
+    ...(overrides.status === undefined ? {} : { status: overrides.status }),
+    ...(overrides.flags === undefined ? {} : { flags: overrides.flags }),
+  };
+}
+
+describe("buildShortlist", () => {
+  const defaults = parseShortlistQuery(() => undefined);
+
+  it("splits the slots 7:3 between Flap and Four.Meme, busiest first", () => {
+    const rows = [
+      ...Array.from({ length: 12 }, (_, i) => boardRow(100 + i, { launchpad: "flap", txs5m: 100 - i })),
+      ...Array.from({ length: 6 }, (_, i) => boardRow(200 + i, { launchpad: "fourmeme", txs5m: 50 - i })),
+    ];
+    const list = buildShortlist(rows, { ...defaults, size: 10 }, NOW);
+    assert.deepEqual(list.picked, { flap: 7, fourmeme: 3 });
+    assert.equal(list.backfilled, 0);
+    assert.deepEqual(list.rows.map((r) => r.txs5m), [100, 99, 98, 97, 96, 95, 94, 50, 49, 48]);
+  });
+
+  it("hands a short launchpad's unused slots to the other instead of leaving them empty", () => {
+    const rows = [
+      ...Array.from({ length: 12 }, (_, i) => boardRow(100 + i, { launchpad: "flap" })),
+      boardRow(200, { launchpad: "fourmeme" }),
+    ];
+    const list = buildShortlist(rows, { ...defaults, size: 10 }, NOW);
+    assert.deepEqual(list.picked, { flap: 9, fourmeme: 1 });
+    assert.equal(list.backfilled, 2);
+  });
+
+  it("puts runners first and keeps out quiet, dead, churned and illiquid charts by default", () => {
+    const rows = [
+      boardRow(1, { txs5m: 5, status: "runner" }),
+      boardRow(2, { txs5m: 90 }),
+      boardRow(3, { txs5m: 99, status: "quiet" }),
+      boardRow(4, { txs5m: 99, status: "dead" }),
+      boardRow(5, { txs5m: 99, flags: ["churn"] }),
+      boardRow(6, { txs5m: 99, liquidityUsd: 100 }),
+      boardRow(7, { txs5m: 0 }),
+    ];
+    const list = buildShortlist(rows, defaults, NOW);
+    assert.deepEqual(list.rows.map((r) => r.address), [addr(1), addr(2)]);
+    const unscreened = buildShortlist(rows, parseShortlistQuery((n) => (n === "excludeFlags" ? "none" : undefined)), NOW);
+    assert.ok(unscreened.rows.some((r) => r.address === addr(5)));
+  });
+
+  it("keeps only bStock-quoted memes in the memestock segment, and names the stock", () => {
+    const rows = [boardRow(1, { quote: { kind: "bstock", symbol: "NVDAB" } }), boardRow(2)];
+    const list = buildShortlist(rows, parseShortlistQuery((n) => (n === "segment" ? "memestock" : undefined)), NOW);
+    assert.deepEqual(list.rows.map((r) => [r.address, r.quote.symbol]), [[addr(1), "NVDAB"]]);
+  });
+
+  it("rejects a share outside 0..1 and an unknown segment", () => {
+    assert.throws(() => parseShortlistQuery((n) => (n === "flapShare" ? "1.5" : undefined)), /flapShare/);
+    assert.throws(() => parseShortlistQuery((n) => (n === "segment" ? "stonks" : undefined)), /segment/);
+  });
+});
+
+describe("OKX hot discovery", () => {
+  it("normalizes a hot-token row and keeps its trade split", () => {
+    const [row] = normalizeHotTokens(
+      [{ tokenContractAddress: addr(9), tokenSymbol: "quq", txs: "1119", txsBuy: "600", txsSell: "519", uniqueTraders: "300", volume: "6748382", liquidity: "1345098", firstTradeTime: "1742000000000" }],
+      "fourmeme",
+      "1h",
+    );
+    assert.equal(row!.launchpad, "fourmeme");
+    assert.equal(row!.txsBuy, 600);
+    assert.equal(row!.liquidityUsd, 1345098);
+  });
+
+  it("boards a token only the hot ranking carries, placed by the launchpad's own chain state", async () => {
+    const store = new MemoryStore();
+    const hot: HotToken = {
+      address: addr(9), symbol: "quq", launchpad: "fourmeme", timeframe: "1h", txs: 1119, txsBuy: 600, txsSell: 519,
+      uniqueTraders: 300, volumeUsd: 6_748_382, changePct: 3, inflowUsd: 1_000, liquidityUsd: 1_345_098,
+      marketCapUsd: 20_000_000, holders: 9_000, firstTradeAt: NOW - 500 * 24 * HOUR, top10Pct: 30, devPct: 0, insiderPct: 0, bundlerPct: 0,
+    };
+    const unknownToLaunchpad: HotToken = { ...hot, address: addr(10), symbol: "STRAY" };
+    const asked: string[] = [];
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...fakeUpstreams({ finalizing: [rush()] }),
+      fetchHot: async (launchpad, timeframe) => (launchpad === "fourmeme" && timeframe === "1h" ? [hot, unknownToLaunchpad] : []),
+      readStates: async (items) => {
+        asked.push(...items.map((item) => item.address));
+        return new Map([[addr(9), { migrated: true, progress: 100, quote: BNB, launchedAt: null }]]);
+      },
+      fetchActivity: async () => new Map([[addr(1), activity()], [addr(9), activity({ address: addr(9), txs5m: 197, txs1h: 1119, volume1hUsd: 6_748_382 })]]),
+      fetchSignals: async () => [],
+      now: () => NOW,
+    });
+    assert.deepEqual(asked.sort(), [addr(9), addr(10)]);
+    const rows = await board(store);
+    const quq = rows.find((r) => r.address === addr(9));
+    assert.equal(quq?.stage, "graduated");
+    assert.equal(quq?.launchpad, "fourmeme");
+    assert.deepEqual(quq?.listedOn, ["okx-hot:1h"]);
+    assert.deepEqual(quq?.flow1h, { buys: 600, sells: 519, uniqueTraders: 300, inflowUsd: 1_000 });
+    assert.equal(quq?.createdAt, hot.firstTradeAt);
+    assert.equal(rows.some((r) => r.address === addr(10)), false);
+    assert.deepEqual(rows.find((r) => r.address === addr(1))?.listedOn, ["meme-rush:finalizing"]);
+  });
+});
+
+describe("GET /memes/shortlist", () => {
+  it("serves compact rows and says what it applied", async () => {
+    const store = new MemoryStore();
+    const now = Date.now();
+    const live = classifyMeme(input({ rush: rush({ address: addr(1), createdAt: now - HOUR }), activity: activity({ txs5m: 12 }), quote: { kind: "bstock", symbol: "SPCXB" }, now }));
+    const dead = classifyMeme(input({ rush: rush({ address: addr(2), createdAt: now - 5 * HOUR }), activity: activity({ address: addr(2), txs1h: 0, txs5m: 0 }), now }));
+    await store.put(MEME_BOARD_KEY, [live, dead], { source: "test", freshForMs: 60_000, deadAfterMs: 600_000 });
+    const app = createServer({ scheduler: createScheduler(store), store });
+    const body = (await (await app.request("/memes/shortlist?segment=memestock")).json()) as {
+      data: Array<Record<string, unknown>>;
+      meta: { applied: { segment: string; flapShare: number }; boardTotal: number };
+    };
+    assert.equal(body.data.length, 1);
+    assert.equal(body.data[0]!["address"], addr(1));
+    assert.deepEqual(body.data[0]!["quote"], { address: BNB, kind: "bstock", symbol: "SPCXB" });
+    assert.equal("holderMix" in body.data[0]!, false);
+    assert.equal(body.meta.applied.segment, "memestock");
+    assert.equal(body.meta.applied.flapShare, 0.7);
+    assert.equal(body.meta.boardTotal, 2);
+    assert.equal((await app.request("/memes/shortlist?size=0")).status, 400);
   });
 });

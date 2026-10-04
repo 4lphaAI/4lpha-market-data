@@ -180,3 +180,192 @@ function listParam<T extends string>(raw: string | undefined, name: string, allo
   }
   return values as T[];
 }
+
+/**
+ * The shortlist: what the execution plane reads before deciding a trade.
+ *
+ * The board is a census (~500 tokens, a third of them dead or unreadable); an
+ * agent should not spend a decision cycle on that. The shortlist keeps only
+ * tradable charts, ranks them, splits the slots between launchpads, and
+ * flattens each row to the fields a trade decision uses. Every default is in
+ * {@link SHORTLIST_DEFAULTS}, echoed in `meta.applied`, and overridable.
+ */
+export const SHORTLIST_DEFAULTS = {
+  size: 20,
+  maxSize: 100,
+  /**
+   * Share of slots for Flap; Four.Meme gets the rest. Operator call 2026-10-04:
+   * Flap is where the volume is (7:3). A launchpad short of candidates hands
+   * its unused slots to the other rather than leaving them empty.
+   */
+  flapShare: 0.7,
+  statuses: ["runner", "active"] as readonly MemeStatus[],
+  /** Volume that is not demand: wash-trading tags, and 1h volume at 10x market cap or more. */
+  excludeFlags: ["churn", "wash_trading"] as readonly MemeFlag[],
+  /** At least one trade in the last 5 minutes: a chart, not a memory of one. */
+  minTxs5m: 1,
+  minLiquidityUsd: 3_000,
+} as const;
+
+export const MEME_SEGMENTS = ["all", "memestock"] as const;
+export type MemeSegment = (typeof MEME_SEGMENTS)[number];
+
+export interface ShortlistQuery {
+  size: number;
+  flapShare: number;
+  segment: MemeSegment;
+  statuses: readonly MemeStatus[];
+  stages: readonly MemeStage[] | undefined;
+  excludeFlags: readonly MemeFlag[];
+  minTxs5m: number;
+  minLiquidityUsd: number;
+  maxAgeMinutes: number | undefined;
+}
+
+export function parseShortlistQuery(get: (name: string) => string | undefined): ShortlistQuery {
+  const size = numberParam(get("size"), "size");
+  if (size !== undefined && (!Number.isInteger(size) || size < 1)) {
+    throw new MemeQueryError("size must be a positive integer");
+  }
+  const flapShare = numberParam(get("flapShare"), "flapShare");
+  if (flapShare !== undefined && (flapShare < 0 || flapShare > 1)) {
+    throw new MemeQueryError("flapShare must be between 0 and 1");
+  }
+  const segment = listParam(get("segment"), "segment", MEME_SEGMENTS);
+  if (segment !== undefined && segment.length > 1) throw new MemeQueryError("segment takes one value");
+  // `excludeFlags=none` clears the default screen; it is never a flag name.
+  const excludeRaw = get("excludeFlags");
+  const excludeFlags =
+    excludeRaw?.trim() === "none"
+      ? []
+      : (listParam(excludeRaw, "excludeFlags", MEME_FLAGS) ?? SHORTLIST_DEFAULTS.excludeFlags);
+  return {
+    size: Math.min(size ?? SHORTLIST_DEFAULTS.size, SHORTLIST_DEFAULTS.maxSize),
+    flapShare: flapShare ?? SHORTLIST_DEFAULTS.flapShare,
+    segment: segment?.[0] ?? "all",
+    statuses: listParam(get("status"), "status", MEME_STATUSES) ?? SHORTLIST_DEFAULTS.statuses,
+    stages: listParam(get("stage"), "stage", MEME_STAGES),
+    excludeFlags,
+    minTxs5m: numberParam(get("minTxs5m"), "minTxs5m") ?? SHORTLIST_DEFAULTS.minTxs5m,
+    minLiquidityUsd: numberParam(get("minLiquidityUsd"), "minLiquidityUsd") ?? SHORTLIST_DEFAULTS.minLiquidityUsd,
+    maxAgeMinutes: numberParam(get("maxAgeMinutes"), "maxAgeMinutes"),
+  };
+}
+
+/** One shortlist row: flat, every number a trade decision reads, nothing else. */
+export interface MemeShortlistRow {
+  address: string;
+  symbol: string;
+  launchpad: MemeLaunchpad;
+  stage: MemeStage;
+  status: MemeStatus;
+  ageMinutes: number;
+  progress: number | null;
+  quote: MemeBoardRow["quote"];
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+  liquidityUsd: number | null;
+  holders: number | null;
+  txs5m: number | null;
+  txs1h: number | null;
+  volume5mUsd: number | null;
+  volume1hUsd: number | null;
+  priceChange5mPct: number | null;
+  priceChange1hPct: number | null;
+  /** Last hour's trade split, from OKX's hot ranking; `null` when the token did not rank there. */
+  buys1h: number | null;
+  sells1h: number | null;
+  uniqueTraders1h: number | null;
+  buys24h: number | null;
+  sells24h: number | null;
+  /** Tagged holders + smart-money and KOL signals in the window. */
+  smartMoney: number;
+  flags: MemeFlag[];
+  /** When OKX observed the activity numbers. */
+  observedAt: number | null;
+}
+
+export interface Shortlist {
+  rows: MemeShortlistRow[];
+  candidates: { flap: number; fourmeme: number };
+  picked: { flap: number; fourmeme: number };
+  /** Slots one launchpad could not fill and the other took. */
+  backfilled: number;
+}
+
+/**
+ * Runners before active charts; inside each, the busiest last 5 minutes, then
+ * the last hour's volume. Momentum the agent can still act on, ranked by how
+ * much of it there is right now.
+ */
+export function compareShortlist(a: MemeBoardRow, b: MemeBoardRow): number {
+  const rank = (row: MemeBoardRow) => (row.status === "runner" ? 0 : 1);
+  return (
+    rank(a) - rank(b) ||
+    compareMemes(a, b, "txs5m") ||
+    compareMemes(a, b, "volume1hUsd") ||
+    a.address.localeCompare(b.address)
+  );
+}
+
+export function matchesShortlist(row: MemeBoardRow, query: ShortlistQuery, now: number): boolean {
+  if (!query.statuses.includes(row.status)) return false;
+  if (query.stages !== undefined && !query.stages.includes(row.stage)) return false;
+  if (query.segment === "memestock" && row.quote.kind !== "bstock") return false;
+  if (query.excludeFlags.some((flag) => row.flags.includes(flag))) return false;
+  if (!atLeast(row.activity?.txs5m ?? null, query.minTxs5m)) return false;
+  if (!atLeast(row.market.liquidityUsd, query.minLiquidityUsd)) return false;
+  if (query.maxAgeMinutes !== undefined && (now - row.createdAt) / 60_000 > query.maxAgeMinutes) return false;
+  return true;
+}
+
+export function buildShortlist(rows: readonly MemeBoardRow[], query: ShortlistQuery, now: number): Shortlist {
+  const candidates = rows.filter((row) => matchesShortlist(row, query, now)).sort(compareShortlist);
+  const flap = candidates.filter((row) => row.launchpad === "flap");
+  const fourmeme = candidates.filter((row) => row.launchpad === "fourmeme");
+
+  const flapSlots = Math.round(query.size * query.flapShare);
+  const fourSlots = query.size - flapSlots;
+  const takeFlap = Math.min(flap.length, flapSlots + Math.max(0, fourSlots - fourmeme.length));
+  const takeFour = Math.min(fourmeme.length, fourSlots + Math.max(0, flapSlots - flap.length));
+  const picked = [...flap.slice(0, takeFlap), ...fourmeme.slice(0, takeFour)].sort(compareShortlist);
+  const backfilled = Math.max(0, takeFlap - flapSlots) + Math.max(0, takeFour - fourSlots);
+
+  return {
+    rows: picked.map((row) => toShortlistRow(row, now)),
+    candidates: { flap: flap.length, fourmeme: fourmeme.length },
+    picked: { flap: takeFlap, fourmeme: takeFour },
+    backfilled,
+  };
+}
+
+function toShortlistRow(row: MemeBoardRow, now: number): MemeShortlistRow {
+  return {
+    address: row.address,
+    symbol: row.symbol,
+    launchpad: row.launchpad,
+    stage: row.stage,
+    status: row.status,
+    ageMinutes: Math.round((now - row.createdAt) / 60_000),
+    progress: row.progress,
+    quote: row.quote,
+    priceUsd: row.market.priceUsd,
+    marketCapUsd: row.market.marketCapUsd,
+    liquidityUsd: row.market.liquidityUsd,
+    holders: row.market.holders,
+    txs5m: row.activity?.txs5m ?? null,
+    txs1h: row.activity?.txs1h ?? null,
+    volume5mUsd: row.activity?.volume5mUsd ?? null,
+    volume1hUsd: row.activity?.volume1hUsd ?? null,
+    priceChange5mPct: row.activity?.priceChange5mPct ?? null,
+    priceChange1hPct: row.activity?.priceChange1hPct ?? null,
+    buys1h: row.flow1h?.buys ?? null,
+    sells1h: row.flow1h?.sells ?? null,
+    uniqueTraders1h: row.flow1h?.uniqueTraders ?? null,
+    buys24h: row.trades24h.buys,
+    sells24h: row.trades24h.sells,
+    smartMoney: smartMoneyCount(row),
+    flags: row.flags,
+    observedAt: row.activity?.observedAt ?? null,
+  };
+}

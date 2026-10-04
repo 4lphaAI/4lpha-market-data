@@ -42,7 +42,17 @@ import { isSector, SECTORS, TRENDING_KEY } from "./query/bstockSectors.js";
 import { readTokenRecords } from "./jobs/tokenStore.js";
 import { MEME_BOARD_CAP, MEME_BOARD_KEY } from "./jobs/memeBoard.js";
 import { MEME_RULES, type MemeBoardRow } from "./query/memeClassify.js";
-import { MemeQueryError, compareMemes, matchesMemeQuery, parseMemeQuery, type MemeQuery } from "./query/memeQuery.js";
+import {
+  MemeQueryError,
+  SHORTLIST_DEFAULTS,
+  buildShortlist,
+  compareMemes,
+  matchesMemeQuery,
+  parseMemeQuery,
+  parseShortlistQuery,
+  type MemeQuery,
+  type ShortlistQuery,
+} from "./query/memeQuery.js";
 import {
   SPREAD_HISTORY_KEY,
   SPREAD_MIN_LIQUIDITY_USD,
@@ -1027,6 +1037,41 @@ export function createServer(deps: ServerDeps): Hono {
         asOf: record?.asOf ?? null,
         staleness: record?.staleness ?? null,
         source: record?.source ?? null,
+      },
+    });
+  });
+
+  /**
+   * The execution plane's read: tradable charts only (runner/active, traded in
+   * the last 5 minutes, churn and wash trading screened out), ranked, split
+   * Flap:Four.Meme 7:3 with backfill, one flat row each. `segment=memestock`
+   * keeps the memes quoted in a bStock. Defaults are echoed in `meta.applied`.
+   */
+  app.get("/memes/shortlist", async (c) => {
+    let query: ShortlistQuery;
+    try {
+      query = parseShortlistQuery((name) => c.req.query(name));
+    } catch (error) {
+      if (error instanceof MemeQueryError) {
+        return c.json({ error: { code: "invalid_query", message: error.message } }, 400);
+      }
+      throw error;
+    }
+    const record = await deps.store.get<unknown>(MEME_BOARD_KEY);
+    const rows = Array.isArray(record?.data) ? (record.data as MemeBoardRow[]) : [];
+    const shortlist = buildShortlist(rows, query, Date.now());
+    return c.json({
+      data: shortlist.rows,
+      meta: {
+        boardTotal: rows.length,
+        candidates: shortlist.candidates,
+        picked: shortlist.picked,
+        backfilled: shortlist.backfilled,
+        applied: query,
+        defaults: SHORTLIST_DEFAULTS,
+        order: "runner first, then txs5m desc, then volume1hUsd desc",
+        asOf: record?.asOf ?? null,
+        staleness: record?.staleness ?? null,
       },
     });
   });
