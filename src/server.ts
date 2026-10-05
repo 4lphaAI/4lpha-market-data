@@ -43,6 +43,13 @@ import { buildUniverse, RWA_UNIVERSE_KEY } from "./universe.js";
 import { isSector, SECTORS, TRENDING_KEY } from "./query/bstockSectors.js";
 import { readTokenRecords } from "./jobs/tokenStore.js";
 import { MEME_BOARD_CAP, MEME_BOARD_KEY } from "./jobs/memeBoard.js";
+import {
+  MEME_MEASURE_LATEST_KEY,
+  MEME_MEASURE_RETENTION_MS,
+  MEME_MEASURE_SLOT_MS,
+  expandCycle,
+  readMeasurePage,
+} from "./jobs/memeMeasure.js";
 import { MEME_RULES, type MemeBoardRow } from "./query/memeClassify.js";
 import {
   MEME_STOCK_RULES,
@@ -182,7 +189,19 @@ const STATUS_SNAPSHOT_KEYS = [
   FEATURE_INDEX_KEY,
   FEATURE_INDEX_KEY_V2,
   VENUS_CORE_MARKETS_KEY,
+  MEME_MEASURE_LATEST_KEY,
 ];
+
+/**
+ * `/memes/measure` page size, in five-minute slots: 1h by default; 4h at most
+ * as stored tuples, 2h expanded (about 3x the bytes per cycle, audit F2).
+ */
+const MEASURE_PAGE_DEFAULT = 12;
+const MEASURE_PAGE_MAX = 48;
+const MEASURE_PAGE_MAX_OBJECTS = 24;
+/** Epoch ms, or an ISO 8601 date-time with an explicit zone: nothing a host locale could reinterpret (audit F4). */
+const MEASURE_EPOCH_MS = /^\d{12,14}$/u;
+const MEASURE_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/u;
 
 /** Fields `/pools/top` will sort by. */
 const POOL_ORDER_FIELDS = [
@@ -1119,6 +1138,67 @@ export function createServer(deps: ServerDeps): Hono {
         rules: MEME_STOCK_RULES,
         asOf: board?.asOf ?? null,
         staleness: board?.staleness ?? null,
+      },
+    });
+  });
+
+  /**
+   * Read-only export of the social / smart-inflow measurement (handoff
+   * 2026-10-05 item 5). For analysis only: no trading read consumes it, and it
+   * stays that way until the operator rules on the numbers. Paged by five-minute
+   * slot over `[since, until)`; `meta.next` is the `since` of the next page.
+   */
+  app.get("/memes/measure", async (c) => {
+    const now = Date.now();
+    const parseTime = (name: string): number | undefined | null => {
+      const raw = c.req.query(name)?.trim();
+      if (raw === undefined || raw === "") return undefined;
+      const value = MEASURE_EPOCH_MS.test(raw) ? Number(raw) : MEASURE_ISO.test(raw) ? Date.parse(raw) : Number.NaN;
+      return Number.isFinite(value) && value > 0 ? value : null;
+    };
+    const untilParam = parseTime("until");
+    const sinceParam = parseTime("since");
+    const limitRaw = c.req.query("limit");
+    const limit = limitRaw === undefined ? MEASURE_PAGE_DEFAULT : Number(limitRaw);
+    const format = c.req.query("format") ?? "objects";
+    if (untilParam === null || sinceParam === null) {
+      return c.json({ error: { code: "invalid_query", message: "since/until must be epoch ms or an ISO date-time with a zone" } }, 400);
+    }
+    if (!Number.isInteger(limit) || limit < 1 || limit > MEASURE_PAGE_MAX) {
+      return c.json({ error: { code: "invalid_query", message: `limit must be an integer 1..${MEASURE_PAGE_MAX} (slots)` } }, 400);
+    }
+    if (format !== "objects" && format !== "compact") {
+      return c.json({ error: { code: "invalid_query", message: "format must be objects or compact" } }, 400);
+    }
+    if (format === "objects" && limit > MEASURE_PAGE_MAX_OBJECTS) {
+      return c.json({ error: { code: "invalid_query", message: `limit above ${MEASURE_PAGE_MAX_OBJECTS} slots needs format=compact` } }, 400);
+    }
+    const until = untilParam ?? now;
+    // Without `since`, the page is the most recent `limit` closed slots up to `until`.
+    const lastClosed = Math.min(Math.floor((until - 1) / MEME_MEASURE_SLOT_MS), Math.floor(now / MEME_MEASURE_SLOT_MS) - 1);
+    const since = sinceParam ?? (lastClosed - limit + 1) * MEME_MEASURE_SLOT_MS;
+    if (since >= until) {
+      return c.json({ error: { code: "invalid_query", message: "since must be before until" } }, 400);
+    }
+    const [page, latest] = await Promise.all([
+      readMeasurePage(deps.store, since, until, limit, now),
+      deps.store.get<unknown>(MEME_MEASURE_LATEST_KEY),
+    ]);
+    return c.json({
+      data: { cycles: format === "compact" ? page.cycles : page.cycles.map(expandCycle) },
+      meta: {
+        since,
+        until,
+        limit,
+        format,
+        cycles: page.cycles.length,
+        emptySlots: page.emptySlots,
+        next: page.next,
+        slotMs: MEME_MEASURE_SLOT_MS,
+        retentionMs: MEME_MEASURE_RETENTION_MS,
+        latest: latest?.data ?? null,
+        staleness: latest?.staleness ?? null,
+        use: "measurement only; not a trading signal",
       },
     });
   });

@@ -475,3 +475,256 @@ function isTruthyTag(value: unknown): boolean {
   if (value === null || value === undefined || value === false || value === 0 || value === "0") return false;
   return value !== "";
 }
+
+const SOCIAL_RUSH_URL =
+  "https://web3.binance.com/bapi/defi/v2/public/wallet-direct/buw/wallet/market/token/social-rush/rank/list/ai";
+
+/**
+ * Social-rush lists. `latest` is the newest AI-detected topics; `rising` is a
+ * separate rank on paper but answered byte-identical to `latest` with `sort=10`
+ * (measured 2026-10-05), so a caller keeps it only when it differs.
+ */
+export const SOCIAL_RUSH_RANKS = { latest: 10, rising: 20 } as const;
+export type SocialRushRank = keyof typeof SOCIAL_RUSH_RANKS;
+
+/** Longest topic name kept. The name is the only free text recorded, besides the link. */
+const MAX_TOPIC_NAME_CHARS = 160;
+
+/** One token Binance associates with a social topic, as of the read. */
+export interface SocialTopicToken {
+  address: string;
+  symbol: string | null;
+  /** Meme Rush launchpad code (2001 Four.Meme, 2002 Flap); others pass through. */
+  protocol: number | null;
+  /** `migrateStatus === 1`; `null` when absent. */
+  migrated: boolean | null;
+  createdAt: number | null;
+  netInflowUsd: number | null;
+  netInflow1hUsd: number | null;
+  volume1hBuyUsd: number | null;
+  volume1hSellUsd: number | null;
+  marketCapUsd: number | null;
+  liquidityUsd: number | null;
+  priceChange24hPct: number | null;
+  uniqueTraders5m: number | null;
+  uniqueTraders1h: number | null;
+  count5m: number | null;
+  count1h: number | null;
+  holders: number | null;
+  smartMoneyHolders: number | null;
+  kolHolders: number | null;
+}
+
+/**
+ * One social-rush topic, narrowed on purpose: the English name and the post
+ * link are the only text kept. `aiSummary` and every other free-text field are
+ * dropped here, at the adapter, so no caller can store or forward them.
+ */
+export interface SocialTopic {
+  topicId: string;
+  nameEn: string | null;
+  type: string | null;
+  tags: string[];
+  /** http(s) only; anything else is `null`. */
+  link: string | null;
+  createdAt: number | null;
+  risingAt: number | null;
+  viralAt: number | null;
+  /** 0–100 as the upstream formats it. */
+  progress: number | null;
+  netInflowUsd: number | null;
+  netInflow1hUsd: number | null;
+  netInflowAthUsd: number | null;
+  tokens: SocialTopicToken[];
+}
+
+export interface SocialRushParams extends BaseParams {
+  rank: SocialRushRank;
+}
+
+/** Fetches one social-rush topic list for BSC. Keyless. */
+export async function fetchSocialRush(params: SocialRushParams): Promise<SocialTopic[]> {
+  const url =
+    `${SOCIAL_RUSH_URL}?chainId=${BSC_CHAIN_ID}&rankType=${SOCIAL_RUSH_RANKS[params.rank]}` +
+    "&sort=10&asc=false";
+  const payload = await withBinanceLimit(() =>
+    fetchJson({
+      source: SOURCE,
+      url,
+      fetchFn: params.fetchFn ?? globalThis.fetch,
+      signal: params.signal,
+    }),
+  );
+  return normalizeSocialRush(payload);
+}
+
+/** Exported for tests. A topic without an id, or a token without an address, is dropped. */
+export function normalizeSocialRush(payload: unknown): SocialTopic[] {
+  const data = unwrapEnvelope(payload);
+  const list = Array.isArray(data) ? data : isRecord(data) ? asArray(data["list"]) : [];
+  const topics: SocialTopic[] = [];
+  const seen = new Set<string>();
+  for (const raw of list) {
+    if (!isRecord(raw)) continue;
+    const topicId = parseStr(raw["topicId"])?.slice(0, 64) ?? null;
+    if (topicId === null || seen.has(topicId)) continue;
+    seen.add(topicId);
+    const name = isRecord(raw["name"]) ? parseStr(raw["name"]["topicNameEn"]) : null;
+    const tokens: SocialTopicToken[] = [];
+    const tokenSeen = new Set<string>();
+    for (const token of asArray(raw["tokenList"])) {
+      if (!isRecord(token)) continue;
+      const address = normalizeAddress(token["contractAddress"]);
+      if (address === null || tokenSeen.has(address)) continue;
+      tokenSeen.add(address);
+      const migrateStatus = parseNum(token["migrateStatus"]);
+      tokens.push({
+        address,
+        symbol: parseStr(token["symbol"])?.slice(0, 40) ?? null,
+        protocol: parseNum(token["protocol"]),
+        migrated: migrateStatus === null ? null : migrateStatus === 1,
+        createdAt: toEpochMs(token["createTime"]),
+        netInflowUsd: parseNum(token["netInflow"]),
+        netInflow1hUsd: parseNum(token["netInflow1h"]),
+        volume1hBuyUsd: parseNum(token["volume1hBuy"]),
+        volume1hSellUsd: parseNum(token["volume1hSell"]),
+        marketCapUsd: parseNum(token["marketCap"]),
+        liquidityUsd: parseNum(token["liquidity"]),
+        priceChange24hPct: parseNum(token["priceChange24h"]),
+        uniqueTraders5m: parseNum(token["uniqueTrader5m"]),
+        uniqueTraders1h: parseNum(token["uniqueTrader1h"]),
+        count5m: parseNum(token["count5m"]),
+        count1h: parseNum(token["count1h"]),
+        holders: parseNum(token["holders"]),
+        smartMoneyHolders: parseNum(token["smartMoneyHolders"]),
+        kolHolders: parseNum(token["kolHolders"]),
+      });
+    }
+    topics.push({
+      topicId,
+      nameEn: name === null ? null : name.slice(0, MAX_TOPIC_NAME_CHARS),
+      type: parseStr(raw["type"])?.slice(0, 40) ?? null,
+      tags: asArray(raw["topicTags"]).slice(0, 10).flatMap((tag) => {
+        const text = parseStr(tag);
+        return text === null ? [] : [text.slice(0, 40)];
+      }),
+      link: httpUrlOrNull(raw["topicLink"]),
+      createdAt: toEpochMs(raw["createTime"]),
+      risingAt: toEpochMs(raw["risingTime"]),
+      viralAt: toEpochMs(raw["viralTime"]),
+      progress: parseNum(raw["progress"]),
+      netInflowUsd: parseNum(raw["topicNetInflow"]),
+      netInflow1hUsd: parseNum(raw["topicNetInflow1h"]),
+      netInflowAthUsd: parseNum(raw["topicNetInflowAth"]),
+      tokens,
+    });
+  }
+  return topics;
+}
+
+function httpUrlOrNull(value: unknown): string | null {
+  const text = parseStr(value);
+  if (text === null || text.length > 300) return null;
+  try {
+    const url = new URL(text);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+const SMART_INFLOW_URL =
+  "https://web3.binance.com/bapi/defi/v1/public/wallet-direct/tracker/wallet/token/inflow/rank/query/ai";
+
+export type SmartInflowPeriod = "5m" | "1h" | "4h" | "24h";
+
+/**
+ * One row of Binance's smart-money net-inflow rank. It is a rank: a token that
+ * is absent was not ranked, which is not the same as zero inflow.
+ *
+ * `netInflowUsd` is signed and `traders` counts the smart-money wallets behind
+ * it. `count`/`countBuy`/`countSell` keep the upstream's names because they are
+ * not smart-money counts: BNCB carried 21,197 buys on the 5m list next to
+ * `traders: 1` (2026-10-05), so they describe the token's whole market over a
+ * window the upstream does not state.
+ */
+export interface SmartInflowRow {
+  /** 1-based position in the list as served. */
+  rank: number;
+  address: string;
+  name: string | null;
+  netInflowUsd: number | null;
+  traders: number | null;
+  count: number | null;
+  countBuy: number | null;
+  countSell: number | null;
+  volumeUsd: number | null;
+  priceUsd: number | null;
+  marketCapUsd: number | null;
+  liquidityUsd: number | null;
+  holders: number | null;
+  top10Pct: number | null;
+  riskLevel: number | null;
+  riskCodes: string[];
+  aiNarrative: boolean | null;
+  launchedAt: number | null;
+}
+
+export interface SmartInflowParams extends BaseParams {
+  period: SmartInflowPeriod;
+}
+
+/** Fetches the BSC smart-money net-inflow rank for one window. Keyless. */
+export async function fetchSmartMoneyInflow(params: SmartInflowParams): Promise<SmartInflowRow[]> {
+  const payload = await withBinanceLimit(() =>
+    fetchJson({
+      source: SOURCE,
+      url: SMART_INFLOW_URL,
+      method: "POST",
+      // The upstream accepts only tagType 2 (smart money).
+      body: JSON.stringify({ chainId: BSC_CHAIN_ID, period: params.period, tagType: 2 }),
+      fetchFn: params.fetchFn ?? globalThis.fetch,
+      signal: params.signal,
+    }),
+  );
+  return normalizeSmartMoneyInflow(payload);
+}
+
+/** Exported for tests. */
+export function normalizeSmartMoneyInflow(payload: unknown): SmartInflowRow[] {
+  const data = unwrapEnvelope(payload);
+  const rows: SmartInflowRow[] = [];
+  const seen = new Set<string>();
+  let position = 0;
+  for (const raw of asArray(data)) {
+    if (!isRecord(raw)) continue;
+    position += 1;
+    const address = normalizeAddress(raw["ca"]);
+    if (address === null || seen.has(address)) continue;
+    seen.add(address);
+    const flag = parseNum(raw["aiNarrativeFlag"]);
+    rows.push({
+      rank: position,
+      address,
+      name: parseStr(raw["tokenName"])?.slice(0, 60) ?? null,
+      netInflowUsd: parseNum(raw["inflow"]),
+      traders: parseNum(raw["traders"]),
+      count: parseNum(raw["count"]),
+      countBuy: parseNum(raw["countBuy"]),
+      countSell: parseNum(raw["countSell"]),
+      volumeUsd: parseNum(raw["volume"]),
+      priceUsd: parseNum(raw["price"]),
+      marketCapUsd: parseNum(raw["marketCap"]),
+      liquidityUsd: parseNum(raw["liquidity"]),
+      holders: parseNum(raw["holders"]),
+      top10Pct: parseNum(raw["holdersTop10Percent"]),
+      riskLevel: parseNum(raw["tokenRiskLevel"]),
+      riskCodes: asArray(raw["tokenRiskCodes"]).slice(0, 20).flatMap((code) =>
+        typeof code === "string" || typeof code === "number" ? [String(code).slice(0, 40)] : [],
+      ),
+      aiNarrative: flag === null ? null : flag === 1,
+      launchedAt: toEpochMs(raw["launchTime"]),
+    });
+  }
+  return rows;
+}
