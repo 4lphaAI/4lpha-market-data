@@ -12,11 +12,13 @@
  * each bar is wick, 12% body) against Sintral's 0.18 and GeckoTerminal's 0.20
  * for the same window — a ~5x noisier bar shape, not a volatility difference
  * (all three would be equally noisy if the underlying asset actually moved
- * that much). Sintral only knows tokens Binance has listed (majors, Alpha
- * list, bStocks/Ondo); for anything else it fails fast/empty and the chain
- * falls through to OnchainOS exactly as before, so this reorder costs those
- * tokens one extra round trip and changes nothing else about the chain's
- * fail-through behavior.
+ * that much). Corrected 2026-10-05: Sintral is not limited to tokens Binance
+ * has listed — it answered 1m bars for 61/61 live meme stocks, Flap tokens on
+ * the curve and graduated alike, with USD prices and volume verified against
+ * on-chain swaps (see `fetchSintralMinuteBars`). For a token it does not know
+ * it answers an empty list, and the chain falls through to OnchainOS exactly as
+ * before. Note the units differ: Sintral volume is USD, OnchainOS `vol` is
+ * token units, so a series that fell back mixes units.
  */
 
 import type { Candle } from "../core/models.js";

@@ -294,6 +294,64 @@ export function normalizeSintralKlines(payload: unknown): Candle[] {
   return sortCandles(candles);
 }
 
+/**
+ * One Sintral one-minute bar with its trade count (row element 6, which
+ * {@link normalizeSintralKlines} drops). Measured 2026-10-05 against the chain:
+ * prices and `volumeUsd` are USD — volume equals the summed quote amount of the
+ * minute's swaps times the quote's price, on a graduated V2 pair (MJ/NVDAB,
+ * ratio 0.98–1.02) and on a Flap curve (bibi/NVDAB via Portal events, quote
+ * ratio = NVDAB's price) alike. `trades` is Sintral's own count, below the
+ * number of on-chain swap events (0.77–0.87 of V2 `Swap` logs, 0.49–0.84 of
+ * Portal trade logs), so it is a relative activity measure, not a log count.
+ */
+export interface SintralMinuteBar {
+  startMs: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volumeUsd: number;
+  trades: number | null;
+}
+
+/**
+ * Fetches up to `limit` one-minute bars. Sintral returns only minutes that
+ * traded, and the last row is the minute still in progress (it keeps changing
+ * ~20 s past its close). An unknown token answers an empty list.
+ */
+export async function fetchSintralMinuteBars(params: BaseParams & { address: string; limit: number }): Promise<SintralMinuteBar[]> {
+  const address = params.address.toLowerCase();
+  const limit = Math.max(1, Math.min(500, Math.trunc(params.limit)));
+  const url =
+    `${KLINE_URL}?address=${encodeURIComponent(address)}&interval=1min&limit=${limit}&platform=bsc`;
+  const payload = await withBinanceLimit(() => fetchJson({
+    source: SOURCE,
+    url,
+    fetchFn: params.fetchFn ?? globalThis.fetch,
+    signal: params.signal,
+    headers: { clienttype: "web", clientversion: "1.2.0" },
+  }));
+  return normalizeSintralMinuteBars(payload);
+}
+
+/** Exported for tests. A row with a broken price or timestamp is dropped, never zero-filled here. */
+export function normalizeSintralMinuteBars(payload: unknown): SintralMinuteBar[] {
+  const rows = isRecord(payload) ? asArray(payload["data"]) : asArray(payload);
+  const byStart = new Map<number, SintralMinuteBar>();
+  for (const row of rows) {
+    if (!Array.isArray(row)) continue;
+    const startMs = toEpochMs(row[5]);
+    const open = parseNum(row[0]);
+    const high = parseNum(row[1]);
+    const low = parseNum(row[2]);
+    const close = parseNum(row[3]);
+    if (startMs === null || startMs % 60_000 !== 0) continue;
+    if (open === null || high === null || low === null || close === null || !(close > 0)) continue;
+    byStart.set(startMs, { startMs, open, high, low, close, volumeUsd: parseNum(row[4]) ?? 0, trades: parseNum(row[6]) });
+  }
+  return [...byStart.values()].sort((a, b) => a.startMs - b.startMs);
+}
+
 const MIN_PLAUSIBLE_RATIO = 0.02;
 const MAX_PLAUSIBLE_RATIO = 50;
 
