@@ -29,10 +29,12 @@ import {
 } from "../adapters/binanceRwa.js";
 import type { FetchFn } from "../adapters/http.js";
 import { normalizeAddress, sanitizeMessage } from "../adapters/http.js";
+import { randomUUID } from "node:crypto";
 import { allowlistedStocks } from "../allowlist.js";
 import { isContractLevelFailure, withBscClient } from "../chain/rpc.js";
 import { MEME_BOARD_KEY } from "./memeBoard.js";
 import { RWA_MEMBERS_KEY, RWA_UNIVERSE_KEY, RWA_VENUES_KEY } from "../universe.js";
+import { RECORDER_DEADLINE_MS, recordReferenceBars, type ReferenceObservation } from "./rwaReferenceBars.js";
 import { mergeTokenIntoStore } from "./tokenStore.js";
 
 export const BINANCE_RWA_JOB = "binance-rwa";
@@ -136,6 +138,8 @@ export interface RunBinanceRwaOptions {
    * `binanceRwaJob` supplies {@link readShareFactsOnChain}.
    */
   readShareFacts?: ShareFactsReader | undefined;
+  /** Clock for the reference-price recorder's observation time; tests inject it. */
+  now?: (() => number) | undefined;
 }
 
 export interface BinanceRwaCycle {
@@ -160,6 +164,8 @@ export async function runBinanceRwa(
   options: RunBinanceRwaOptions = {},
 ): Promise<BinanceRwaCycle> {
   const listed = await fetchRwaTokens({ signal, fetchFn: options.fetchFn });
+  // The recorder's observation time: the data-plane clock right after the list call returned.
+  const observedAt = (options.now ?? Date.now)();
   const { dropped } = listed;
   // An empty list is an outage or a shape change, not a real universe; keeping
   // the previous snapshot is strictly better than publishing nothing.
@@ -187,6 +193,10 @@ export async function runBinanceRwa(
     freshForMs: RWA_MEMBERS_FRESH_FOR_MS,
     deadAfterMs: RWA_MEMBERS_DEAD_AFTER_MS,
   });
+
+  // Underlying reference prices for the feature series. After both puts above and under its
+  // own deadline, so it can neither delay nor fail the snapshot those puts published.
+  await recordReferences(store, tokens, signal, observedAt);
 
   // The token surface gets the documented price. `volume24H` is the
   // underlying equity's exchange volume and is deliberately not written to
@@ -222,6 +232,46 @@ export async function runBinanceRwa(
     perAddressMissed: extras.missed,
     quoteStocks,
   };
+}
+
+/**
+ * One recorder pass over the bStock rows of this cycle. Any error is logged once and
+ * swallowed: the job result and the published snapshot do not depend on it.
+ */
+async function recordReferences(
+  store: SnapshotStore,
+  tokens: readonly RwaToken[],
+  signal: AbortSignal,
+  observedAt: number,
+): Promise<void> {
+  try {
+    const observations: ReferenceObservation[] = [];
+    for (const token of tokens) {
+      const value = token.referencePriceUsd;
+      if (token.platform !== "bstock" || value === null || !Number.isFinite(value) || !(value > 0)) continue;
+      observations.push({
+        token: token.address,
+        underlyingTicker: token.underlyingTicker,
+        endpoint: token.origin === "per-address" ? "price" : "tokens",
+        value,
+      });
+    }
+    const result = await recordReferenceBars(store, observations, {
+      observedAt,
+      holder: randomUUID(),
+      jobSignal: signal,
+      deadline: AbortSignal.timeout(RECORDER_DEADLINE_MS),
+    });
+    if (result.reason === "lease_lost") console.warn(`[${BINANCE_RWA_JOB}] recorder lease lost; open state not written`);
+    if (result.deadlineFired) {
+      console.warn(`[${BINANCE_RWA_JOB}] recorder deadline: deferred ${result.deferred} of ${result.closes + result.deferred} closes, ${result.ms} ms`);
+    }
+    if (result.closes15m > 0) {
+      console.log(`[${BINANCE_RWA_JOB}] recorder boundary: ${result.closes} closes, ${result.storeOps} store ops, ${result.ms} ms`);
+    }
+  } catch (error) {
+    console.warn(`[${BINANCE_RWA_JOB}] recorder failed: ${sanitizeMessage(error)}`);
+  }
 }
 
 /** Store key for bStocks that quote memes but are not in `universe:rwa` (see {@link refreshQuoteStocks}). */
