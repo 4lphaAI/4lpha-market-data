@@ -10,10 +10,15 @@
  *
  * One source, Sintral (Binance Web3's kline service), measured against the
  * chain on 2026-10-05: prices and volume are USD (see `SintralMinuteBar`). It
- * lists only minutes that traded, and the minute in progress keeps changing for
- * ~20 s after it closes, so a minute counts as closed {@link SETTLE_MS} after
+ * lists only minutes that traded, and keeps changing a minute's bar briefly
+ * after the minute ends, so a minute counts as closed {@link SETTLE_MS} after
  * its end and the last {@link REFRESH_TAIL} closed minutes are re-read every
- * cycle (a late trade corrects a bar rather than being lost). Missing minutes
+ * cycle (a late trade corrects a bar rather than being lost).
+ *
+ * Latency (MEME-BARS-LATENCY-HANDOFF-2026-10-05): the job ticks every 2 s but
+ * reads Sintral only when a new minute has closed, so each minute is read once,
+ * {@link SETTLE_MS} plus a few seconds after it ends, instead of up to a full
+ * 60 s cycle later. Idle ticks cost one store read and nothing upstream. Missing minutes
  * are zero-filled explicitly — `trades: 0`, `volume: 0`, OHLC at the previous
  * close — so a flat chart reads as silence, not as a gap. Each token keeps the
  * last {@link MEME_BARS_KEEP} closed minutes, backfilled on entry and extended
@@ -49,8 +54,17 @@ export const MEME_BARS_SOURCE = "sintral";
 export const MEME_BARS_UNIT = "usd";
 export const MEME_BARS_CAP = 120;
 export const MEME_BARS_KEEP = 180;
-/** A minute is closed this long after its end (Sintral was seen still updating a bar 21 s past it). */
-export const SETTLE_MS = 45_000;
+/**
+ * A minute is closed this long after its end. Measured 2026-10-05
+ * (`scripts/sintral-settle-probe.ts`, 61 traded bars over three minutes): 57/61
+ * final at +6 s, 58/61 at +10 s, 61/61 at +15 s and every later offset. A late
+ * change past this is still corrected by the {@link REFRESH_TAIL} re-read.
+ * 20 s gave a measured read lag of p50 59.6 s; 15 s with a 2 s tick leaves margin
+ * under the handoff's p50 60 s / p90 90 s target.
+ */
+export const SETTLE_MS = 15_000;
+/** Tick: how soon after a minute closes the job notices. */
+export const MEME_BARS_TICK_MS = 2_000;
 /** Closed minutes re-read every cycle, so a late-published trade corrects its bar. */
 export const REFRESH_TAIL = 3;
 export const LEAVE_AFTER_MS = 30 * 60_000;
@@ -104,6 +118,8 @@ export interface BarsIndex {
   departed: Record<string, number>;
   /** Set after a throttled cycle: no Sintral call before `until`. */
   backoff: { until: number; streak: number } | null;
+  /** The newest closed minute a cycle has already been run for; ticks before the next one do nothing. */
+  closedThrough: number | null;
   lastCycle: {
     at: number;
     tracked: number;
@@ -196,7 +212,7 @@ export interface RunMemeBarsOptions {
 }
 
 export interface MemeBarsResult {
-  skipped?: "lease_held" | "backoff";
+  skipped?: "lease_held" | "backoff" | "up_to_date";
   tracked: number;
   candidates: number;
   capped: boolean;
@@ -262,14 +278,15 @@ export async function runMemeBars(
 ): Promise<MemeBarsResult> {
   const now = (options.now ?? Date.now)();
   const fetchBars = options.fetchBars ?? ((address, limit, s) => fetchSintralMinuteBars({ address, limit, signal: s }));
-  if (!await store.acquireSchedulerLease(MEME_BARS_LEASE, options.holder ?? HOLDER, 90_000)) {
-    return { skipped: "lease_held", tracked: 0, candidates: 0, capped: false, calls: 0, failures: 0, throttled: false };
-  }
-
+  const lastClosed = lastClosedMinute(now);
   const index = await readIndex(store);
-  if (index.backoff !== null && now < index.backoff.until) {
-    console.log(`[${MEME_BARS_JOB}] backing off after 429 until ${new Date(index.backoff.until).toISOString()}`);
-    return { skipped: "backoff", tracked: Object.keys(index.tokens).length, candidates: 0, capped: false, calls: 0, failures: 0, throttled: false };
+  const idle = { tracked: Object.keys(index.tokens).length, candidates: 0, capped: false, calls: 0, failures: 0, throttled: false };
+  // Most ticks: this minute was already read. One store read, no write, no upstream.
+  if (index.closedThrough !== null && index.closedThrough >= lastClosed) return { skipped: "up_to_date", ...idle };
+  // Silent: the throttled cycle already logged when it started backing off.
+  if (index.backoff !== null && now < index.backoff.until) return { skipped: "backoff", ...idle };
+  if (!await store.acquireSchedulerLease(MEME_BARS_LEASE, options.holder ?? HOLDER, 90_000)) {
+    return { skipped: "lease_held", ...idle, tracked: 0 };
   }
   const boardRecord = await store.get<unknown>(MEME_BOARD_KEY);
   const boardFresh = boardRecord !== null && boardRecord.staleness === "fresh" && Array.isArray(boardRecord.data);
@@ -287,7 +304,6 @@ export async function runMemeBars(
   // A board that is not fresh adds no one and refreshes no one's liveness; the
   // tracked tokens keep their bars until they age out.
   const selection = selectTracked(index, board, shortlisted, now);
-  const lastClosed = lastClosedMinute(now);
 
   let calls = 0;
   let failures = 0;
@@ -350,7 +366,10 @@ export async function runMemeBars(
   }
   const streak = throttled ? (index.backoff?.streak ?? 0) + 1 : 0;
   const backoff = throttled ? { until: now + backoffMs(streak), streak } : null;
-  const next: BarsIndex = { tokens: selection.tokens, departed, backoff, lastCycle: { at: now, ...result, boardFresh } };
+  // A minute is read once: a token that failed waits for the next minute (its
+  // re-read tail catches it up) rather than retrying every 5 s against a failing host.
+  const next: BarsIndex = { tokens: selection.tokens, departed, backoff, closedThrough: lastClosed, lastCycle: { at: now, ...result, boardFresh } };
+  if (throttled) console.log(`[${MEME_BARS_JOB}] 429: backing off until ${new Date(backoff!.until).toISOString()}`);
   await store.put(MEME_BARS_INDEX_KEY, next, { source: MEME_BARS_JOB, freshForMs: BARS_FRESH_MS, deadAfterMs: BARS_DEAD_MS });
   console.log(
     `[${MEME_BARS_JOB}] tracked=${result.tracked} calls=${calls} failures=${failures}` +
@@ -378,7 +397,8 @@ async function readIndex(store: SnapshotStore): Promise<BarsIndex> {
   }
   const b = data?.backoff;
   const backoff = typeof b?.until === "number" && typeof b.streak === "number" ? { until: b.until, streak: b.streak } : null;
-  return { tokens, departed, backoff, lastCycle: null };
+  const closedThrough = typeof data?.closedThrough === "number" ? data.closedThrough : null;
+  return { tokens, departed, backoff, closedThrough, lastCycle: null };
 }
 
 async function readSeries(store: SnapshotStore, address: string): Promise<BarSeries | null> {
@@ -449,8 +469,9 @@ const HOLDER = randomUUID();
 export function memeBarsJob(store: SnapshotStore): JobSpec {
   return {
     name: MEME_BARS_JOB,
-    intervalMs: MINUTE,
-    jitterMs: 3_000,
+    // Ticks often, works once per closed minute (see the latency note above).
+    intervalMs: MEME_BARS_TICK_MS,
+    jitterMs: 500,
     // Up to 120 Sintral reads, four at a time, ~0.2-0.3 s each.
     timeoutMs: 45_000,
     run: async (signal) => {
