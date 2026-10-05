@@ -18,6 +18,7 @@ import { RWA_UNIVERSE_KEY } from "../src/universe.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import { MEME_BOARD_KEY, MEME_STATE_KEY, runMemeBoard } from "../src/jobs/memeBoard.js";
+import { MEME_VENUES_KEY } from "../src/jobs/memeVenues.js";
 import {
   MEME_RULES,
   classifyMeme,
@@ -1004,5 +1005,31 @@ describe("venue, tax and dividend on the board (handoff 2026-10-05 item 4)", () 
     const old = buildShortlist([legacy as MemeBoardRow], parseShortlistQuery(() => undefined), NOW).rows[0]!;
     assert.equal(old.venue, null);
     assert.equal(old.tax, null);
+  });
+});
+
+describe("venue refresh failure (audit round)", () => {
+  it("keeps each row's previous venue when the venue cache cannot be read or written", async () => {
+    const store = new MemoryStore(() => NOW);
+    const options = {
+      ...fakeUpstreams({ finalizing: [rush()] }),
+      readStates: async (items: readonly { address: string }[]) =>
+        new Map(items.map((item) => [item.address, {
+          migrated: true, progress: 100, quote: BNB, launchedAt: null, venue: "pancake-v2" as const,
+          pool: addr(77), tax: { buyBps: 100, sellBps: 100 }, nativeToQuoteSwapEnabled: false,
+        }])),
+      fetchActivity: async () => new Map([[addr(1), activity({ txs5m: 10 })]]),
+      fetchSignals: async () => [],
+    };
+    await runMemeBoard(store, AbortSignal.timeout(5_000), { ...options, now: () => NOW });
+    const broken = Object.create(store) as MemoryStore;
+    broken.get = (key) => (key === MEME_VENUES_KEY ? Promise.reject(new Error("pg blip")) : store.get(key));
+    broken.put = (key, payload, opts) => store.put(key, payload, opts);
+    const result = await runMemeBoard(broken, AbortSignal.timeout(5_000), { ...options, now: () => NOW + MIN });
+    assert.ok(result.failures.some((f) => f.startsWith("venues:")));
+    const row = (await board(store))[0]!;
+    assert.equal(row.venue, "pancake-v2");
+    assert.equal(row.pool, addr(77));
+    assert.equal(row.venueCheckedAt, NOW, "dated by the read that answered");
   });
 });

@@ -243,6 +243,12 @@ export interface EligibilityResult {
   checkedAt: number;
   /** True when this answer came from cache rather than a fresh chain read. */
   cached: boolean;
+  /**
+   * Set only on an allowlist or Alpha hit that carries launchpad facts: when
+   * those facts were read (they may come from a 30 s cache while `checkedAt`
+   * dates the verdict, which is decided live).
+   */
+  venueCheckedAt?: number;
 }
 
 /**
@@ -606,22 +612,39 @@ export const LIST_VENUE_TTL = {
 } as const;
 
 export function listVenueKey(address: string): string {
-  return `eligibility:list-venue:${address.toLowerCase()}`;
+  // Outside the `eligibility:` prefix on purpose: these are venue facts, not
+  // verdicts, and the raw snapshot route serves that prefix (audit F7).
+  return `list-venue:${address.toLowerCase()}`;
 }
 
 type ListVenue = Pick<EligibilityResult, "venue" | "fourmeme" | "flap">;
 
-/** Exported for tests: the venue facts one chain read gives a listed token, or `null` when it is not a launchpad token. */
+/**
+ * Exported for tests: the venue facts one chain read gives a listed token.
+ * `null` only when neither launchpad knows it. A token a launchpad knows but
+ * will not trade (Flap status other than 1/4, a Four.Meme manager other than
+ * v2) carries its state with `venue: null`, and is cached as a launchpad token,
+ * because its status can still move (audit F1).
+ */
 export function listVenueFrom(outcomes: ChainOutcomes): ListVenue | null | "unavailable" {
   const { fourmeme, flap } = outcomes;
   if (fourmeme.kind === "answered" && fourmeme.state.version === SUPPORTED_TOKEN_MANAGER_VERSION) {
     return { venue: fourmeme.state.liquidityAdded ? "pancake-v2" : "fourmeme-bonding", fourmeme: fourmeme.state, flap: null };
   }
-  if (flap.kind === "answered" && isFlapTradable(flap.state.status)) {
-    return { venue: flap.state.status === FLAP_STATUS_DEX ? "pancake-v2" : "flap-bonding", fourmeme: null, flap: flap.state };
+  if (flap.kind === "answered") {
+    const venue = isFlapTradable(flap.state.status) ? (flap.state.status === FLAP_STATUS_DEX ? "pancake-v2" : "flap-bonding") : null;
+    return { venue, fourmeme: null, flap: flap.state };
+  }
+  if (fourmeme.kind === "answered" && fourmeme.state.version !== 0) {
+    return { venue: null, fourmeme: fourmeme.state, flap: null };
   }
   if (fourmeme.kind === "unavailable" || flap.kind === "unavailable") return "unavailable";
   return null;
+}
+
+/** A list hit with the venue facts, dated by the read they came from (audit F3). */
+function withVenue(result: EligibilityResult, venue: ListVenue | null, readAt: number): EligibilityResult {
+  return venue === null ? result : { ...result, ...venue, venueCheckedAt: readAt };
 }
 
 async function withListVenue(
@@ -633,7 +656,7 @@ async function withListVenue(
   try {
     const cached = await store.get<{ venue: ListVenue | null }>(listVenueKey(result.address));
     if (cached !== null && cached.staleness === "fresh" && typeof cached.data === "object" && cached.data !== null) {
-      return cached.data.venue === null ? result : { ...result, ...cached.data.venue };
+      return withVenue(result, cached.data.venue ?? null, cached.asOf);
     }
     const deadline = AbortSignal.timeout(LIST_VENUE_DEADLINE_MS);
     const bounded = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
@@ -643,13 +666,14 @@ async function withListVenue(
         bounded.addEventListener("abort", () => reject(new Error("list venue read timed out")), { once: true });
       }),
     ]);
+    const readAt = Date.now();
     const venue = listVenueFrom(outcomes);
     if (venue === "unavailable") return result;
     await store.put(listVenueKey(result.address), { venue }, {
       source: SOURCE,
       ...(venue === null ? LIST_VENUE_TTL.none : LIST_VENUE_TTL.launchpad),
     });
-    return venue === null ? result : { ...result, ...venue };
+    return withVenue(result, venue, readAt);
   } catch (error) {
     console.warn(`[${SOURCE}] list venue read failed: ${sanitizeMessage(error)}`);
     return result;

@@ -209,7 +209,9 @@ export async function runMemeBoard(
   const addresses = tracked.map((token) => token.rush.address);
 
   // 2b. Venue, tax and dividend from the launchpads (cached; see memeVenues.ts).
-  // A failure here leaves every row's venue as last cached, never fails the board.
+  // If the refresh itself fails (the cache key could not be read or written),
+  // each row keeps what the previous board said rather than reading as "never
+  // read"; the board never fails for it (audit F2).
   let venues = new Map<string, CachedVenue>();
   try {
     const refreshed = await refreshVenues(
@@ -226,6 +228,18 @@ export async function runMemeBoard(
     failures.push(...refreshed.failures);
   } catch (error) {
     failures.push(`venues: ${sanitizeMessage(error)}`);
+    for (const row of previousBoard.values()) {
+      if (row.venueCheckedAt == null) continue;
+      venues.set(row.address, {
+        launchpad: row.launchpad,
+        venue: row.venue ?? null,
+        tax: row.tax ?? null,
+        pool: row.pool ?? null,
+        nativeToQuoteSwapEnabled: row.nativeToQuoteSwapEnabled ?? null,
+        dividend: row.dividend ?? null,
+        checkedAt: row.venueCheckedAt,
+      });
+    }
   }
 
   // 3. Liveness. An OKX failure falls back to each row's previous activity

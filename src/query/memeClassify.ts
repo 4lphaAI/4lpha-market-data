@@ -190,7 +190,11 @@ export interface SmartInflow {
   netUsd: number | null;
   /** Smart-money wallets behind it. */
   traders: number | null;
-  /** 1-based position in Binance's list (~3–15 rows for 5m, at most 50 for 1h). */
+  /**
+   * 1-based position in Binance's list (~3–15 rows for 5m, at most 50 for 1h).
+   * The ordering is Binance's own and opaque — it is not by net inflow (a live
+   * 1h list had +$169 at 1 and −$27,966 at 5) — so read `netUsd`, not the rank.
+   */
   rank: number;
   /** When the rank was read. */
   rankedAt: number;

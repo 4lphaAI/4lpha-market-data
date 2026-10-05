@@ -6,6 +6,7 @@ import { createServer } from "../src/server.js";
 import {
   ELIGIBILITY_TTL,
   LIST_VENUE_DEADLINE_MS,
+  LIST_VENUE_TTL,
   listVenueFrom,
   listVenueKey,
   FOURMEME_TOKEN_MANAGER2,
@@ -581,5 +582,51 @@ describe("venue for list hits (handoff 2026-10-05 item 4)", () => {
     assert.equal(listVenueFrom(chain({ flap: { kind: "unavailable" } })), "unavailable");
     const flap = listVenueFrom(chain({ flap: flapToken({ status: 4 }) }));
     assert.equal(flap !== null && flap !== "unavailable" ? flap.venue : undefined, "pancake-v2");
+  });
+});
+
+describe("list-hit venue, audit round", () => {
+  it("keeps the state of a launchpad token that is not tradable, cached only as long as a launchpad answer", async () => {
+    let t = 1_791_120_000_000;
+    const store = new MemoryStore(() => t);
+    let reads = 0;
+    const migrating = async () => { reads++; return chain({ flap: flapToken({ status: 3 }) }); };
+    const first = await isEligible(store, { address: USDT, readState: migrating });
+    assert.deepEqual([first.eligible, first.reason, first.venue, first.flap?.status], [true, "allowlist", null, 3]);
+    t += 10_000;
+    await isEligible(store, { address: USDT, readState: migrating });
+    assert.equal(reads, 1, "cached inside the launchpad window");
+    t += LIST_VENUE_TTL.launchpad.freshForMs;
+    const graduated = await isEligible(store, { address: USDT, readState: async () => { reads++; return chain({ flap: flapToken({ status: 4 }) }); } });
+    assert.equal(reads, 2, "re-read after 30 s, not 6 h");
+    assert.equal(graduated.venue, "pancake-v2");
+  });
+
+  it("dates the venue facts by their read, not by the verdict", async () => {
+    let t = 1_791_120_000_000;
+    const store = new MemoryStore(() => t);
+    const readState = async () => chain({ flap: flapToken() });
+    const fresh = await isEligible(store, { address: USDT, readState });
+    assert.ok(typeof fresh.venueCheckedAt === "number");
+    t += 20_000;
+    const again = await isEligible(store, { address: USDT, readState });
+    assert.equal(again.venueCheckedAt, 1_791_120_000_000, "from the cache: the cached read's time");
+    assert.equal(again.cached, false, "the verdict itself is still decided live");
+    assert.equal(listVenueKey(USDT).startsWith("eligibility:"), false, "venue facts stay off the verdict prefix");
+  });
+
+  it("fills venues across a batch of list hits without changing any verdict", async () => {
+    const store = await (async () => {
+      const s = new MemoryStore();
+      await s.put(COINS_UNIVERSE_KEY, [{ address: MEME, symbol: "ALPHA" }], { source: "binance", freshForMs: 60_000, deadAfterMs: 120_000 });
+      return s;
+    })();
+    const results = await isEligibleBatch(store, [USDT, MEME], {
+      readState: async (address) => (address === MEME ? chain({ fourmeme: fourMeme() }) : chain()),
+    });
+    assert.deepEqual(results.map((r) => [r.address, r.eligible, r.reason, r.venue]), [
+      [USDT, true, "allowlist", null],
+      [MEME, true, "binance_alpha", "fourmeme-bonding"],
+    ]);
   });
 });
