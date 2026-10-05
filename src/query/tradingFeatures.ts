@@ -568,3 +568,17 @@ export async function readUnderlyingFeatures(store: SnapshotStore, token: string
     metrics: Object.fromEntries(Object.entries(snapshot.metrics).map(([name, m]) => [name,
       stale ? { ...m, value: null, available: false, reason: future ? "observation_after_evaluation" : "stale_input" } : m])) };
 }
+/** The selection the underlying-features job publishes each cycle; disjoint from the pool index by construction. */
+export interface UnderlyingFeatureIndex {
+  tokens: Array<{ tokenAddress: string; usEquity: boolean }>;
+  intervals: UnderlyingInterval[];
+  maxTokens: number;
+}
+/** Producer state of one series, as {@link readFeatureAttempt} answers for pool series. */
+export async function readUnderlyingAttempt(store: SnapshotStore, token: string, interval: UnderlyingInterval, now = Date.now()) {
+  const state = await store.get<Record<string, FeatureAttempt>>(UNDERLYING_FEATURE_STATE_KEY);
+  const attempt = state?.data[underlyingFeatureKey(token, interval)];
+  if (!attempt) return { state: "queued", reason: "not_attempted", nextAttempt: null, sources: [] };
+  if (attempt.state === "refreshing" && now > attempt.attemptedAt + 30_000) return { ...attempt, state: "unavailable", reason: "refresh_interrupted" };
+  return attempt;
+}

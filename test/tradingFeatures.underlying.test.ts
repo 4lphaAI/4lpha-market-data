@@ -1,4 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { createScheduler } from "../src/core/scheduler.js";
+import { createServer } from "../src/server.js";
+import { FEATURE_INDEX_KEY_V2, UNDERLYING_FEATURE_INDEX_KEY, UNDERLYING_FEATURE_STATE_KEY, type FeatureAttempt, type UnderlyingFeatureIndex } from "../src/query/tradingFeatures.js";
+import { MAX_UNDERLYING_TOKENS, runTradingUnderlyingFeatures, selectUnderlyingTokens, tradingUnderlyingFeaturesJob } from "../src/jobs/tradingUnderlyingFeatures.js";
+import { recordReferenceBars, REFERENCE_BARS_OPEN_KEY, type ReferenceObservation } from "../src/jobs/rwaReferenceBars.js";
+import { RWA_UNIVERSE_KEY } from "../src/universe.js";
 import { describe, it } from "node:test";
 import { MemoryStore } from "../src/core/store.js";
 import {
@@ -278,5 +285,331 @@ describe("underlying features: store-only read", () => {
     assert.equal(await readUnderlyingFeatures(store, "0x00000000000000000000000000000000000000b2", "15m", NOW), null);
     await store.put(underlyingFeatureKey("0x00000000000000000000000000000000000000b2", "15m"), snapshot, { source: "t", freshForMs: 1e9, deadAfterMs: 1e10 });
     assert.equal(await readUnderlyingFeatures(store, "0x00000000000000000000000000000000000000b2", "15m", NOW), null);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The producer job and the routes
+// ---------------------------------------------------------------------------------------------------------------
+
+describe("underlying features job and routes", () => {
+  const MIN = 60_000;
+  const clock = { t: 0 };
+  const addr = (n: number): string => `0x${n.toString(16).padStart(40, "0")}`;
+  const TTL = { source: "test", freshForMs: 3_600_000, deadAfterMs: 86_400_000 };
+  const POOLED = addr(0x501);
+  const T1 = addr(0x601), T2 = addr(0x602), T3 = addr(0x603);
+  const key = (token: string, interval: "15m" | "1h"): string => `trading:underlying-features:v1:${token}:${interval}`;
+
+  const rwaRow = (address: string, over: { openState?: boolean | null; reasonCode?: string | null; platform?: string } = {}) => ({
+    address, symbol: `S${address.slice(-3)}B`, name: null, platform: over.platform ?? "bstock", underlyingTicker: "AMD", underlyingName: null, decimals: 18,
+    tokenToShareRatio: 1, tokenPriceUsd: 100, referencePriceUsd: 100, navPremiumBps: 0, underlyingMarketCapUsd: null, underlyingVolume24hUsd: null,
+    openState: over.openState === undefined ? true : over.openState, marketStatus: null, reasonCode: over.reasonCode === undefined ? "TRADING" : over.reasonCode,
+    nextOpenMs: null, nextCloseMs: null,
+  });
+  async function world(rows: ReturnType<typeof rwaRow>[], poolTokens: string[] = [POOLED], at = Date.UTC(2026, 9, 7, 16, 0, 20)): Promise<MemoryStore> {
+    clock.t = at;
+    const store = new MemoryStore(() => clock.t);
+    await store.put(RWA_UNIVERSE_KEY, { rows, byPlatform: { bstock: rows.length } }, TTL);
+    await store.put(FEATURE_INDEX_KEY_V2, { pools: poolTokens.map((tokenAddress) => ({ pool: addr(1), currency: "usd", tokenAddress })), intervals: ["15m", "1h"], maxPools: 40,
+      selection: "marketplace_reference_pools" }, TTL);
+    return store;
+  }
+  /** Records every token every 3 minutes from `from` to `to`, the reference changing by more than 1 bp each time. */
+  async function recordSeries(store: MemoryStore, tokens: string[], from: number, to: number): Promise<number> {
+    let last = from;
+    for (let k = 0; from + k * 3 * MIN <= to; k++) {
+      last = from + k * 3 * MIN;
+      clock.t = last;
+      const observations: ReferenceObservation[] = tokens.map((token, n) => ({ token, underlyingTicker: "AMD", endpoint: "tokens",
+        value: (100 + n) * (1 + 0.004 * Math.sin(k * 0.9 + n) + 0.002 * Math.sin(k * 0.37)) }));
+      await recordReferenceBars(store, observations, { observedAt: last, holder: `h${k}`, jobSignal: new AbortController().signal, deadline: new AbortController().signal });
+    }
+    return last;
+  }
+  const run = async (store: MemoryStore, now: number) => {
+    clock.t = now;
+    return runTradingUnderlyingFeatures(store, new AbortController().signal, { now: () => now });
+  };
+  async function quietly<T>(work: () => Promise<T>): Promise<{ result: T; warnings: string[] }> {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (message?: unknown) => { warnings.push(String(message)); };
+    try {
+      return { result: await work(), warnings };
+    } finally {
+      console.warn = original;
+    }
+  }
+  const stateOf = async (store: MemoryStore) => (await store.get<Record<string, FeatureAttempt>>(UNDERLYING_FEATURE_STATE_KEY))!.data;
+
+  it("selects open TRADING bStocks that the pool index does not carry, by address", async () => {
+    const store = await world([rwaRow(T3), rwaRow(POOLED), rwaRow(T1), rwaRow(T2, { openState: false }), rwaRow(addr(0x604), { reasonCode: "UNSUPPORTED" }),
+      rwaRow(addr(0x605), { platform: "ondo" })]);
+    assert.deepEqual(await selectUnderlyingTokens(store), [T1, T3]);
+  });
+
+  it("keeps the two indexes disjoint: a token the pool index gains leaves the underlying index", async () => {
+    const store = await world([rwaRow(T1), rwaRow(T2)], []);
+    assert.deepEqual(await selectUnderlyingTokens(store), [T1, T2]);
+    await store.put(FEATURE_INDEX_KEY_V2, { pools: [{ pool: addr(2), currency: "usd", tokenAddress: T1 }], intervals: ["15m"], maxPools: 40, selection: "x" }, TTL);
+    assert.deepEqual(await selectUnderlyingTokens(store), [T2]);
+  });
+
+  it("trims 65 eligible tokens to the first 64 by address with one warning", async () => {
+    const rows = Array.from({ length: 65 }, (_, i) => rwaRow(addr(0x700 + i)));
+    const store = await world(rows);
+    const { result, warnings } = await quietly(() => selectUnderlyingTokens(store));
+    assert.equal(result!.length, MAX_UNDERLYING_TOKENS);
+    assert.equal(result![63], addr(0x700 + 63));
+    assert.ok(!result!.includes(addr(0x700 + 64)));
+    assert.equal(warnings.length, 1);
+  });
+
+  it("fails closed when the pool index is missing: nothing is published", async () => {
+    clock.t = Date.UTC(2026, 9, 7, 16, 0, 20);
+    const store = new MemoryStore(() => clock.t);
+    await store.put(RWA_UNIVERSE_KEY, { rows: [rwaRow(T1)], byPlatform: { bstock: 1 } }, TTL);
+    assert.equal(await selectUnderlyingTokens(store), null);
+    const { result } = await quietly(() => run(store, clock.t));
+    assert.deepEqual(result, { attempted: 0, updated: 0, failed: 0 });
+    assert.equal(await store.get(UNDERLYING_FEATURE_INDEX_KEY), null);
+  });
+
+  it("writes the index with usEquity per token, 15m and 1h, maxTokens 64", async () => {
+    const store = await world([rwaRow(T1), rwaRow(T2)]);
+    await run(store, clock.t);
+    const index = (await store.get<UnderlyingFeatureIndex>(UNDERLYING_FEATURE_INDEX_KEY))!.data;
+    assert.deepEqual(index, { tokens: [{ tokenAddress: T1, usEquity: true }, { tokenAddress: T2, usEquity: true }], intervals: ["15m", "1h"], maxTokens: 64 });
+  });
+
+  it("calls no upstream and imports no upstream adapter", async () => {
+    const store = await world([rwaRow(T1)]);
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (() => { calls += 1; throw new Error("upstream call"); }) as typeof fetch;
+    try {
+      await quietly(() => run(store, clock.t));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    assert.equal(calls, 0);
+    const imports = readFileSync(new URL("../src/jobs/tradingUnderlyingFeatures.ts", import.meta.url), "utf8").split(/\r?\n/u)
+      .filter((line) => /^import |^\} from /u.test(line)).join("\n").toLowerCase();
+    for (const forbidden of ["adapters/", "poolohlcv", "onchainos", "geckoterminal", "dexpaprika", "sintral"]) {
+      assert.ok(!imports.includes(forbidden), `imports ${forbidden}`);
+    }
+  });
+
+  it("a second holder inside the lease window attempts nothing", async () => {
+    const store = await world([rwaRow(T1)]);
+    await quietly(() => run(store, clock.t));
+    assert.deepEqual(await run(store, clock.t + 1_000), { attempted: 0, updated: 0, failed: 0 });
+  });
+
+  it("with no recorder entry for a token the series is recorder_stale and nothing is published", async () => {
+    const store = await world([rwaRow(T1)]);
+    const { result, warnings } = await quietly(() => run(store, clock.t));
+    assert.equal(result.updated, 0);
+    assert.equal((await stateOf(store))[key(T1, "15m")]?.reason, "recorder_stale");
+    assert.equal(await store.get(key(T1, "15m")), null);
+    assert.equal(warnings.filter((w) => w.includes("recorder_stale")).length, 1, "one line per cycle");
+  });
+
+  describe("after a recording", () => {
+    const START = Date.UTC(2026, 9, 7, 6, 0, 0);
+    const END = Date.UTC(2026, 9, 7, 16, 0, 0);
+
+    it("publishes 15m and 1h snapshots, and reports warm-up honestly as too_few_real_bars with the 300 s floor", async () => {
+      const store = await world([rwaRow(T1), rwaRow(T2)]);
+      const last = await recordSeries(store, [T1, T2], START, END);
+      const now = last + 20_000;
+      const outcome = await run(store, now);
+      assert.equal(outcome.updated, 4);
+      const read15 = (await readUnderlyingFeatures(store, T1, "15m", now))!;
+      assert.equal(read15.version, "underlying-features-v1");
+      assert.equal(read15.staleness, "fresh");
+      assert.equal(read15.identity.endpoint, "tokens");
+      assert.ok(read15.coverage.realBars >= 30, "10 hours of moving reference is 40 real 15m buckets");
+      assert.equal((read15.metrics as Record<string, Metric>)["rsi14"]?.available, true);
+      assert.equal((read15.metrics as Record<string, Metric>)["rvol20"]?.reason, "unknown_volume_unit");
+      const read1h = (await readUnderlyingFeatures(store, T1, "1h", now))!;
+      assert.ok(read1h.coverage.realBars < 30);
+      assert.equal((read1h.metrics as Record<string, Metric>)["roc10Pct"]?.reason, "too_few_real_bars");
+      const state = await stateOf(store);
+      const hourly = state[key(T1, "1h")]!;
+      assert.equal(hourly.reason, "too_few_real_bars");
+      assert.equal(hourly.state, "partial");
+      assert.ok(hourly.nextAttempt >= now + 300_000);
+      const quarter = state[key(T1, "15m")]!;
+      assert.equal(quarter.state, "partial");
+      assert.ok(!["too_few_real_bars", "unknown_volume_unit", "recorder_stale"].includes(quarter.reason!), `15m reason ${quarter.reason}`);
+      assert.ok(quarter.nextAttempt >= now + 60_000);
+    });
+
+    it("a series whose only unavailable metrics read volume is ready", async () => {
+      const store = await world([rwaRow(T1)]);
+      const last = await recordSeries(store, [T1], Date.UTC(2026, 9, 6, 12, 0, 0), Date.UTC(2026, 9, 7, 16, 0, 0));
+      const now = last + 20_000;
+      await run(store, now);
+      const read = (await readUnderlyingFeatures(store, T1, "15m", now))!;
+      const unavailable = Object.entries(read.metrics as Record<string, Metric>).filter(([, m]) => !m.available).map(([name]) => name).sort();
+      assert.deepEqual(unavailable, ["rvol20", "vwapDistancePct", "vwapSession"]);
+      const attempt = (await stateOf(store))[key(T1, "15m")]!;
+      assert.equal(attempt.state, "ready");
+      assert.equal(attempt.reason, "ready");
+    });
+
+    it("writes a snapshot only when its id changed", async () => {
+      const store = await world([rwaRow(T1)]);
+      const last = await recordSeries(store, [T1], START, END);
+      const puts: string[] = [];
+      const original = store.put.bind(store);
+      store.put = async (k, payload, opts) => { puts.push(k); await original(k, payload, opts); };
+      const now = last + 20_000;
+      await run(store, now);
+      assert.equal(puts.filter((k) => k === key(T1, "15m")).length, 1);
+      await run(store, now + 61_000);
+      assert.equal(puts.filter((k) => k === key(T1, "15m")).length, 1, "same record, no rewrite");
+    });
+
+    it("lastObservedAt more than one interval old publishes nothing for that interval (901 000 ms), exactly one interval old still does", async () => {
+      const store = await world([rwaRow(T1)]);
+      const last = await recordSeries(store, [T1], START, END);
+      const stale = await quietly(() => run(store, last + 901_000));
+      assert.equal((await stateOf(store))[key(T1, "15m")]?.reason, "recorder_stale");
+      assert.equal(await store.get(key(T1, "15m")), null, "no 15m snapshot written");
+      assert.notEqual((await stateOf(store))[key(T1, "1h")]?.reason, "recorder_stale", "the 1h interval tolerates 3 600 000 ms");
+      assert.ok(stale.warnings.some((w) => w.includes("recorder_stale")));
+      const fresh = await world([rwaRow(T1)]);
+      const lastFresh = await recordSeries(fresh, [T1], START, END);
+      await run(fresh, lastFresh + 900_000);
+      assert.notEqual((await stateOf(fresh))[key(T1, "15m")]?.reason, "recorder_stale");
+      assert.ok(await fresh.get(key(T1, "15m")));
+    });
+
+    it("a recorder-stale series leaves the previous snapshot to age out through its own expiresAt", async () => {
+      const store = await world([rwaRow(T1)]);
+      const last = await recordSeries(store, [T1], START, END);
+      await run(store, last + 20_000);
+      const before = (await readUnderlyingFeatures(store, T1, "15m", last + 20_000))!;
+      await quietly(() => run(store, last + 2 * 3_600_000));
+      const after = (await readUnderlyingFeatures(store, T1, "15m", last + 2 * 3_600_000))!;
+      assert.equal(after.snapshotId, before.snapshotId);
+      assert.equal(after.staleness, "stale");
+    });
+
+    it("does not read the closed record of another endpoint", async () => {
+      const store = await world([rwaRow(T1)]);
+      const last = await recordSeries(store, [T1], START, END);
+      // The open state now says "price": the stored "tokens" bars are a different series and must not be used.
+      const open = (await store.get<{ tokens: Record<string, { endpoint: string }> }>(REFERENCE_BARS_OPEN_KEY))!.data;
+      open.tokens[T1]!.endpoint = "price";
+      await store.put(REFERENCE_BARS_OPEN_KEY, open, TTL);
+      await run(store, last + 20_000);
+      const read = (await readUnderlyingFeatures(store, T1, "15m", last + 20_000))!;
+      assert.equal(read.identity.endpoint, "price");
+      assert.equal(read.coverage.availableBars, 0);
+    });
+  });
+
+  describe("routes", () => {
+    async function served(): Promise<{ app: ReturnType<typeof createServer>; store: MemoryStore; now: number }> {
+      const store = await world([rwaRow(T1), rwaRow(T2)]);
+      const last = await recordSeries(store, [T1], Date.UTC(2026, 9, 7, 6, 0, 0), Date.UTC(2026, 9, 7, 16, 0, 0));
+      const now = last + 20_000;
+      await run(store, now);
+      return { app: createServer({ scheduler: createScheduler(store), store }), store, now };
+    }
+    interface BatchEntry { data: { version: string; staleness: string; lineage: { scope: string } } | null; error?: { code: string; reason?: string }; meta?: { version: string; producer: { state: string } } }
+    interface Batch { data: Record<string, BatchEntry>; meta: { version: string; interval: string; count: number } }
+
+    it("GET /tokens lists the selection with a producer state per series", async () => {
+      const { app } = await served();
+      const response = await app.request("/trading/underlying-features/v1/tokens");
+      assert.equal(response.status, 200);
+      const body = await response.json() as { data: { tokens: Array<{ tokenAddress: string }>; intervals: string[]; maxTokens: number; series: Array<{ tokenAddress: string; interval: string; producer: { state: string } }> }; meta: { version: string; staleness: string } };
+      assert.deepEqual(body.data.tokens.map((t) => t.tokenAddress), [T1, T2]);
+      assert.equal(body.data.maxTokens, 64);
+      assert.equal(body.data.series.length, 4);
+      assert.equal(body.meta.version, "underlying-features-v1");
+      assert.equal(body.meta.staleness, "fresh");
+    });
+
+    it("GET /tokens answers data null and staleness dead before the first cycle", async () => {
+      const store = new MemoryStore();
+      const response = await createServer({ scheduler: createScheduler(store), store }).request("/trading/underlying-features/v1/tokens");
+      const body = await response.json() as { data: unknown; meta: { staleness: string } };
+      assert.equal(body.data, null);
+      assert.equal(body.meta.staleness, "dead");
+    });
+
+    it("GET batch returns the record for a published series and the closed error codes for the rest", async () => {
+      const { app } = await served();
+      const outsider = addr(0x999);
+      const response = await app.request(`/trading/underlying-features/v1?tokens=${T1},${T2},${outsider}&interval=15m`);
+      assert.equal(response.status, 200);
+      const body = await response.json() as Batch;
+      assert.equal(body.meta.count, 3);
+      assert.equal(body.meta.interval, "15m");
+      assert.equal(body.data[T1]?.data?.version, "underlying-features-v1");
+      assert.equal(body.data[T1]?.data?.lineage.scope, "underlying");
+      assert.equal(body.data[T1]?.meta?.version, "underlying-features-v1");
+      assert.equal(body.data[T2]?.data, null);
+      assert.equal(body.data[T2]?.error?.code, "features_unavailable", "recorder_stale is an unavailable producer");
+      assert.equal(body.data[T2]?.error?.reason, "recorder_stale");
+      assert.equal(body.data[outsider]?.data, null);
+      assert.equal(body.data[outsider]?.error?.code, "outside_feature_watchlist");
+    });
+
+    it("a series the job has not attempted yet is features_pending", async () => {
+      const store = await world([rwaRow(T1)]);
+      await store.put(UNDERLYING_FEATURE_INDEX_KEY, { tokens: [{ tokenAddress: T1, usEquity: true }], intervals: ["15m", "1h"], maxTokens: 64 }, TTL);
+      const body = await (await createServer({ scheduler: createScheduler(store), store }).request(`/trading/underlying-features/v1?tokens=${T1}&interval=1h`)).json() as Batch;
+      assert.equal(body.data[T1]?.error?.code, "features_pending");
+    });
+
+    it("rejects 11 tokens, a bad address, another interval, a missing interval and any other query key with 400 invalid_request", async () => {
+      const { app } = await served();
+      const eleven = Array.from({ length: 11 }, (_, i) => addr(0x800 + i)).join(",");
+      for (const query of [`tokens=${eleven}&interval=15m`, `tokens=0x123&interval=15m`, `tokens=${T1}&interval=5m`, `tokens=${T1}`, `tokens=${T1}&interval=15m&extra=1`, `interval=15m`, `tokens=&interval=15m`]) {
+        const response = await app.request(`/trading/underlying-features/v1?${query}`);
+        assert.equal(response.status, 400, query);
+        assert.equal(((await response.json()) as { error: { code: string } }).error.code, "invalid_request", query);
+      }
+    });
+
+    it("a request never starts producer or upstream work", async () => {
+      const { app, store } = await served();
+      const puts: string[] = [];
+      const original = store.put.bind(store);
+      store.put = async (k, payload, opts) => { puts.push(k); await original(k, payload, opts); };
+      const realFetch = globalThis.fetch;
+      let calls = 0;
+      globalThis.fetch = (() => { calls += 1; throw new Error("upstream call"); }) as typeof fetch;
+      try {
+        await app.request(`/trading/underlying-features/v1?tokens=${T1},${T2}&interval=15m`);
+        await app.request("/trading/underlying-features/v1/tokens");
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+      assert.equal(calls, 0);
+      assert.deepEqual(puts, []);
+    });
+
+    it("leaves the pool routes untouched: the pool index does not list these tokens", async () => {
+      const { app } = await served();
+      const pools = await (await app.request("/trading/features/v2/pools")).json() as { data: { pools: Array<{ tokenAddress?: string }> } | null };
+      assert.ok(pools.data !== null);
+      assert.ok(!pools.data.pools.some((p) => p.tokenAddress === T1));
+      assert.ok(pools.data.pools.some((p) => p.tokenAddress === POOLED));
+    });
+  });
+
+  it("is registered beside the pool job", () => {
+    const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    assert.match(source, /scheduler\.register\(tradingFeaturesJob\(store\)\);[\s\S]*scheduler\.register\(tradingUnderlyingFeaturesJob\(store\)\);/u);
+    const job = tradingUnderlyingFeaturesJob(new MemoryStore());
+    assert.deepEqual([job.name, job.intervalMs, job.jitterMs, job.timeoutMs], ["trading-underlying-features", 60_000, 2_000, 30_000]);
   });
 });

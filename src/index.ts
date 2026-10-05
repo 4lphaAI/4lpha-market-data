@@ -16,6 +16,7 @@ import { majorsPricesJob } from "./jobs/majorsPrices.js";
 import { memeBoardJob } from "./jobs/memeBoard.js";
 import { pancakePoolsJob } from "./jobs/pancakePools.js";
 import { tradingFeaturesJob } from "./jobs/tradingFeatures.js";
+import { tradingUnderlyingFeaturesJob } from "./jobs/tradingUnderlyingFeatures.js";
 import {
   venusCoreHotJob,
   venusCoreMarketsJob,
@@ -90,6 +91,8 @@ scheduler.register(stockVenuesJob(store));
 scheduler.register(spreadHistoryJob(store));
 scheduler.register(pancakePoolsJob(store));
 scheduler.register(tradingFeaturesJob(store));
+// Indicators over the recorded underlying reference price of the bStocks that have no pool series.
+scheduler.register(tradingUnderlyingFeaturesJob(store));
 // USD prices for the majors every wallet holds; the lanes never carry them.
 scheduler.register(majorsPricesJob(store));
 // Venus Core v2: independent catalog, risk, hot-risk and reward producers.
