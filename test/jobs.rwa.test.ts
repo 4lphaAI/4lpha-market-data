@@ -510,6 +510,24 @@ describe("per-address share ratio, decimals and reference basis (D1, R3.8, R5.9)
     assert.ok(source.includes("runBinanceRwa(store, signal, { readShareFacts: readShareFactsOnChain })"));
   });
 
+  it("a per-address row with no /rwa/price answer has null prices: the underlying-market reference is never a fallback", async () => {
+    const withoutCohrb = fakeFetch((call) => {
+      if (call.url.includes("/rwa/tokens")) return ok([NVDAB_ROW]);
+      if (call.url.includes("/rwa/price")) return ok(PER_ADDRESS.filter((a) => a !== COHRB).map((a) => ({ tokenContractAddress: a, platformId: "bstock", ...PRICE[a] })));
+      if (call.url.includes("/rwa/underlying-market")) {
+        const address = PER_ADDRESS.find((a) => call.url.includes(a));
+        return ok({ tokenContractAddress: address, platformId: "bstock", statusInfo: { openState: true, marketStatus: null, reasonCode: "TRADING" },
+          marketData: { referencePrice: "999999", marketCap: "1" } });
+      }
+      return jsonResponse({ code: 500, msg: "unexpected", data: null }, 500);
+    });
+    const row = (await rowsOf({ fetchFn: withoutCohrb.fetch, readShareFacts: fullReader() })).get(COHRB)!;
+    assert.equal(row["referencePriceUsd"], null);
+    assert.equal(row["tokenPriceUsd"], null);
+    assert.equal(row["navPremiumBps"], null);
+    assert.equal(row["openState"], true, "the session fields still come from underlying-market");
+  });
+
   it("listed rows are byte-identical with and without the chain reader", async () => {
     const withReader = await rowsOf({ fetchFn: upstream().fetch, readShareFacts: fullReader() });
     const without = await rowsOf({ fetchFn: upstream().fetch });

@@ -476,12 +476,19 @@ describe("reference-price recorder inside the binance-rwa job (R3.2, R5.3)", () 
 
   it("a chain read that never resolves still records an observation and writes the open state in the same cycle", async () => {
     setCredentials();
-    const store = new MemoryStore();
+    clock.t = T0 + 20_000;
+    const store = new MemoryStore(() => clock.t);
     const never: ShareFactsReader = () => new Promise(() => {});
-    await runBinanceRwa(store, new AbortController().signal, { fetchFn: upstream().fetch, readShareFacts: never, now: () => T0 + 20_000 });
+    await runBinanceRwa(store, new AbortController().signal, { fetchFn: upstream().fetch, now: () => T0 + 20_000 });
+    // The next cycle is a 15m boundary, and its chain read hangs for the whole 2.5 s budget: the recorder has its own
+    // budget, so it still closes both bars and writes the open state.
+    clock.t = T0 + 15 * MIN + 20_000;
+    await runBinanceRwa(store, new AbortController().signal, { fetchFn: upstream().fetch, readShareFacts: never, now: () => T0 + 15 * MIN + 20_000 });
     const open = await openOf(store);
-    assert.equal(open.tokens[NVDAB]?.lastObservedAt, T0 + 20_000);
+    assert.equal(open.tokens[NVDAB]?.lastObservedAt, T0 + 15 * MIN + 20_000);
     assert.equal(open.tokens[PYPLB]?.anchor, 53.11, "the per-address observation does not depend on the chain ratio");
+    assert.equal((await closedOf(store, NVDAB))?.["15m"].length, 1, "the close was not deferred by the chain read's deadline");
+    assert.equal((await closedOf(store, PYPLB))?.["15m"].length, 1);
   });
 
   it("logs one boundary line on a 15m boundary cycle", async () => {

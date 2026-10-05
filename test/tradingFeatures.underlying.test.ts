@@ -1,26 +1,32 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { describe, it } from "node:test";
 import { createScheduler } from "../src/core/scheduler.js";
+import { MemoryStore } from "../src/core/store.js";
 import { createServer } from "../src/server.js";
-import { FEATURE_INDEX_KEY_V2, UNDERLYING_FEATURE_INDEX_KEY, UNDERLYING_FEATURE_STATE_KEY, type FeatureAttempt, type UnderlyingFeatureIndex } from "../src/query/tradingFeatures.js";
 import { MAX_UNDERLYING_TOKENS, runTradingUnderlyingFeatures, selectUnderlyingTokens, tradingUnderlyingFeaturesJob } from "../src/jobs/tradingUnderlyingFeatures.js";
 import { recordReferenceBars, REFERENCE_BARS_OPEN_KEY, type ReferenceObservation } from "../src/jobs/rwaReferenceBars.js";
-import { RWA_UNIVERSE_KEY } from "../src/universe.js";
-import { describe, it } from "node:test";
-import { MemoryStore } from "../src/core/store.js";
+import type { PoolOhlcvResult } from "../src/query/poolOhlcv.js";
 import {
+  FEATURE_INDEX_KEY_V2,
+  FEATURE_VERSION_V2,
+  UNDERLYING_FEATURE_INDEX_KEY,
+  UNDERLYING_FEATURE_STATE_KEY,
   UNDERLYING_FEATURE_VERSION,
   calculateFeatures,
   calculateUnderlyingFeatures,
+  poolFeatureInput,
   readUnderlyingFeatures,
   underlyingFeatureKey,
-  FEATURE_VERSION_V2,
+  type FeatureAttempt,
   type Metric,
   type ReferenceSession,
   type UnderlyingBar,
+  type UnderlyingFeatureIndex,
   type UnderlyingFeatureSnapshot,
   type UnderlyingInterval,
 } from "../src/query/tradingFeatures.js";
+import { RWA_UNIVERSE_KEY } from "../src/universe.js";
 
 const TOKEN = "0x00000000000000000000000000000000000000a1";
 // Wednesday 2026-10-07 16:00:20 UTC = 12:00 ET, regular session (EDT, UTC-4).
@@ -162,6 +168,19 @@ describe("underlying features: the shared calculator over recorded bars", () => 
       candles: bars.map((x) => ({ timestamp: x.t, open: x.o, high: x.h, low: x.l, close: x.c, volume: null })), conflictingTimestamps: [] }, NOW, FEATURE_VERSION_V2);
     assert.notEqual(calc(bars).snapshotId, pool.snapshotId);
     assert.notEqual(calc(bars).seriesId, pool.seriesId);
+  });
+
+  it("a pool input carries no changedBuckets key, not even an empty one, and keeps its source semantics", () => {
+    const chart = { poolAddress: TOKEN, base: { address: TOKEN }, quote: { address: "0x55d398326f99059ff775485246999027b3197955" }, priceCurrency: "usd",
+      volumeCurrency: "usd", volumeUnavailableReason: null, source: "sintral", asOf: OBSERVED, candles: [], quality: undefined } as unknown as PoolOhlcvResult;
+    assert.equal(Object.hasOwn(poolFeatureInput(chart, "15m"), "changedBuckets"), false);
+    // A changedBuckets list on a non-binance-rwa input changes nothing about the floor it applies: only binance-rwa reads it.
+    const bars = series({ changed: () => false });
+    const poolLike = calculateFeatures({ chainId: 56, poolAddress: TOKEN, baseAddress: TOKEN, quoteAddress: "0x55d398326f99059ff775485246999027b3197955",
+      priceCurrency: "usd", volumeCurrency: "usd", volumeUnavailableReason: null, source: "geckoterminal", interval: "15m", observedAt: OBSERVED,
+      candles: bars.map((x) => ({ timestamp: x.t, open: x.o, high: x.h, low: x.l, close: x.c, volume: 1 })), conflictingTimestamps: [], changedBuckets: [] }, NOW, FEATURE_VERSION_V2);
+    assert.equal(poolLike.coverage.realBars, 120, "a geckoterminal series counts every bar");
+    assert.equal(Object.hasOwn(poolLike.coverage, "changedBuckets"), false);
   });
 
   it("a series of stored flat bars with no change is entirely too_few_real_bars", () => {
@@ -399,6 +418,18 @@ describe("underlying features job and routes", () => {
     for (const forbidden of ["adapters/", "poolohlcv", "onchainos", "geckoterminal", "dexpaprika", "sintral"]) {
       assert.ok(!imports.includes(forbidden), `imports ${forbidden}`);
     }
+  });
+
+  it("writes only its own key space: no pool feature key, index or state is touched", async () => {
+    const store = await world([rwaRow(T1)]);
+    const poolBefore = JSON.stringify((await store.get(FEATURE_INDEX_KEY_V2))?.data);
+    const puts: string[] = [];
+    const original = store.put.bind(store);
+    store.put = async (k, payload, opts) => { puts.push(k); await original(k, payload, opts); };
+    await quietly(() => run(store, clock.t));
+    assert.ok(puts.length > 0);
+    for (const k of puts) assert.ok(k.startsWith("trading:underlying-features:v1:"), k);
+    assert.equal(JSON.stringify((await store.get(FEATURE_INDEX_KEY_V2))?.data), poolBefore);
   });
 
   it("a second holder inside the lease window attempts nothing", async () => {
