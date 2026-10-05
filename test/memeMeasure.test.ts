@@ -352,6 +352,10 @@ describe("runMemeMeasure", () => {
     assert.equal((await runMemeMeasure(h.store, signal(), h.options)).recorded, true);
     assert.equal(h.calls.length, 8);
     assert.equal((await storedCycle(h.store, NOW + SLOT))?.slot, slotOf(NOW) + 1);
+    // A replica whose clock runs a slot behind does not go back and re-record it (audit F1).
+    h.clock.now = NOW + 4 * MIN;
+    assert.deepEqual(await runMemeMeasure(h.store, signal(), h.options), { recorded: false, reason: "slot_recorded" });
+    assert.equal(h.calls.length, 8);
   });
 
   it("does not record while another replica holds the lease", async () => {
@@ -465,14 +469,19 @@ describe("measurement ring and paging", () => {
       await h.store.put(MEME_BOARD_KEY, [memeStock(10)], TTL);
       assert.equal((await runMemeMeasure(h.store, signal(), h.options)).recorded, true);
     }
-    const now = NOW + 3 * SLOT + 2_000;
+    const now = NOW + 4 * SLOT + 2_000; // slots 0–3 closed, slot 4 in progress
     const first = await readMeasurePage(h.store, NOW, NOW + HOUR, 2, now);
     assert.deepEqual(first.cycles.map((c) => c.slot - slotOf(NOW)), [0, 1]);
     assert.equal(first.next, NOW + 2 * SLOT);
     const second = await readMeasurePage(h.store, first.next!, NOW + HOUR, 2, now);
     assert.deepEqual(second.cycles.map((c) => c.slot - slotOf(NOW)), [3]);
     assert.equal(second.emptySlots, 1);
-    assert.equal(second.next, null, "nothing to page past the current slot");
+    assert.equal(second.next, null, "nothing to page past the last closed slot");
+    // The slot in progress is never paged, recorded or not (audit F3).
+    const live = await readMeasurePage(h.store, NOW + 3 * SLOT, NOW + HOUR, 12, NOW + 3 * SLOT + 2_000);
+    assert.deepEqual(live.cycles, []);
+    assert.equal(live.emptySlots, 0);
+    assert.equal(live.next, null);
   });
 
   it("does not ask for slots older than the retention window", async () => {
@@ -499,7 +508,7 @@ describe("GET /memes/measure", () => {
     const now = Date.now();
     await store.put(MEME_BOARD_KEY, [memeStock(10)], TTL);
     await runMemeMeasure(store, signal(), {
-      now: () => now,
+      now: () => now - SLOT, // the last closed slot: the one in progress is not paged
       holder: "route",
       fetchTopics: async () => topicsLatest(),
       fetchInflow: async () => inflowRows(),
@@ -535,9 +544,15 @@ describe("GET /memes/measure", () => {
 
   it("rejects malformed windows, page sizes and formats", async () => {
     const { request } = await app();
-    for (const query of ["since=abc", "since=2000&until=1000", "limit=0", "limit=49", "limit=1.5", "format=csv"]) {
+    const rejected = [
+      "since=abc", "since=2000&until=1000", "limit=0", "limit=49", "limit=1.5", "format=csv",
+      "since=-5", "since=2026", "until=2026-10-05T00:00:00", "limit=25",
+    ];
+    for (const query of rejected) {
       assert.equal((await request(`/memes/measure?${query}`)).status, 400, query);
     }
-    assert.equal((await request("/memes/measure?since=2026-10-05T00:00:00Z&limit=48")).status, 200);
+    assert.equal((await request("/memes/measure?since=2026-10-05T00:00:00Z&limit=48&format=compact")).status, 200);
+    assert.equal((await request("/memes/measure?since=2026-10-05T07:00:00%2B07:00&limit=24")).status, 200);
+    assert.equal((await request("/memes/measure?since=1791120000000")).status, 200);
   });
 });

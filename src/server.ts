@@ -192,9 +192,16 @@ const STATUS_SNAPSHOT_KEYS = [
   MEME_MEASURE_LATEST_KEY,
 ];
 
-/** `/memes/measure` page size, in five-minute slots: 1h by default, 4h at most. */
+/**
+ * `/memes/measure` page size, in five-minute slots: 1h by default; 4h at most
+ * as stored tuples, 2h expanded (about 3x the bytes per cycle, audit F2).
+ */
 const MEASURE_PAGE_DEFAULT = 12;
 const MEASURE_PAGE_MAX = 48;
+const MEASURE_PAGE_MAX_OBJECTS = 24;
+/** Epoch ms, or an ISO 8601 date-time with an explicit zone: nothing a host locale could reinterpret (audit F4). */
+const MEASURE_EPOCH_MS = /^\d{12,14}$/u;
+const MEASURE_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/u;
 
 /** Fields `/pools/top` will sort by. */
 const POOL_ORDER_FIELDS = [
@@ -1146,7 +1153,7 @@ export function createServer(deps: ServerDeps): Hono {
     const parseTime = (name: string): number | undefined | null => {
       const raw = c.req.query(name)?.trim();
       if (raw === undefined || raw === "") return undefined;
-      const value = /^\d+$/u.test(raw) ? Number(raw) : Date.parse(raw);
+      const value = MEASURE_EPOCH_MS.test(raw) ? Number(raw) : MEASURE_ISO.test(raw) ? Date.parse(raw) : Number.NaN;
       return Number.isFinite(value) && value > 0 ? value : null;
     };
     const untilParam = parseTime("until");
@@ -1155,7 +1162,7 @@ export function createServer(deps: ServerDeps): Hono {
     const limit = limitRaw === undefined ? MEASURE_PAGE_DEFAULT : Number(limitRaw);
     const format = c.req.query("format") ?? "objects";
     if (untilParam === null || sinceParam === null) {
-      return c.json({ error: { code: "invalid_query", message: "since/until must be epoch ms or an ISO date" } }, 400);
+      return c.json({ error: { code: "invalid_query", message: "since/until must be epoch ms or an ISO date-time with a zone" } }, 400);
     }
     if (!Number.isInteger(limit) || limit < 1 || limit > MEASURE_PAGE_MAX) {
       return c.json({ error: { code: "invalid_query", message: `limit must be an integer 1..${MEASURE_PAGE_MAX} (slots)` } }, 400);
@@ -1163,9 +1170,13 @@ export function createServer(deps: ServerDeps): Hono {
     if (format !== "objects" && format !== "compact") {
       return c.json({ error: { code: "invalid_query", message: "format must be objects or compact" } }, 400);
     }
+    if (format === "objects" && limit > MEASURE_PAGE_MAX_OBJECTS) {
+      return c.json({ error: { code: "invalid_query", message: `limit above ${MEASURE_PAGE_MAX_OBJECTS} slots needs format=compact` } }, 400);
+    }
     const until = untilParam ?? now;
-    // Without `since`, the page is the most recent `limit` slots up to `until`.
-    const since = sinceParam ?? (Math.floor((until - 1) / MEME_MEASURE_SLOT_MS) - limit + 1) * MEME_MEASURE_SLOT_MS;
+    // Without `since`, the page is the most recent `limit` closed slots up to `until`.
+    const lastClosed = Math.min(Math.floor((until - 1) / MEME_MEASURE_SLOT_MS), Math.floor(now / MEME_MEASURE_SLOT_MS) - 1);
+    const since = sinceParam ?? (lastClosed - limit + 1) * MEME_MEASURE_SLOT_MS;
     if (since >= until) {
       return c.json({ error: { code: "invalid_query", message: "since must be before until" } }, 400);
     }
