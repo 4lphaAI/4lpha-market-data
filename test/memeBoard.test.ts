@@ -10,6 +10,7 @@ import {
   type TokenActivity,
 } from "../src/adapters/onchainos.js";
 import type { LaunchpadState } from "../src/query/launchpadState.js";
+import type { FlapDividend } from "../src/adapters/flap.js";
 import { buildShortlist, parseShortlistQuery } from "../src/query/memeQuery.js";
 import { groupMemesByStock, loadStockInfo, parseMemeStockQuery, type StockInfo } from "../src/query/memeStocks.js";
 import { QUOTE_STOCKS_KEY } from "../src/jobs/binanceRwa.js";
@@ -358,6 +359,7 @@ function fakeUpstreams(lists: Partial<Record<MemeRushStage, MemeRushRow[] | Erro
     fetchInflow: async () => [] as SmartInflowRow[],
     readStates: async () => new Map<string, LaunchpadState>(),
     readIssuer: async () => new Map<string, QuoteInfo>(),
+    readDividends: async () => new Map<string, FlapDividend>(),
   };
 }
 
@@ -396,6 +398,7 @@ describe("runMemeBoard", () => {
     fetchInflow: async () => [] as SmartInflowRow[],
       readStates: async () => new Map<string, LaunchpadState>(),
       readIssuer: async () => new Map<string, QuoteInfo>(),
+    readDividends: async () => new Map<string, FlapDividend>(),
     };
     const run = (t: number, listed: number[], txs1h: Record<number, number>) =>
       runMemeBoard(store, AbortSignal.timeout(5_000), {
@@ -644,19 +647,21 @@ describe("OKX hot discovery", () => {
       marketCapUsd: 20_000_000, holders: 9_000, firstTradeAt: NOW - 500 * 24 * HOUR, top10Pct: 30, devPct: 0, insiderPct: 0, bundlerPct: 0,
     };
     const unknownToLaunchpad: HotToken = { ...hot, address: addr(10), symbol: "STRAY" };
-    const asked: string[] = [];
+    const asked: string[][] = [];
     await runMemeBoard(store, AbortSignal.timeout(5_000), {
       ...fakeUpstreams({ finalizing: [rush()] }),
       fetchHot: async (launchpad, timeframe) => (launchpad === "fourmeme" && timeframe === "1h" ? [hot, unknownToLaunchpad] : []),
       readStates: async (items) => {
-        asked.push(...items.map((item) => item.address));
+        asked.push(items.map((item) => item.address));
         return new Map([[addr(9), { migrated: true, progress: 100, quote: BNB, launchedAt: null }]]);
       },
       fetchActivity: async () => new Map([[addr(1), activity()], [addr(9), activity({ address: addr(9), txs5m: 197, txs1h: 1119, volume1hUsd: 6_748_382 })]]),
       fetchSignals: async () => [],
       now: () => NOW,
     });
-    assert.deepEqual(asked.sort(), [addr(9), addr(10)]);
+    assert.deepEqual(asked[0]?.sort(), [addr(9), addr(10)]);
+    // The venue pass reuses the seeding read: only the Meme Rush token is read again.
+    assert.deepEqual(asked[1], [addr(1)]);
     const rows = await board(store);
     const quq = rows.find((r) => r.address === addr(9));
     assert.equal(quq?.stage, "graduated");
@@ -965,5 +970,39 @@ describe("5m flow and smart-money inflow on the board (handoff 2026-10-05 items 
     assert.equal(old.flow5m, null);
     assert.equal(old.smartInflow5m, null);
     assert.equal(old.smartInflow1h, null);
+  });
+});
+
+describe("venue, tax and dividend on the board (handoff 2026-10-05 item 4)", () => {
+  it("carries the launchpad's venue, tax, pool and dividend onto board and shortlist rows", async () => {
+    const store = new MemoryStore(() => NOW);
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...fakeUpstreams({ finalizing: [rush()] }),
+      readStates: async (items) =>
+        new Map(items.map((item) => [item.address, {
+          migrated: false, progress: 40, quote: BNB, launchedAt: null, venue: "flap-bonding" as const,
+          pool: null, tax: { buyBps: 300, sellBps: 200 }, nativeToQuoteSwapEnabled: false,
+        }])),
+      readDividends: async () => new Map([[addr(1), { token: NVDAB, bps: 10_000 }]]),
+      fetchActivity: async () => new Map([[addr(1), activity({ txs5m: 10 })]]),
+      fetchSignals: async () => [],
+      now: () => NOW,
+    });
+    const row = (await board(store))[0]!;
+    assert.equal(row.venue, "flap-bonding");
+    assert.deepEqual(row.tax, { buyBps: 300, sellBps: 200 });
+    assert.equal(row.pool, null);
+    assert.equal(row.nativeToQuoteSwapEnabled, false);
+    assert.deepEqual(row.dividend, { token: NVDAB, bps: 10_000 });
+    assert.equal(row.venueCheckedAt, NOW);
+    const short = buildShortlist([row], parseShortlistQuery(() => undefined), NOW).rows[0]!;
+    assert.equal(short.venue, "flap-bonding");
+    assert.deepEqual(short.tax, { buyBps: 300, sellBps: 200 });
+    assert.deepEqual(short.dividend, { token: NVDAB, bps: 10_000 });
+    const legacy = { ...row } as Partial<MemeBoardRow>;
+    delete legacy.venue; delete legacy.tax; delete legacy.dividend; delete legacy.venueCheckedAt;
+    const old = buildShortlist([legacy as MemeBoardRow], parseShortlistQuery(() => undefined), NOW).rows[0]!;
+    assert.equal(old.venue, null);
+    assert.equal(old.tax, null);
   });
 });

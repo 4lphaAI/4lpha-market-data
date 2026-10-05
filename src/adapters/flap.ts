@@ -272,6 +272,8 @@ export interface FlapMarketState {
   pool: string;
   buyTaxBps: number;
   sellTaxBps: number;
+  /** Whether the Portal swaps BNB into a non-native quote for the buyer; absent on states built before it was read. */
+  nativeToQuoteSwapEnabled?: boolean;
 }
 
 /** True for a token the Portal will still trade. */
@@ -325,6 +327,7 @@ export async function readFlapMarketStates(
         pool: value.pool.toLowerCase(),
         buyTaxBps: Number(value.buyTaxRate),
         sellTaxBps: Number(value.sellTaxRate),
+        nativeToQuoteSwapEnabled: value.nativeToQuoteSwapEnabled,
       });
     }
     return states;
@@ -334,5 +337,105 @@ export async function readFlapMarketStates(
     return await withBscClient(read, signal === undefined ? {} : { signal });
   } catch (error) {
     throw new AdapterError(SOURCE, `lens read failed: ${sanitizeMessage(error)}`);
+  }
+}
+
+/** Flap TaxTokenHelper on BNB mainnet (docs: "Inspect A Tax Token"). */
+export const FLAP_TAX_TOKEN_HELPER = "0x53841c73217735F37BC1775538b03b23feFD8346" as const;
+
+const taxTokenHelperAbi = [
+  {
+    name: "getTaxTokenInfoV2",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "taxToken", type: "address" }],
+    outputs: [
+      {
+        type: "tuple",
+        components: [
+          { name: "marketBps", type: "uint16" },
+          { name: "deflationBps", type: "uint16" },
+          { name: "lpBps", type: "uint16" },
+          { name: "dividendBps", type: "uint16" },
+          { name: "buyTaxRate", type: "uint16" },
+          { name: "sellTaxRate", type: "uint16" },
+          { name: "burntTokenAmount", type: "uint256" },
+          { name: "totalQuoteSentToDividend", type: "uint256" },
+          { name: "totalQuoteAddedToLiquidity", type: "uint256" },
+          { name: "totalTokenAddedToLiquidity", type: "uint256" },
+          { name: "totalQuoteSentToMarketing", type: "uint256" },
+          { name: "dividendToken", type: "address" },
+          { name: "quoteToken", type: "address" },
+          { name: "minimumShareBalance", type: "uint256" },
+          {
+            name: "vaultInfo",
+            type: "tuple",
+            components: [
+              { name: "addr", type: "address" },
+              { name: "factory", type: "address" },
+              { name: "riskLevel", type: "uint8" },
+              { name: "isOfficialVault", type: "bool" },
+              { name: "isVault", type: "bool" },
+              { name: "isAIConsumer", type: "bool" },
+            ],
+          },
+        ],
+      },
+    ],
+  },
+] as const satisfies Abi;
+
+/**
+ * Where a Flap tax token pays its holder dividend. Fixed at launch, so a caller
+ * may cache it for the token's life. `bps` is the share of tax revenue routed to
+ * the dividend contract; `0` means no automatic payout (the helper also answers
+ * zeros for a token that carries no tax). `token` is the reward token, lowercased;
+ * the zero address means native BNB.
+ */
+export interface FlapDividend {
+  token: string;
+  bps: number;
+}
+
+/**
+ * Reads `getTaxTokenInfoV2` for many tokens at once (one multicall batch). A
+ * revert omits the token; a transport failure throws, so the caller can tell
+ * "unread" from "no dividend".
+ */
+export async function readFlapDividends(
+  addresses: readonly string[],
+  signal?: AbortSignal | undefined,
+): Promise<Map<string, FlapDividend>> {
+  if (addresses.length === 0) return new Map();
+  const read = async (client: BscClient): Promise<Map<string, FlapDividend>> => {
+    const settled = await Promise.allSettled(
+      addresses.map((address) =>
+        client.readContract({
+          address: FLAP_TAX_TOKEN_HELPER,
+          abi: taxTokenHelperAbi,
+          functionName: "getTaxTokenInfoV2",
+          args: [address as `0x${string}`],
+        }),
+      ),
+    );
+    const out = new Map<string, FlapDividend>();
+    for (const [index, result] of settled.entries()) {
+      const address = addresses[index];
+      if (address === undefined) continue;
+      if (result.status === "rejected") {
+        if (isContractLevelFailure(result.reason)) continue;
+        throw result.reason;
+      }
+      out.set(address.toLowerCase(), {
+        token: result.value.dividendToken.toLowerCase(),
+        bps: Number(result.value.dividendBps),
+      });
+    }
+    return out;
+  };
+  try {
+    return await withBscClient(read, signal === undefined ? {} : { signal });
+  } catch (error) {
+    throw new AdapterError(SOURCE, `tax helper read failed: ${sanitizeMessage(error)}`);
   }
 }

@@ -16,6 +16,8 @@
 import type { MemeLaunchpad, MemeRushRow } from "../adapters/binanceWeb3.js";
 import type { SignalWalletType, SmartSignal, TokenActivity } from "../adapters/onchainos.js";
 import type { QuoteInfo, QuoteKind } from "./quoteKind.js";
+import type { FlapDividend } from "../adapters/flap.js";
+import type { LaunchpadVenue } from "./launchpadState.js";
 
 export type MemeStage = "new" | "bonding" | "graduating" | "graduated";
 export type MemeStatus = "runner" | "active" | "quiet" | "fading" | "dead" | "unknown";
@@ -194,6 +196,24 @@ export interface SmartInflow {
   rankedAt: number;
 }
 
+/**
+ * Where a buy executes and what it costs on top of the price, from the
+ * launchpads on chain (see `jobs/memeVenues.ts` for the refresh rules).
+ * Every field `null` = not read yet, never a default.
+ */
+export interface MemeVenueInfo {
+  venue: LaunchpadVenue | null;
+  /** Token tax per direction in bps; Flap only (the Four.Meme helper does not report one). */
+  tax: { buyBps: number; sellBps: number } | null;
+  /** Graduated PancakeSwap V2 pair; Flap only. */
+  pool: string | null;
+  nativeToQuoteSwapEnabled: boolean | null;
+  /** Flap tax-token dividend: reward token (zero address = BNB) and share of tax routed to it; `bps: 0` = no automatic payout. */
+  dividend: FlapDividend | null;
+  /** When venue, tax and pool were last read. */
+  checkedAt: number;
+}
+
 /** A trade split from OKX's hot ranking for one window. */
 export interface MemeFlow {
   buys: number | null;
@@ -255,6 +275,14 @@ export interface MemeBoardRow {
   /** When `status` first became `dead`; cleared when it trades again. */
   deadSince: number | null;
   classifiedAt: number;
+  /** `flap-bonding` | `fourmeme-bonding` | `pancake-v2`; `null` until read, or when the launchpad will not trade it. */
+  venue: MemeVenueInfo["venue"];
+  tax: MemeVenueInfo["tax"];
+  pool: MemeVenueInfo["pool"];
+  nativeToQuoteSwapEnabled: MemeVenueInfo["nativeToQuoteSwapEnabled"];
+  dividend: MemeVenueInfo["dividend"];
+  /** When venue/tax/pool were read; `null` when never. */
+  venueCheckedAt: number | null;
 }
 
 export interface ClassifyInput {
@@ -268,6 +296,7 @@ export interface ClassifyInput {
   flow5m?: MemeBoardRow["flow5m"] | undefined;
   inflow5m?: SmartInflow | null | undefined;
   inflow1h?: SmartInflow | null | undefined;
+  venue?: MemeVenueInfo | null | undefined;
   lastListedAt: number;
   firstSeenAt: number;
   previousDeadSince: number | null;
@@ -444,6 +473,12 @@ export function classifyMeme(input: ClassifyInput): MemeBoardRow {
     firstSeenAt: input.firstSeenAt,
     deadSince: status === "dead" ? (input.previousDeadSince ?? now) : null,
     classifiedAt: now,
+    venue: input.venue?.venue ?? null,
+    tax: input.venue?.tax ?? null,
+    pool: input.venue?.pool ?? null,
+    nativeToQuoteSwapEnabled: input.venue?.nativeToQuoteSwapEnabled ?? null,
+    dividend: input.venue?.dividend ?? null,
+    venueCheckedAt: input.venue?.checkedAt ?? null,
   };
 }
 

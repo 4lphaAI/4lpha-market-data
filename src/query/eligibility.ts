@@ -586,6 +586,76 @@ export function decideEligibility(
   return { ...base, eligible: false, reason: "not_listed" };
 }
 
+/**
+ * Venue for a token admitted by the allowlist or the Binance Alpha list, when
+ * it came from a launchpad (handoff 2026-10-05 item 4).
+ *
+ * Enrichment only: the verdict was decided before this runs and nothing here
+ * can change `eligible`, `reason` or `source`. It is the same chain read and the
+ * same venue rule as an unlisted launchpad token, with its own bounds so a list
+ * hit keeps answering at list speed when the chain does not: a deadline of
+ * {@link LIST_VENUE_DEADLINE_MS}, and a cache — short for a launchpad token,
+ * because graduation moves the venue, long for "not a launchpad token", because
+ * a launchpad never adopts an existing contract. A failed or late read answers
+ * `venue: null` and is not cached.
+ */
+export const LIST_VENUE_DEADLINE_MS = 1_500;
+export const LIST_VENUE_TTL = {
+  launchpad: { freshForMs: 30_000, deadAfterMs: 30_000 },
+  none: { freshForMs: 6 * 3_600_000, deadAfterMs: 6 * 3_600_000 },
+} as const;
+
+export function listVenueKey(address: string): string {
+  return `eligibility:list-venue:${address.toLowerCase()}`;
+}
+
+type ListVenue = Pick<EligibilityResult, "venue" | "fourmeme" | "flap">;
+
+/** Exported for tests: the venue facts one chain read gives a listed token, or `null` when it is not a launchpad token. */
+export function listVenueFrom(outcomes: ChainOutcomes): ListVenue | null | "unavailable" {
+  const { fourmeme, flap } = outcomes;
+  if (fourmeme.kind === "answered" && fourmeme.state.version === SUPPORTED_TOKEN_MANAGER_VERSION) {
+    return { venue: fourmeme.state.liquidityAdded ? "pancake-v2" : "fourmeme-bonding", fourmeme: fourmeme.state, flap: null };
+  }
+  if (flap.kind === "answered" && isFlapTradable(flap.state.status)) {
+    return { venue: flap.state.status === FLAP_STATUS_DEX ? "pancake-v2" : "flap-bonding", fourmeme: null, flap: flap.state };
+  }
+  if (fourmeme.kind === "unavailable" || flap.kind === "unavailable") return "unavailable";
+  return null;
+}
+
+async function withListVenue(
+  store: SnapshotStore,
+  result: EligibilityResult,
+  read: (address: string, signal: AbortSignal | undefined) => Promise<ChainOutcomes>,
+  signal: AbortSignal | undefined,
+): Promise<EligibilityResult> {
+  try {
+    const cached = await store.get<{ venue: ListVenue | null }>(listVenueKey(result.address));
+    if (cached !== null && cached.staleness === "fresh" && typeof cached.data === "object" && cached.data !== null) {
+      return cached.data.venue === null ? result : { ...result, ...cached.data.venue };
+    }
+    const deadline = AbortSignal.timeout(LIST_VENUE_DEADLINE_MS);
+    const bounded = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+    const outcomes = await Promise.race([
+      read(result.address, bounded),
+      new Promise<never>((_, reject) => {
+        bounded.addEventListener("abort", () => reject(new Error("list venue read timed out")), { once: true });
+      }),
+    ]);
+    const venue = listVenueFrom(outcomes);
+    if (venue === "unavailable") return result;
+    await store.put(listVenueKey(result.address), { venue }, {
+      source: SOURCE,
+      ...(venue === null ? LIST_VENUE_TTL.none : LIST_VENUE_TTL.launchpad),
+    });
+    return venue === null ? result : { ...result, ...venue };
+  } catch (error) {
+    console.warn(`[${SOURCE}] list venue read failed: ${sanitizeMessage(error)}`);
+    return result;
+  }
+}
+
 export interface IsEligibleParams {
   address: string;
   signal?: AbortSignal | undefined;
@@ -637,8 +707,10 @@ export async function isEligible(
 
   // Checked before the cache: a snapshot hit is a local map lookup, and it must
   // keep answering even while the chain is unreachable.
+  const read = params.readState ?? readChainState;
   if (allowlist !== null && allowlist.has(address)) {
-    return { ...decideEligibility(address, "allowlist", null), checkedAt: now, cached: false };
+    const listed: EligibilityResult = { ...decideEligibility(address, "allowlist", null), checkedAt: now, cached: false };
+    return withListVenue(store, listed, read, params.signal);
   }
 
   // Also before the cache, so a token newly added to the Alpha list is admitted
@@ -647,7 +719,8 @@ export async function isEligible(
   // decided from can be replaced by the next job cycle at any moment.
   const alpha = await readAlphaSet(store);
   if (alpha !== null && alpha.has(address)) {
-    return { ...decideEligibility(address, "binance-alpha", null), checkedAt: now, cached: false };
+    const listed: EligibilityResult = { ...decideEligibility(address, "binance-alpha", null), checkedAt: now, cached: false };
+    return withListVenue(store, listed, read, params.signal);
   }
 
   // A stock that passed the veto and is on no other list. Like Alpha, decided
@@ -664,7 +737,6 @@ export async function isEligible(
     return { ...cached.data, checkedAt: cached.asOf, cached: true };
   }
 
-  const read = params.readState ?? readChainState;
   const outcomes = allowlist === null ? null : await read(address, params.signal);
   const decided = decideEligibility(address, null, outcomes);
   const result: EligibilityResult = { ...decided, checkedAt: Date.now(), cached: false };

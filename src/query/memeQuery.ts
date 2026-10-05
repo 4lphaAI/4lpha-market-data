@@ -411,6 +411,15 @@ export interface MemeShortlistRow {
   /** Binance smart-money net-inflow rank per window; `null` = not ranked or unread, never zero. */
   smartInflow5m: SmartInflow | null;
   smartInflow1h: SmartInflow | null;
+  /** Where a buy executes now, from the launchpad on chain; `null` = not read yet. */
+  venue: MemeBoardRow["venue"];
+  /** Token tax per direction in bps (Flap); `null` = unknown, not zero. */
+  tax: MemeBoardRow["tax"];
+  pool: MemeBoardRow["pool"];
+  nativeToQuoteSwapEnabled: MemeBoardRow["nativeToQuoteSwapEnabled"];
+  /** Flap tax-token dividend; a reward paid in the quote bStock lands in the holder's wallet. */
+  dividend: MemeBoardRow["dividend"];
+  venueCheckedAt: number | null;
 }
 
 export interface Shortlist {
@@ -642,5 +651,11 @@ export function toShortlistRow(
     flow1h: row.flow1h ?? null,
     smartInflow5m: row.smartMoney.inflow5m ?? null,
     smartInflow1h: row.smartMoney.inflow1h ?? null,
+    venue: row.venue ?? null,
+    tax: row.tax ?? null,
+    pool: row.pool ?? null,
+    nativeToQuoteSwapEnabled: row.nativeToQuoteSwapEnabled ?? null,
+    dividend: row.dividend ?? null,
+    venueCheckedAt: row.venueCheckedAt ?? null,
   };
 }

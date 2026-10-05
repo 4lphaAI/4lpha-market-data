@@ -46,6 +46,7 @@ import {
 import { readLaunchpadStates, type LaunchpadState, type LaunchpadStateReader } from "../query/launchpadState.js";
 import { MEME_RULES, classifyMeme, findClones, type MemeBoardRow, type SmartInflow } from "../query/memeClassify.js";
 import { resolveQuotes, type IssuerReader } from "../query/quoteKind.js";
+import { readDividendsOnchain, refreshVenues, type CachedVenue, type DividendReader } from "./memeVenues.js";
 
 export const MEME_BOARD_JOB = "meme-board";
 /** Public board, served by `GET /memes`. */
@@ -111,6 +112,7 @@ export interface RunMemeBoardOptions {
     | undefined;
   fetchInflow?: ((window: InflowWindow, signal: AbortSignal) => Promise<SmartInflowRow[]>) | undefined;
   readStates?: LaunchpadStateReader | undefined;
+  readDividends?: DividendReader | undefined;
   readIssuer?: IssuerReader | undefined;
   now?: (() => number) | undefined;
 }
@@ -130,6 +132,7 @@ export async function runMemeBoard(
     options.fetchHot ?? ((launchpad, timeframe, s) => fetchOnchainosHotTokens({ launchpad, timeframe, signal: s }));
   const fetchInflow = options.fetchInflow ?? ((window, s) => fetchSmartMoneyInflow({ period: window, signal: s }));
   const readStates = options.readStates ?? readLaunchpadStates;
+  const readDividends = options.readDividends ?? readDividendsOnchain;
   const failures: string[] = [];
 
   // 1. Discovery, from two sources that see different tokens. Meme Rush is the
@@ -205,6 +208,26 @@ export async function runMemeBoard(
     .slice(0, MEME_BOARD_CAP);
   const addresses = tracked.map((token) => token.rush.address);
 
+  // 2b. Venue, tax and dividend from the launchpads (cached; see memeVenues.ts).
+  // A failure here leaves every row's venue as last cached, never fails the board.
+  let venues = new Map<string, CachedVenue>();
+  try {
+    const refreshed = await refreshVenues(
+      store,
+      tracked.map((token) => ({
+        address: token.rush.address,
+        launchpad: token.rush.launchpad,
+        status: previousBoard.get(token.rush.address)?.status,
+      })),
+      states,
+      { readStates, readDividends, now, signal },
+    );
+    venues = refreshed.venues;
+    failures.push(...refreshed.failures);
+  } catch (error) {
+    failures.push(`venues: ${sanitizeMessage(error)}`);
+  }
+
   // 3. Liveness. An OKX failure falls back to each row's previous activity
   // rather than turning the whole board `unknown` — `observedAt` still dates it.
   let activity = new Map<string, TokenActivity>();
@@ -279,6 +302,7 @@ export async function runMemeBoard(
       flow5m: flowOf(hot5m.get(token.rush.address)),
       inflow5m: inflow["5m"].get(token.rush.address) ?? null,
       inflow1h: inflow["1h"].get(token.rush.address) ?? null,
+      venue: venues.get(token.rush.address) ?? null,
       lastListedAt: token.lastListedAt,
       firstSeenAt: token.firstSeenAt,
       previousDeadSince: token.deadSince,
