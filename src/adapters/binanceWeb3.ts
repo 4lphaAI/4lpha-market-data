@@ -566,7 +566,7 @@ export function normalizeSocialRush(payload: unknown): SocialTopic[] {
   const seen = new Set<string>();
   for (const raw of list) {
     if (!isRecord(raw)) continue;
-    const topicId = parseStr(raw["topicId"]);
+    const topicId = parseStr(raw["topicId"])?.slice(0, 64) ?? null;
     if (topicId === null || seen.has(topicId)) continue;
     seen.add(topicId);
     const name = isRecord(raw["name"]) ? parseStr(raw["name"]["topicNameEn"]) : null;
@@ -601,10 +601,10 @@ export function normalizeSocialRush(payload: unknown): SocialTopic[] {
       });
     }
     topics.push({
-      topicId: topicId.slice(0, 64),
+      topicId,
       nameEn: name === null ? null : name.slice(0, MAX_TOPIC_NAME_CHARS),
       type: parseStr(raw["type"])?.slice(0, 40) ?? null,
-      tags: asArray(raw["topicTags"]).flatMap((tag) => {
+      tags: asArray(raw["topicTags"]).slice(0, 10).flatMap((tag) => {
         const text = parseStr(tag);
         return text === null ? [] : [text.slice(0, 40)];
       }),
@@ -719,7 +719,7 @@ export function normalizeSmartMoneyInflow(payload: unknown): SmartInflowRow[] {
       holders: parseNum(raw["holders"]),
       top10Pct: parseNum(raw["holdersTop10Percent"]),
       riskLevel: parseNum(raw["tokenRiskLevel"]),
-      riskCodes: asArray(raw["tokenRiskCodes"]).flatMap((code) =>
+      riskCodes: asArray(raw["tokenRiskCodes"]).slice(0, 20).flatMap((code) =>
         typeof code === "string" || typeof code === "number" ? [String(code).slice(0, 40)] : [],
       ),
       aiNarrative: flag === null ? null : flag === 1,

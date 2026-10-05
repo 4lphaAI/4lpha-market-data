@@ -298,9 +298,13 @@ export async function runMemeMeasure(
   const started = now();
   const slot = slotOf(started);
 
-  // Cheap check first: most ticks find this slot already recorded.
+  // Cheap check first: most ticks find this slot already recorded. Monotonic,
+  // not equality: a replica whose clock runs behind must not go back and
+  // re-record a slot another replica has already moved past (audit F1).
   const last = await store.get<MeasureLatest>(MEME_MEASURE_LATEST_KEY);
-  if (last !== null && last.data?.slot === slot) return { recorded: false, reason: "slot_recorded" };
+  if (last !== null && typeof last.data?.slot === "number" && last.data.slot >= slot) {
+    return { recorded: false, reason: "slot_recorded" };
+  }
   if (!await store.acquireSchedulerLease(MEME_MEASURE_LEASE, options.holder ?? HOLDER, MEME_MEASURE_LEASE_TTL_MS)) {
     return { recorded: false, reason: "lease_held" };
   }
@@ -397,6 +401,9 @@ export async function runMemeMeasure(
     board,
   };
   const bytes = Buffer.byteLength(JSON.stringify(cycle));
+  // `put` does not take the signal: a run aborted after this point still
+  // completes both writes. If `latest` were lost, the next tick re-records the
+  // same slot with fresh reads, which is harmless (audit F5).
   // History, not a reading: the record stays readable for the whole retention.
   await store.put(memeMeasureSlotKey(slot), cycle, {
     source: MEME_MEASURE_SOURCE,
@@ -492,7 +499,7 @@ export interface MeasurePage {
 }
 
 /**
- * Reads the cycles whose slot starts in `[since, until)`, at most `maxSlots`
+ * Reads the cycles of the closed slots overlapping `[since, until)`, at most `maxSlots`
  * slots per page. Bounded by slots, not by cycles found, so a page over an empty
  * stretch costs the same as a full one. Anything before the retention window is
  * not asked for.
@@ -505,7 +512,10 @@ export async function readMeasurePage(
   now: number,
 ): Promise<MeasurePage> {
   const firstSlot = Math.max(slotOf(since), slotOf(now - MEME_MEASURE_RETENTION_MS) + 1);
-  const endSlot = Math.min(slotOf(until - 1) + 1, slotOf(now) + 1);
+  // Closed slots only: the slot in progress may not be recorded yet (its cycle
+  // lands in its first minute), and a reader walking `next` to the end would
+  // otherwise take it as empty for good (audit F3).
+  const endSlot = Math.min(slotOf(until - 1) + 1, slotOf(now));
   const lastSlot = Math.min(endSlot, firstSlot + maxSlots);
   const slots: number[] = [];
   for (let slot = firstSlot; slot < lastSlot; slot++) slots.push(slot);
