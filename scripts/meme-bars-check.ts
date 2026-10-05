@@ -7,7 +7,7 @@ import { loadDotEnv } from "../src/config/env.js";
 import { MemoryStore } from "../src/core/store.js";
 import { MEME_BOARD_KEY } from "../src/jobs/memeBoard.js";
 import { RWA_UNIVERSE_KEY } from "../src/universe.js";
-import { MEME_BARS_INDEX_KEY, readMemeBars, runMemeBars, type BarsIndex } from "../src/jobs/memeBars.js";
+import { MEME_BARS_INDEX_KEY, readMemeBars, readTrackedSet, runMemeBars, type BarsIndex } from "../src/jobs/memeBars.js";
 loadDotEnv();
 
 const PROD = "https://data-plane-production.up.railway.app";
@@ -29,7 +29,8 @@ for (let i = 0; i < cycles; i++) {
   console.log(`cycle ${i}: ${Math.round(performance.now() - t0)} ms`, JSON.stringify(result));
 }
 const index = (await store.get<BarsIndex>(MEME_BARS_INDEX_KEY))!.data;
-const views = await Promise.all(Object.keys(index.tokens).map((address) => readMemeBars(store, address, 180)));
+const tracked = await readTrackedSet(store);
+const views = await Promise.all(Object.keys(index.tokens).map((address) => readMemeBars(store, address, 180, tracked)));
 const lengths = views.map((v) => v.bars.length).sort((a, b) => a - b);
 const silent = views.map((v) => v.bars.filter((b) => b.trades === 0).length / Math.max(1, v.bars.length));
 console.log(`tracked ${views.length}; with bars ${views.filter((v) => v.bars.length > 0).length}; bars/token min ${lengths[0]} median ${lengths[Math.floor(lengths.length / 2)]} max ${lengths.at(-1)}`);

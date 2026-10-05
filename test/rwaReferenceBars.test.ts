@@ -47,6 +47,7 @@ class HookStore implements SnapshotStore {
     await this.afterPut?.(key);
   }
   get<T>(key: string): Promise<DataRecord<T> | null> { return this.inner.get<T>(key); }
+  delete(key: string): Promise<boolean> { return this.inner.delete(key); }
   putJobHealth(h: JobHealth): Promise<void> { return this.inner.putJobHealth(h); }
   getJobHealth(): Promise<JobHealth[]> { return this.inner.getJobHealth(); }
   addTrackingReference(...args: Parameters<SnapshotStore["addTrackingReference"]>): ReturnType<SnapshotStore["addTrackingReference"]> { return this.inner.addTrackingReference(...args); }

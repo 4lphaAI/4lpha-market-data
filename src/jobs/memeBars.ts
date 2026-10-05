@@ -20,9 +20,16 @@
  * incrementally after that.
  *
  * Budget: one Sintral call per tracked token per minute, four at a time through
- * the shared Binance-host limiter. A 429 stops the cycle's remaining calls (the
- * skipped tokens age toward stale rather than hammer a throttled host); every
- * cycle logs its call count, failures and whether it was throttled.
+ * the shared Binance-host limiter. A 429 stops the cycle's remaining calls and
+ * backs the job off across cycles — 2, 4, 8, then 10 minutes while the host keeps
+ * throttling — so a throttled host is not hit again at full width a minute later
+ * (the skipped tokens age toward stale; nothing is invented). A token Sintral
+ * does not know is asked again only every 10 minutes. Every cycle logs its call
+ * count, failures and whether it was throttled.
+ *
+ * A token that leaves the tracked set keeps its series for {@link BARS_DEAD_MS}
+ * (it reads `tracked: false`, its staleness ageing), then its key is deleted, so
+ * per-token keys do not accumulate as meme stocks churn.
  */
 
 import { randomUUID } from "node:crypto";
@@ -53,10 +60,22 @@ export const BARS_DEAD_MS = 30 * 60_000;
 const WORKERS = 4;
 const MINUTE = 60_000;
 
+/** Backoff after a throttled cycle: 2, 4, 8, then 10 minutes while it keeps happening. */
+export function backoffMs(streak: number): number {
+  return Math.min(10 * MINUTE, 2 * MINUTE * 2 ** Math.max(0, streak - 1));
+}
+/** A tracked token Sintral answered with no bar at all is asked again after this long. */
+export const UNKNOWN_RETRY_MS = 10 * MINUTE;
+
 export const memeBarsKey = (address: string): string => `memes:bars:v1:${address.toLowerCase()}`;
 
-/** `[startMs, open, high, low, close, volumeUsd, trades]`; a zero-filled minute has `trades: 0` and volume 0. */
-export type StoredBar = [number, number, number, number, number, number, number | null];
+/**
+ * `[startMs, open, high, low, close, volumeUsd, trades, filled]`; `filled` is 1
+ * for a zero-filled minute (`trades: 0`, volume 0, OHLC at the previous close),
+ * 0 for a minute Sintral reported. Marked, not inferred, so a reported bar can
+ * never be mistaken for a fill.
+ */
+export type StoredBar = [number, number, number, number, number, number, number | null, 0 | 1];
 
 export interface BarSeries {
   address: string;
@@ -69,6 +88,8 @@ export interface BarSeries {
   bars: StoredBar[];
   /** The newest traded minute before the window, kept to carry its close into a zero-filled window start. */
   seed: StoredBar | null;
+  /** When Sintral was last asked for this token. */
+  checkedAt: number;
 }
 
 interface IndexEntry {
@@ -79,6 +100,10 @@ interface IndexEntry {
 
 export interface BarsIndex {
   tokens: Record<string, IndexEntry>;
+  /** Tokens that left the tracked set, by when; their series key is deleted {@link BARS_DEAD_MS} later. */
+  departed: Record<string, number>;
+  /** Set after a throttled cycle: no Sintral call before `until`. */
+  backoff: { until: number; streak: number } | null;
   lastCycle: {
     at: number;
     tracked: number;
@@ -96,10 +121,18 @@ export function lastClosedMinute(now: number): number {
   return Math.floor((now - MINUTE - SETTLE_MS) / MINUTE) * MINUTE;
 }
 
-const isFilled = (bar: StoredBar): boolean => bar[6] === 0 && bar[5] === 0;
+const isFilled = (bar: StoredBar): boolean => bar[7] === 1;
+
+/** Eight significant digits: past Sintral's own precision, about 40% fewer bytes than its 17-20. */
+const r8 = (value: number): number => (value === 0 ? 0 : Number(value.toPrecision(8)));
 
 function toStored(bar: SintralMinuteBar): StoredBar {
-  return [bar.startMs, bar.open, bar.high, bar.low, bar.close, bar.volumeUsd, bar.trades];
+  return [bar.startMs, r8(bar.open), r8(bar.high), r8(bar.low), r8(bar.close), r8(bar.volumeUsd), bar.trades, 0];
+}
+
+/** Reads a seven-element bar written before the `filled` flag existed. */
+function upgrade(bar: StoredBar): StoredBar {
+  return bar.length >= 8 ? bar : ([...bar.slice(0, 7), bar[6] === 0 && bar[5] === 0 ? 1 : 0] as StoredBar);
 }
 
 /**
@@ -115,8 +148,11 @@ export function rebuildSeries(
   keep = MEME_BARS_KEEP,
 ): { bars: StoredBar[]; seed: StoredBar | null } {
   const traded = new Map<number, StoredBar>();
-  if (previous?.seed) traded.set(previous.seed[0], previous.seed);
-  for (const bar of previous?.bars ?? []) if (!isFilled(bar)) traded.set(bar[0], bar);
+  if (previous?.seed) traded.set(previous.seed[0], upgrade(previous.seed));
+  for (const raw of previous?.bars ?? []) {
+    const bar = upgrade(raw);
+    if (!isFilled(bar)) traded.set(bar[0], bar);
+  }
   for (const bar of fetched) if (bar.startMs <= lastClosed) traded.set(bar.startMs, toStored(bar));
 
   const windowStart = lastClosed - (keep - 1) * MINUTE;
@@ -135,18 +171,22 @@ export function rebuildSeries(
       bars.push(bar);
       close = bar[4];
     } else if (close !== null) {
-      bars.push([minute, close, close, close, close, 0, 0]);
+      bars.push([minute, close, close, close, close, 0, 0, 1]);
     }
   }
   return { bars, seed };
 }
 
-/** How many Sintral rows to ask for: everything on entry, the gap plus the re-read tail after that. */
+/**
+ * How many Sintral rows to ask for: everything on entry, the gap plus the
+ * re-read tail after that. `+ 2` everywhere: the newest two rows are the minute
+ * in progress and the one still settling, so a full window needs 182 rows.
+ */
 export function fetchLimit(previous: BarSeries | null, lastClosed: number): number {
-  if (previous === null || previous.bars.length === 0) return MEME_BARS_KEEP;
+  const full = MEME_BARS_KEEP + 2;
+  if (previous === null || previous.bars.length === 0) return full;
   const gap = Math.max(0, Math.round((lastClosed - previous.lastClosedStartMs) / MINUTE));
-  // + 2: the minute in progress and the one still settling are returned too.
-  return Math.min(MEME_BARS_KEEP, Math.max(5, gap + REFRESH_TAIL + 2));
+  return Math.min(full, Math.max(5, gap + REFRESH_TAIL + 2));
 }
 
 export interface RunMemeBarsOptions {
@@ -156,7 +196,7 @@ export interface RunMemeBarsOptions {
 }
 
 export interface MemeBarsResult {
-  skipped?: "lease_held";
+  skipped?: "lease_held" | "backoff";
   tracked: number;
   candidates: number;
   capped: boolean;
@@ -227,6 +267,10 @@ export async function runMemeBars(
   }
 
   const index = await readIndex(store);
+  if (index.backoff !== null && now < index.backoff.until) {
+    console.log(`[${MEME_BARS_JOB}] backing off after 429 until ${new Date(index.backoff.until).toISOString()}`);
+    return { skipped: "backoff", tracked: Object.keys(index.tokens).length, candidates: 0, capped: false, calls: 0, failures: 0, throttled: false };
+  }
   const boardRecord = await store.get<unknown>(MEME_BOARD_KEY);
   const boardFresh = boardRecord !== null && boardRecord.staleness === "fresh" && Array.isArray(boardRecord.data);
   const board = boardFresh ? (boardRecord.data as MemeBoardRow[]) : null;
@@ -257,6 +301,8 @@ export async function runMemeBars(
       try {
         const previous = await readSeries(store, address);
         if (previous !== null && previous.lastClosedStartMs >= lastClosed && previous.bars.length > 0) continue;
+        // Sintral has never had a bar for it: ask again only now and then.
+        if (previous !== null && previous.bars.length === 0 && now - (previous.checkedAt ?? 0) < UNKNOWN_RETRY_MS) continue;
         calls += 1;
         const fetched = await fetchBars(address, fetchLimit(previous, lastClosed), signal);
         const rebuilt = rebuildSeries(previous, fetched, lastClosed);
@@ -268,6 +314,7 @@ export async function runMemeBars(
           lastClosedStartMs: lastClosed,
           bars: rebuilt.bars,
           seed: rebuilt.seed,
+          checkedAt: now,
         };
         await store.put(memeBarsKey(address), series, {
           source: MEME_BARS_SOURCE,
@@ -291,7 +338,19 @@ export async function runMemeBars(
     failures,
     throttled,
   };
-  const next: BarsIndex = { tokens: selection.tokens, lastCycle: { at: now, ...result, boardFresh } };
+  // Departures: a token that left keeps its series for BARS_DEAD_MS, then its key goes.
+  const departed: Record<string, number> = {};
+  for (const [address, leftAt] of Object.entries(index.departed)) {
+    if (address in selection.tokens) continue;
+    if (now - leftAt > BARS_DEAD_MS) await store.delete(memeBarsKey(address));
+    else departed[address] = leftAt;
+  }
+  for (const address of Object.keys(index.tokens)) {
+    if (!(address in selection.tokens) && departed[address] === undefined) departed[address] = now;
+  }
+  const streak = throttled ? (index.backoff?.streak ?? 0) + 1 : 0;
+  const backoff = throttled ? { until: now + backoffMs(streak), streak } : null;
+  const next: BarsIndex = { tokens: selection.tokens, departed, backoff, lastCycle: { at: now, ...result, boardFresh } };
   await store.put(MEME_BARS_INDEX_KEY, next, { source: MEME_BARS_JOB, freshForMs: BARS_FRESH_MS, deadAfterMs: BARS_DEAD_MS });
   console.log(
     `[${MEME_BARS_JOB}] tracked=${result.tracked} calls=${calls} failures=${failures}` +
@@ -313,7 +372,13 @@ async function readIndex(store: SnapshotStore): Promise<BarsIndex> {
       }
     }
   }
-  return { tokens, lastCycle: null };
+  const departed: Record<string, number> = {};
+  if (typeof data?.departed === "object" && data.departed !== null) {
+    for (const [address, at] of Object.entries(data.departed)) if (typeof at === "number") departed[address] = at;
+  }
+  const b = data?.backoff;
+  const backoff = typeof b?.until === "number" && typeof b.streak === "number" ? { until: b.until, streak: b.streak } : null;
+  return { tokens, departed, backoff, lastCycle: null };
 }
 
 async function readSeries(store: SnapshotStore, address: string): Promise<BarSeries | null> {
@@ -338,30 +403,43 @@ export interface MemeBarsView {
   asOf: number | null;
   staleness: "fresh" | "stale" | "dead" | null;
   lastClosedStartMs: number | null;
-  bars: Array<{ startMs: number; open: number; high: number; low: number; close: number; volume: number; trades: number | null }>;
+  bars: Array<{ startMs: number; open: number; high: number; low: number; close: number; volume: number; trades: number | null; filled: boolean }>;
+}
+
+/** The tracked set as the job last wrote it, for the read routes. */
+export async function readTrackedSet(store: SnapshotStore): Promise<ReadonlySet<string>> {
+  return new Set(Object.keys((await readIndex(store)).tokens));
 }
 
 /**
- * One token's newest `limit` closed bars as objects. A token that was never
- * tracked answers `tracked: false` and no bars; one that left the tracked set
- * keeps serving its last series, its staleness saying how old it is.
+ * One token's newest `limit` closed bars as objects. `tracked` says whether the
+ * job is keeping the token now; a token that left still serves its last series
+ * for 30 minutes with `tracked: false` and its staleness ageing, then has none.
  */
-export async function readMemeBars(store: SnapshotStore, address: string, limit: number): Promise<MemeBarsView> {
+export async function readMemeBars(
+  store: SnapshotStore,
+  address: string,
+  limit: number,
+  tracked: ReadonlySet<string>,
+): Promise<MemeBarsView> {
   const record = await store.get<unknown>(memeBarsKey(address));
   if (record === null || !isSeries(record.data)) {
-    return { address, tracked: false, symbol: null, source: null, unit: null, asOf: null, staleness: null, lastClosedStartMs: null, bars: [] };
+    return { address, tracked: tracked.has(address), symbol: null, source: null, unit: null, asOf: null, staleness: null, lastClosedStartMs: null, bars: [] };
   }
   const series = record.data;
   return {
     address,
-    tracked: true,
+    tracked: tracked.has(address),
     symbol: series.symbol,
     source: series.source,
     unit: series.unit,
     asOf: record.asOf,
     staleness: record.staleness,
     lastClosedStartMs: series.lastClosedStartMs,
-    bars: series.bars.slice(-limit).map(([startMs, open, high, low, close, volume, trades]) => ({ startMs, open, high, low, close, volume, trades })),
+    bars: series.bars.slice(-limit).map((raw) => {
+      const [startMs, open, high, low, close, volume, trades, filled] = upgrade(raw);
+      return { startMs, open, high, low, close, volume, trades, filled: filled === 1 };
+    }),
   };
 }
 

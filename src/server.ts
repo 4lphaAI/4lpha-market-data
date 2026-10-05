@@ -49,8 +49,10 @@ import {
   MEME_BARS_KEEP,
   MEME_BARS_SOURCE,
   MEME_BARS_UNIT,
+  MEME_BARS_INDEX_KEY,
   SETTLE_MS,
   readMemeBars,
+  readTrackedSet,
 } from "./jobs/memeBars.js";
 import {
   MEME_MEASURE_LATEST_KEY,
@@ -199,6 +201,7 @@ const STATUS_SNAPSHOT_KEYS = [
   FEATURE_INDEX_KEY_V2,
   VENUS_CORE_MARKETS_KEY,
   MEME_MEASURE_LATEST_KEY,
+  MEME_BARS_INDEX_KEY,
 ];
 
 const MEME_BARS_BATCH_MAX = 30;
@@ -218,7 +221,9 @@ function barsMeta(limit: number): Record<string, unknown> {
     source: MEME_BARS_SOURCE,
     unit: MEME_BARS_UNIT,
     closedAfterMs: SETTLE_MS,
-    zeroFill: "a minute without trades is a bar with trades 0, volume 0 and OHLC at the previous close",
+    zeroFill: "a minute without trades is a bar with filled true, trades 0, volume 0 and OHLC at the previous close",
+    gate: "staleness says when the series was written; also check now - lastClosedStartMs (up to ~5 min while fresh)",
+    tracked: "true while the job keeps the token; a token that left serves its last series for 30 min with tracked false",
     trades: "Sintral's count; below on-chain swap events (measured 0.5-0.9 of them), a relative activity measure",
     freshForMs: BARS_FRESH_MS,
     deadAfterMs: BARS_DEAD_MS,
@@ -1256,7 +1261,8 @@ export function createServer(deps: ServerDeps): Hono {
     if (normalized.some((value) => value === null)) {
       return c.json({ error: { code: "invalid_address", message: "every address must be an EVM address" } }, 400);
     }
-    const data = await Promise.all((normalized as string[]).map((address) => readMemeBars(deps.store, address, limit)));
+    const tracked = await readTrackedSet(deps.store);
+    const data = await Promise.all((normalized as string[]).map((address) => readMemeBars(deps.store, address, limit, tracked)));
     return c.json({ data, meta: barsMeta(limit) });
   });
 
@@ -1269,8 +1275,8 @@ export function createServer(deps: ServerDeps): Hono {
     if (limit === null) {
       return c.json({ error: { code: "invalid_query", message: `limit must be an integer 1..${MEME_BARS_KEEP}` } }, 400);
     }
-    const view = await readMemeBars(deps.store, address, limit);
-    if (!view.tracked) {
+    const view = await readMemeBars(deps.store, address, limit, await readTrackedSet(deps.store));
+    if (view.source === null) {
       return c.json({ error: { code: "not_tracked", message: "no bars are kept for this token" } }, 404);
     }
     return c.json({ data: view, meta: barsMeta(limit) });

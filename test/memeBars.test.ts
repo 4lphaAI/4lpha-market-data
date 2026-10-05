@@ -4,7 +4,8 @@ import { normalizeSintralMinuteBars, type MemeRushRow, type SintralMinuteBar } f
 import { AdapterError } from "../src/adapters/http.js";
 import type { TokenActivity } from "../src/adapters/onchainos.js";
 import { createScheduler } from "../src/core/scheduler.js";
-import { MemoryStore } from "../src/core/store.js";
+import { MemoryStore, PostgresStore } from "../src/core/store.js";
+import { FakePg } from "./fakePg.js";
 import { MEME_BOARD_KEY } from "../src/jobs/memeBoard.js";
 import {
   LEAVE_AFTER_MS,
@@ -12,9 +13,14 @@ import {
   MEME_BARS_INDEX_KEY,
   MEME_BARS_KEEP,
   MEME_BARS_LEASE,
+  BARS_DEAD_MS,
+  UNKNOWN_RETRY_MS,
+  backoffMs,
   fetchLimit,
   lastClosedMinute,
   memeBarsKey,
+  readMemeBars,
+  readTrackedSet,
   rebuildSeries,
   runMemeBars,
   selectTracked,
@@ -117,6 +123,7 @@ describe("rebuildSeries", () => {
       [4 * MIN, 2, 0, 0],
     ]);
     assert.deepEqual(bars[1]!.slice(1, 5), [1, 1, 1, 1], "a silent minute is flat at the previous close");
+    assert.deepEqual(bars.map((b) => b[7]), [0, 1, 0, 1, 1], "fills are marked, not inferred");
   });
 
   it("corrects a zero-filled minute when a late trade arrives, and the flat minutes after it", () => {
@@ -144,17 +151,18 @@ describe("rebuildSeries", () => {
   });
 
   it("backfills on entry and asks only for the gap plus the re-read tail after that", () => {
-    assert.equal(fetchLimit(null, NOW), MEME_BARS_KEEP);
-    const series = { lastClosedStartMs: NOW - MIN, bars: [[NOW - MIN, 1, 1, 1, 1, 0, 0] as StoredBar] } as BarSeries;
+    // + 2: the two newest rows are the minute in progress and the one settling (audit F3).
+    assert.equal(fetchLimit(null, NOW), MEME_BARS_KEEP + 2);
+    const series = { lastClosedStartMs: NOW - MIN, bars: [[NOW - MIN, 1, 1, 1, 1, 0, 0, 1] as StoredBar] } as BarSeries;
     assert.equal(fetchLimit(series, NOW), 6);
-    assert.equal(fetchLimit({ ...series, lastClosedStartMs: NOW - 500 * MIN }, NOW), MEME_BARS_KEEP);
+    assert.equal(fetchLimit({ ...series, lastClosedStartMs: NOW - 500 * MIN }, NOW), MEME_BARS_KEEP + 2);
   });
 });
 
 // ─── Tracked set ─────────────────────────────────────────────────────────────
 
 describe("selectTracked", () => {
-  const empty: BarsIndex = { tokens: {}, lastCycle: null };
+  const empty: BarsIndex = { tokens: {}, departed: {}, backoff: null, lastCycle: null };
 
   it("tracks live meme stocks and shortlisted rows, nothing else", () => {
     const board = [row(1), row(2, { quote: "bnb" }), dead(3), row(4)];
@@ -163,14 +171,14 @@ describe("selectTracked", () => {
   });
 
   it("keeps a token 30 minutes after it was last live, then lets it go", () => {
-    const index: BarsIndex = { tokens: { [addr(9)]: { symbol: "OLD", enteredAt: NOW - HOUR, lastLiveAt: NOW - LEAVE_AFTER_MS } }, lastCycle: null };
+    const index: BarsIndex = { tokens: { [addr(9)]: { symbol: "OLD", enteredAt: NOW - HOUR, lastLiveAt: NOW - LEAVE_AFTER_MS } }, departed: {}, backoff: null, lastCycle: null };
     assert.ok(addr(9) in selectTracked(index, [], new Set(), NOW).tokens);
     assert.equal(addr(9) in selectTracked(index, [], new Set(), NOW + 1).tokens, false);
   });
 
   it("caps the set, live and shortlisted first, then by 5-minute trades, and says so", () => {
     const board = Array.from({ length: MEME_BARS_CAP + 5 }, (_, i) => row(100 + i, { txs5m: i }));
-    const index: BarsIndex = { tokens: { [addr(9)]: { symbol: "OLD", enteredAt: NOW - HOUR, lastLiveAt: NOW - MIN } }, lastCycle: null };
+    const index: BarsIndex = { tokens: { [addr(9)]: { symbol: "OLD", enteredAt: NOW - HOUR, lastLiveAt: NOW - MIN } }, departed: {}, backoff: null, lastCycle: null };
     const result = selectTracked(index, board, new Set([addr(100)]), NOW);
     assert.equal(result.capped, true);
     assert.equal(result.candidates, MEME_BARS_CAP + 6);
@@ -216,7 +224,7 @@ describe("runMemeBars", () => {
     const h = await harness();
     const first = await h.run();
     assert.deepEqual(first, { tracked: 2, candidates: 2, capped: false, calls: 2, failures: 0, throttled: false });
-    assert.deepEqual(h.asked.map(([, limit]) => limit), [MEME_BARS_KEEP, MEME_BARS_KEEP]);
+    assert.deepEqual(h.asked.map(([, limit]) => limit), [MEME_BARS_KEEP + 2, MEME_BARS_KEEP + 2]);
     const one = (await series(h.store, addr(1)))!;
     assert.equal(one.lastClosedStartMs, NOW);
     assert.deepEqual(one.bars.map((b) => [b[0] - NOW, b[4], b[6]]), [[-2 * MIN, 1, 5], [-MIN, 1, 0], [0, 2, 5]]);
@@ -275,10 +283,12 @@ describe("GET /memes/bars and /memes/:address/bars", () => {
     const now = Date.now();
     const lastClosed = lastClosedMinute(now);
     const stored: BarSeries = {
-      address: addr(1), symbol: "M1", source: "sintral", unit: "usd", lastClosedStartMs: lastClosed, seed: null,
-      bars: [[lastClosed - MIN, 1, 1.1, 0.9, 1, 50, 3], [lastClosed, 1, 1, 1, 1, 0, 0]],
+      address: addr(1), symbol: "M1", source: "sintral", unit: "usd", lastClosedStartMs: lastClosed, seed: null, checkedAt: now,
+      bars: [[lastClosed - MIN, 1, 1.1, 0.9, 1, 50, 3, 0], [lastClosed, 1, 1, 1, 1, 0, 0, 1]],
     };
     await store.put(memeBarsKey(addr(1)), stored, { source: "sintral", freshForMs: 3 * MIN, deadAfterMs: 30 * MIN });
+    const index: BarsIndex = { tokens: { [addr(1)]: { symbol: "M1", enteredAt: now, lastLiveAt: now } }, departed: {}, backoff: null, lastCycle: null };
+    await store.put(MEME_BARS_INDEX_KEY, index, { source: "test", freshForMs: 3 * MIN, deadAfterMs: 30 * MIN });
     const server = createServer({ scheduler: createScheduler(store), store });
     return { request: (path: string) => server.request(path), lastClosed };
   }
@@ -293,7 +303,8 @@ describe("GET /memes/bars and /memes/:address/bars", () => {
     assert.equal(body.data[1]!["address"], addr(1));
     assert.equal(body.data[1]!["staleness"], "fresh");
     assert.equal(body.data[1]!["lastClosedStartMs"], lastClosed);
-    assert.deepEqual(body.data[1]!["bars"], [{ startMs: lastClosed, open: 1, high: 1, low: 1, close: 1, volume: 0, trades: 0 }]);
+    assert.equal(body.data[1]!["tracked"], true);
+    assert.deepEqual(body.data[1]!["bars"], [{ startMs: lastClosed, open: 1, high: 1, low: 1, close: 1, volume: 0, trades: 0, filled: true }]);
     assert.equal(body.meta["unit"], "usd");
   });
 
@@ -312,5 +323,107 @@ describe("GET /memes/bars and /memes/:address/bars", () => {
       assert.equal((await request(`/memes/bars?${query}`)).status, 400, query);
     }
     assert.equal((await request("/memes/notanaddress/bars")).status, 400);
+  });
+});
+
+describe("bars audit round", () => {
+  it("normalizes away a glitch price and widens out-of-order extremes", () => {
+    const bars = normalizeSintralMinuteBars({
+      data: [
+        [1, 1.2, 0, 1.1, 10, NOW, 3],
+        [1, 0.9, 1.05, 1.1, 10, NOW + MIN, 3],
+      ],
+    });
+    assert.deepEqual(bars.map((b) => [b.startMs, b.high, b.low]), [[NOW + MIN, 1.1, 1]]);
+  });
+
+  it("keeps a reported bar with no volume and no trades as reported", () => {
+    const first = rebuildSeries(null, [{ startMs: NOW, open: 2, high: 3, low: 1, close: 2.5, volumeUsd: 0, trades: 0 }], NOW + MIN);
+    const second = rebuildSeries(first, [], NOW + 2 * MIN);
+    assert.deepEqual(second.bars[0]!.slice(1, 5), [2, 3, 1, 2.5]);
+    assert.equal(second.bars[0]![7], 0);
+  });
+
+  it("backs off across cycles after a 429, longer each time, and resets once a cycle is clean", async () => {
+    const h = await harness();
+    h.failWith(() => new AdapterError("binance", "upstream responded 429", 429));
+    await assert.rejects(h.run());
+    let index = (await h.store.get<BarsIndex>(MEME_BARS_INDEX_KEY))!.data;
+    assert.equal(index.backoff?.streak, 1);
+    assert.equal(index.backoff?.until, h.clock.now + backoffMs(1));
+    const asked = h.asked.length;
+    h.clock.now += MIN;
+    assert.equal((await h.run()).skipped, "backoff");
+    assert.equal(h.asked.length, asked, "no call while backing off");
+    h.clock.now += 2 * MIN;
+    await assert.rejects(h.run());
+    index = (await h.store.get<BarsIndex>(MEME_BARS_INDEX_KEY))!.data;
+    assert.equal(index.backoff?.streak, 2);
+    assert.equal(backoffMs(2), 4 * MIN);
+    assert.equal(backoffMs(9), 10 * MIN);
+    h.failWith(() => null);
+    h.clock.now += 5 * MIN;
+    await h.store.put(MEME_BOARD_KEY, [row(1), row(2)], TTL);
+    await h.run();
+    index = (await h.store.get<BarsIndex>(MEME_BARS_INDEX_KEY))!.data;
+    assert.equal(index.backoff, null);
+  });
+
+  it("serves a departed token as not tracked for 30 minutes, then deletes its series", async () => {
+    const h = await harness([row(1)]);
+    await h.run();
+    assert.ok((await series(h.store, addr(1))) !== null);
+    h.clock.now += LEAVE_AFTER_MS + MIN;
+    await h.store.put(MEME_BOARD_KEY, [], TTL);
+    await h.run();
+    const tracked = await readTrackedSet(h.store);
+    const view = await readMemeBars(h.store, addr(1), 60, tracked);
+    assert.equal(view.tracked, false);
+    assert.ok(view.bars.length > 0, "still served while it ages");
+    h.clock.now += BARS_DEAD_MS + MIN;
+    await h.store.put(MEME_BOARD_KEY, [], TTL);
+    await h.run();
+    assert.equal(await series(h.store, addr(1)), null, "the key is gone");
+  });
+
+  it("asks Sintral about a token it does not know only every 10 minutes", async () => {
+    const h = await harness([row(7)]);
+    await h.run();
+    await h.run(); // same minute: up to date
+    h.clock.now += MIN;
+    await h.store.put(MEME_BOARD_KEY, [row(7)], TTL);
+    await h.run();
+    assert.equal(h.asked.length, 1);
+    h.clock.now += UNKNOWN_RETRY_MS;
+    await h.store.put(MEME_BOARD_KEY, [row(7)], TTL);
+    await h.run();
+    assert.equal(h.asked.length, 2);
+  });
+
+  it("does not call Sintral twice for a token already up to date this minute, and corrects a late trade through the job", async () => {
+    const h = await harness([row(1)]);
+    await h.run();
+    await h.run();
+    assert.equal(h.asked.length, 1);
+    h.clock.now += MIN;
+    await h.store.put(MEME_BOARD_KEY, [row(1)], TTL);
+    // Sintral now also reports a trade in a minute that was zero-filled (NOW - MIN).
+    h.upstream.set(addr(1), [bar(NOW - MIN, 7), bar(NOW, 2), bar(NOW + MIN, 3)]);
+    await h.run();
+    const bars = (await series(h.store, addr(1)))!.bars;
+    assert.deepEqual(bars.map((b) => [b[0] - NOW, b[4], b[7]]), [[-2 * MIN, 1, 0], [-MIN, 7, 0], [0, 2, 0], [MIN, 3, 0]]);
+  });
+
+  it("round-trips a series through Postgres", async () => {
+    const pgStore = await PostgresStore.create("postgres://unused", { client: new FakePg() });
+    const stored: BarSeries = {
+      address: addr(1), symbol: "币安", source: "sintral", unit: "usd", lastClosedStartMs: NOW, seed: null, checkedAt: NOW,
+      bars: [[NOW, 1, 1, 1, 1, 0, null, 0], [NOW + MIN, 1, 1, 1, 1, 0, 0, 1]],
+    };
+    await pgStore.put(memeBarsKey(addr(1)), stored, { source: "sintral", freshForMs: 3 * MIN, deadAfterMs: 30 * MIN });
+    assert.deepEqual((await pgStore.get<BarSeries>(memeBarsKey(addr(1))))?.data, stored);
+    assert.equal(await pgStore.delete(memeBarsKey(addr(1))), true);
+    assert.equal(await pgStore.get(memeBarsKey(addr(1))), null);
+    assert.equal(await pgStore.delete(memeBarsKey(addr(1))), false);
   });
 });

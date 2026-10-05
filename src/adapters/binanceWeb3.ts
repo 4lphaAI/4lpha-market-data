@@ -346,8 +346,19 @@ export function normalizeSintralMinuteBars(payload: unknown): SintralMinuteBar[]
     const low = parseNum(row[2]);
     const close = parseNum(row[3]);
     if (startMs === null || startMs % 60_000 !== 0) continue;
-    if (open === null || high === null || low === null || close === null || !(close > 0)) continue;
-    byStart.set(startMs, { startMs, open, high, low, close, volumeUsd: parseNum(row[4]) ?? 0, trades: parseNum(row[6]) });
+    // Every price positive, or the row is a glitch (a low of 0 would read as a 100% drawdown).
+    if (open === null || high === null || low === null || close === null) continue;
+    if (!(open > 0 && high > 0 && low > 0 && close > 0)) continue;
+    // Out-of-order extremes are widened to contain open and close rather than dropped.
+    byStart.set(startMs, {
+      startMs,
+      open,
+      high: Math.max(high, open, close),
+      low: Math.min(low, open, close),
+      close,
+      volumeUsd: Math.max(0, parseNum(row[4]) ?? 0),
+      trades: parseNum(row[6]),
+    });
   }
   return [...byStart.values()].sort((a, b) => a.startMs - b.startMs);
 }
