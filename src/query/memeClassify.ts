@@ -169,6 +169,37 @@ export interface MemeSmartMoney {
   maxWallets: number | null;
   /** `soldRatioPct` of the newest signal. */
   lastSoldRatioPct: number | null;
+  /**
+   * Binance's smart-money net-inflow rank over the last 5 minutes / hour.
+   * `null` when the token was not ranked — which is not zero inflow — or the
+   * rank could not be read. Never feeds `smart_money` or any other flag.
+   */
+  inflow5m: SmartInflow | null;
+  inflow1h: SmartInflow | null;
+}
+
+/**
+ * One window of the smart-money net-inflow rank. Only `netUsd` and `traders`
+ * describe smart money: the upstream's buy/sell counts on the same row are the
+ * token's whole market (they match OKX's trade counts), so they are not carried.
+ */
+export interface SmartInflow {
+  /** Signed net inflow from tagged smart-money wallets, USD. */
+  netUsd: number | null;
+  /** Smart-money wallets behind it. */
+  traders: number | null;
+  /** 1-based position in Binance's list (~3–15 rows for 5m, at most 50 for 1h). */
+  rank: number;
+  /** When the rank was read. */
+  rankedAt: number;
+}
+
+/** A trade split from OKX's hot ranking for one window. */
+export interface MemeFlow {
+  buys: number | null;
+  sells: number | null;
+  uniqueTraders: number | null;
+  inflowUsd: number | null;
 }
 
 export interface MemeBoardRow {
@@ -216,7 +247,9 @@ export interface MemeBoardRow {
    */
   listedOn: string[];
   /** The last hour's trade split from OKX's hot ranking, when it ranked there. */
-  flow1h: { buys: number | null; sells: number | null; uniqueTraders: number | null; inflowUsd: number | null } | null;
+  flow1h: MemeFlow | null;
+  /** The same for the last 5 minutes; `null` outside OKX's top 100 for that window. */
+  flow5m: MemeFlow | null;
   lastListedAt: number;
   firstSeenAt: number;
   /** When `status` first became `dead`; cleared when it trades again. */
@@ -232,6 +265,9 @@ export interface ClassifyInput {
   cloneOf: string | null;
   listedOn?: string[] | undefined;
   flow1h?: MemeBoardRow["flow1h"] | undefined;
+  flow5m?: MemeBoardRow["flow5m"] | undefined;
+  inflow5m?: SmartInflow | null | undefined;
+  inflow1h?: SmartInflow | null | undefined;
   lastListedAt: number;
   firstSeenAt: number;
   previousDeadSince: number | null;
@@ -395,12 +431,15 @@ export function classifyMeme(input: ClassifyInput): MemeBoardRow {
       lastSignalAt,
       maxWallets,
       lastSoldRatioPct,
+      inflow5m: input.inflow5m ?? null,
+      inflow1h: input.inflow1h ?? null,
     },
-    dev: { address: rush.devAddress, soldAll: rush.devSoldAll, migrateCount: rush.devMigrateCount },
+    dev:{ address: rush.devAddress, soldAll: rush.devSoldAll, migrateCount: rush.devMigrateCount },
     cloneOf: input.cloneOf,
     socials: rush.socials,
     listedOn: input.listedOn ?? [],
     flow1h: input.flow1h ?? null,
+    flow5m: input.flow5m ?? null,
     lastListedAt: input.lastListedAt,
     firstSeenAt: input.firstSeenAt,
     deadSince: status === "dead" ? (input.previousDeadSince ?? now) : null,

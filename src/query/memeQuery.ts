@@ -17,8 +17,10 @@ import {
   type MemeBoardRow,
   type MemeCategory,
   type MemeFlag,
+  type MemeFlow,
   type MemeStage,
   type MemeStatus,
+  type SmartInflow,
 } from "./memeClassify.js";
 
 export class MemeQueryError extends Error {}
@@ -403,6 +405,12 @@ export interface MemeShortlistRow {
   flags: MemeFlag[];
   /** When OKX observed the activity numbers. */
   observedAt: number | null;
+  /** OKX hot-ranking trade split per window, with net inflow; `null` outside its top 100 for that window. */
+  flow5m: MemeFlow | null;
+  flow1h: MemeFlow | null;
+  /** Binance smart-money net-inflow rank per window; `null` = not ranked or unread, never zero. */
+  smartInflow5m: SmartInflow | null;
+  smartInflow1h: SmartInflow | null;
 }
 
 export interface Shortlist {
@@ -629,5 +637,10 @@ export function toShortlistRow(
     smartMoney: smartMoneyCount(row),
     flags: row.flags,
     observedAt: row.activity?.observedAt ?? null,
+    // `?? null`: a board written before these fields existed lacks them.
+    flow5m: row.flow5m ?? null,
+    flow1h: row.flow1h ?? null,
+    smartInflow5m: row.smartMoney.inflow5m ?? null,
+    smartInflow1h: row.smartMoney.inflow1h ?? null,
   };
 }

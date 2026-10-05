@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { normalizeMemeRush, type MemeLaunchpad, type MemeRushRow, type MemeRushStage } from "../src/adapters/binanceWeb3.js";
+import { normalizeMemeRush, type MemeLaunchpad, type MemeRushRow, type MemeRushStage, type SmartInflowRow } from "../src/adapters/binanceWeb3.js";
 import {
   normalizeActivityRows,
   normalizeHotTokens,
@@ -355,6 +355,7 @@ function fakeUpstreams(lists: Partial<Record<MemeRushStage, MemeRushRow[] | Erro
       return value.filter((row) => row.launchpad === launchpad);
     },
     fetchHot: async () => [] as HotToken[],
+    fetchInflow: async () => [] as SmartInflowRow[],
     readStates: async () => new Map<string, LaunchpadState>(),
     readIssuer: async () => new Map<string, QuoteInfo>(),
   };
@@ -392,6 +393,7 @@ describe("runMemeBoard", () => {
     const base = {
       fetchSignals: async () => [] as SmartSignal[],
       fetchHot: async () => [] as HotToken[],
+    fetchInflow: async () => [] as SmartInflowRow[],
       readStates: async () => new Map<string, LaunchpadState>(),
       readIssuer: async () => new Map<string, QuoteInfo>(),
     };
@@ -888,5 +890,80 @@ describe("groupMemesByStock", () => {
     assert.equal(body.meta.memeStocks, 1);
     assert.equal(body.meta.stocks, 1);
     assert.equal((await app.request("/memes/stocks?minLive=-1")).status, 400);
+  });
+});
+
+describe("5m flow and smart-money inflow on the board (handoff 2026-10-05 items 2, 3)", () => {
+  const hotRow = (address: string, timeframe: "5m" | "1h", buys: number, sells: number): HotToken => ({
+    address, symbol: "X", launchpad: "flap", timeframe, txs: buys + sells, txsBuy: buys, txsSell: sells,
+    uniqueTraders: 40, volumeUsd: 10_000, changePct: 3, inflowUsd: timeframe === "5m" ? 250 : 1_000, liquidityUsd: 20_000,
+    marketCapUsd: 100_000, holders: 300, firstTradeAt: NOW - HOUR, top10Pct: 30, devPct: 0, insiderPct: 0, bundlerPct: 0,
+  });
+  const inflowRow = (address: string, rank: number, netInflowUsd: number): SmartInflowRow => ({
+    rank, address, name: "X", netInflowUsd, traders: 3, count: 900, countBuy: 500, countSell: 400, volumeUsd: 50_000,
+    priceUsd: 0.001, marketCapUsd: 100_000, liquidityUsd: 20_000, holders: 300, top10Pct: 20, riskLevel: 0, riskCodes: [],
+    aiNarrative: null, launchedAt: NOW - HOUR,
+  });
+  const run = (store: MemoryStore, now: number, fetchInflow: (w: "5m" | "1h") => Promise<SmartInflowRow[]>) =>
+    runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...fakeUpstreams({ finalizing: [rush(), rush({ address: addr(2), symbol: "TWO" })] }),
+      fetchHot: async (launchpad, timeframe) =>
+        launchpad === "flap" ? [timeframe === "5m" ? hotRow(addr(1), "5m", 30, 10) : hotRow(addr(1), "1h", 300, 200)] : [],
+      fetchInflow,
+      fetchActivity: async () => new Map([[addr(1), activity()], [addr(2), activity({ address: addr(2) })]]),
+      fetchSignals: async () => [],
+      now: () => now,
+    });
+
+  it("keeps the 5m split beside the 1h one and ranks smart inflow per window, null when unranked", async () => {
+    const store = new MemoryStore(() => NOW);
+    await run(store, NOW, async (w) => (w === "5m" ? [inflowRow(addr(1), 2, -120.5)] : [inflowRow(addr(1), 1, 900), inflowRow(addr(2), 7, 40)]));
+    const rows = await board(store);
+    const one = rows.find((r) => r.address === addr(1))!;
+    const two = rows.find((r) => r.address === addr(2))!;
+    assert.deepEqual(one.flow5m, { buys: 30, sells: 10, uniqueTraders: 40, inflowUsd: 250 });
+    assert.deepEqual(one.flow1h, { buys: 300, sells: 200, uniqueTraders: 40, inflowUsd: 1_000 });
+    assert.deepEqual(one.smartMoney.inflow5m, { netUsd: -120.5, traders: 3, rank: 2, rankedAt: NOW });
+    assert.deepEqual(one.smartMoney.inflow1h, { netUsd: 900, traders: 3, rank: 1, rankedAt: NOW });
+    assert.equal(two.flow5m, null);
+    assert.equal(two.smartMoney.inflow5m, null, "absent from the rank is unknown, not zero");
+    assert.equal(two.smartMoney.inflow1h?.rank, 7);
+    // The inflow rank never raises a flag: neither token has tagged holders or signals.
+    assert.equal(one.flags.includes("smart_money"), false);
+    assert.equal(two.flags.includes("smart_money"), false);
+  });
+
+  it("keeps last cycle's rank through a failed read while the board is fresh, and drops it after", async () => {
+    const store = new MemoryStore(() => NOW);
+    await run(store, NOW, async () => [inflowRow(addr(1), 1, 900)]);
+    const down = async (): Promise<SmartInflowRow[]> => { throw new Error("upstream responded 429"); };
+    const partial = await run(store, NOW + MIN, down);
+    assert.ok(partial.failures.some((f) => f.startsWith("inflow:5m:")));
+    let one = (await board(store)).find((r) => r.address === addr(1))!;
+    assert.equal(one.smartMoney.inflow1h?.rankedAt, NOW, "reused, still dated by its own read");
+    await run(store, NOW + 4 * MIN, down);
+    one = (await board(store)).find((r) => r.address === addr(1))!;
+    assert.equal(one.smartMoney.inflow1h, null);
+  });
+
+  it("puts both flows and both inflow windows on shortlist rows, null on a board written before them", async () => {
+    const store = new MemoryStore(() => NOW);
+    await run(store, NOW, async () => [inflowRow(addr(1), 1, 900)]);
+    const rows = await board(store);
+    const list = buildShortlist(rows, parseShortlistQuery(() => undefined), NOW);
+    const one = list.rows.find((r) => r.address === addr(1))!;
+    assert.deepEqual(one.flow5m, { buys: 30, sells: 10, uniqueTraders: 40, inflowUsd: 250 });
+    assert.equal(one.flow1h?.inflowUsd, 1_000);
+    assert.equal(one.smartInflow1h?.netUsd, 900);
+    assert.equal(one.buys1h, 300, "the flat 1h fields are unchanged");
+    const legacy = rows.map((r) => {
+      const { flow5m: _f, ...rest } = r;
+      const { inflow5m: _a, inflow1h: _b, ...sm } = r.smartMoney;
+      return { ...rest, smartMoney: sm } as unknown as MemeBoardRow;
+    });
+    const old = buildShortlist(legacy, parseShortlistQuery(() => undefined), NOW).rows.find((r) => r.address === addr(1))!;
+    assert.equal(old.flow5m, null);
+    assert.equal(old.smartInflow5m, null);
+    assert.equal(old.smartInflow1h, null);
   });
 });
