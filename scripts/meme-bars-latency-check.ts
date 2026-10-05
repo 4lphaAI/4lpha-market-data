@@ -39,6 +39,7 @@ const boardTimer = setInterval(() => void refreshBoard().catch(() => {}), 60_000
 await new Promise((resolve) => setTimeout(resolve, 90_000));
 const lags: number[] = [];
 const calls: number[] = [];
+const corrected: number[] = [];
 let lastCycleAt = 0;
 const end = Date.now() + minutes * 60_000;
 while (Date.now() < end) {
@@ -49,7 +50,7 @@ while (Date.now() < end) {
     if (view.lastClosedStartMs !== null && view.staleness === "fresh") lags.push((now - (view.lastClosedStartMs + 60_000)) / 1000);
   }
   const cycle = (await store.get<BarsIndex>(MEME_BARS_INDEX_KEY))?.data.lastCycle;
-  if (cycle && cycle.at !== lastCycleAt) { calls.push(cycle.calls); lastCycleAt = cycle.at; }
+  if (cycle && cycle.at !== lastCycleAt) { calls.push(cycle.calls); corrected.push(cycle.corrected); lastCycleAt = cycle.at; }
   await new Promise((resolve) => setTimeout(resolve, 17_000));
 }
 clearInterval(boardTimer);
@@ -60,3 +61,4 @@ const q = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorte
 console.log(`reads ${Math.round(lags.length / Math.max(1, shortlist.length))} x ${shortlist.length} shortlisted tokens = ${lags.length} samples`);
 console.log(`lag s: p50 ${q(0.5)} p90 ${q(0.9)} max ${sorted.at(-1)?.toFixed(1)} min ${sorted[0]?.toFixed(1)}`);
 console.log(`Sintral calls per cycle (one cycle per minute): ${JSON.stringify(calls)}`);
+console.log(`closed bars corrected by the re-read, per cycle: ${JSON.stringify(corrected)}`);

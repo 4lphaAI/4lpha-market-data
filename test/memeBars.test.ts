@@ -13,12 +13,14 @@ import {
   MEME_BARS_INDEX_KEY,
   MEME_BARS_KEEP,
   MEME_BARS_LEASE,
-  MEME_BARS_TICK_MS,
   SETTLE_MS,
   BARS_DEAD_MS,
   UNKNOWN_RETRY_MS,
   backoffMs,
+  countCorrections,
   fetchLimit,
+  memeBarsJob,
+  msUntilNextRun,
   lastClosedMinute,
   memeBarsKey,
   readMemeBars,
@@ -107,9 +109,9 @@ describe("normalizeSintralMinuteBars", () => {
     assert.deepEqual(bars.map((b) => [b.startMs, b.close, b.trades]), [[NOW, 0.00031, 4], [NOW + MIN, 0.00038, 98]]);
   });
 
-  it("closes a minute 15 s after its end", () => {
-    assert.equal(lastClosedMinute(NOW + MIN + 15_000), NOW);
-    assert.equal(lastClosedMinute(NOW + MIN + 14_999), NOW - MIN);
+  it("closes a minute 20 s after its end", () => {
+    assert.equal(lastClosedMinute(NOW + MIN + 20_000), NOW);
+    assert.equal(lastClosedMinute(NOW + MIN + 19_999), NOW - MIN);
   });
 });
 
@@ -225,7 +227,7 @@ describe("runMemeBars", () => {
   it("backfills each live meme stock on entry, closed minutes only, then reads incrementally", async () => {
     const h = await harness();
     const first = await h.run();
-    assert.deepEqual(first, { tracked: 2, candidates: 2, capped: false, calls: 2, failures: 0, throttled: false });
+    assert.deepEqual(first, { tracked: 2, candidates: 2, capped: false, calls: 2, failures: 0, throttled: false, corrected: 0 });
     assert.deepEqual(h.asked.map(([, limit]) => limit), [MEME_BARS_KEEP + 2, MEME_BARS_KEEP + 2]);
     const one = (await series(h.store, addr(1)))!;
     assert.equal(one.lastClosedStartMs, NOW);
@@ -431,32 +433,57 @@ describe("bars audit round", () => {
 });
 
 describe("bars latency (MEME-BARS-LATENCY-HANDOFF)", () => {
-  it("reads each minute once, within the close delay plus one tick of its end; idle ticks touch nothing", async () => {
+  it("schedules each run SETTLE_MS after the next minute end", () => {
+    assert.equal(msUntilNextRun(NOW), SETTLE_MS);
+    assert.equal(msUntilNextRun(NOW + 5_000), SETTLE_MS - 5_000);
+    assert.equal(msUntilNextRun(NOW + SETTLE_MS), MIN, "a run that fired on time waits for the next minute");
+    assert.equal(msUntilNextRun(NOW + SETTLE_MS - 200), MIN + 200, "a slightly early run does not refire at once");
+    assert.equal(msUntilNextRun(NOW + 50_000), MIN - 50_000 + SETTLE_MS);
+  });
+
+  it("is registered to run on that schedule, not on a fixed interval", () => {
+    const spec = memeBarsJob(new MemoryStore());
+    assert.equal(spec.nextDelayMs, msUntilNextRun);
+    assert.equal(spec.intervalMs, MIN);
+  });
+
+  it("reads each minute once, SETTLE_MS after it ends, with no idle runs", async () => {
     const h = await harness([row(1)]);
-    // Ticks every 5 s across four minutes, as the scheduler would.
-    const start = NOW + MIN; // end of minute NOW
-    const writesAt: Array<[number, number]> = [];
-    let puts = 0;
-    const put = h.store.put.bind(h.store);
-    h.store.put = async (key, payload, opts) => { puts++; return put(key, payload, opts); };
-    for (let t = start; t < start + 4 * MIN; t += MEME_BARS_TICK_MS) {
+    let t = NOW + MIN + 3_000; // first run lands mid-minute: the entry backfill
+    const runs: Array<{ at: number; closed: number | null; skipped: string | undefined }> = [];
+    for (let i = 0; i < 6; i++) {
       h.clock.now = t;
       await h.store.put(MEME_BOARD_KEY, [row(1)], TTL);
-      puts--; // the board refresh above is the test's, not the job's
-      const before = puts;
       const result = await h.run();
-      if (result.skipped === "up_to_date") assert.equal(puts, before, "an idle tick writes nothing");
-      const s = await series(h.store, addr(1));
-      if (s !== null && (writesAt.length === 0 || writesAt.at(-1)![0] !== s.lastClosedStartMs)) writesAt.push([s.lastClosedStartMs, t]);
+      runs.push({ at: t, closed: (await series(h.store, addr(1)))?.lastClosedStartMs ?? null, skipped: result.skipped });
+      t += msUntilNextRun(t);
     }
-    assert.ok(writesAt.length >= 4);
-    // The first write is the entry backfill at whatever second the test starts; every later one is the cadence.
-    for (const [closedStart, at] of writesAt.slice(1)) {
-      const lag = at - (closedStart + MIN);
-      assert.ok(lag >= SETTLE_MS && lag < SETTLE_MS + MEME_BARS_TICK_MS, `minute read ${lag} ms after its end`);
-    }
-    assert.equal(h.asked.length, writesAt.length, "one Sintral call per token per closed minute");
-    // Per closed minute: the series and the index (and the lease row, which is not a snapshot put).
-    assert.ok(puts <= 2 * writesAt.length, `job wrote ${puts} times over ${writesAt.length} minutes`);
+    assert.ok(runs.every((r) => r.skipped === undefined), "every scheduled run does work");
+    for (const r of runs.slice(1)) assert.equal(r.at - (r.closed! + MIN), SETTLE_MS, "read exactly SETTLE_MS after the minute ends");
+    assert.equal(h.asked.length, runs.length, "one Sintral call per token per closed minute");
+  });
+
+  it("skips a second run inside the same minute without a lease or a write (restart, second replica)", async () => {
+    const h = await harness([row(1)]);
+    await h.run();
+    let leases = 0;
+    let puts = 0;
+    const lease = h.store.acquireSchedulerLease.bind(h.store);
+    const put = h.store.put.bind(h.store);
+    h.store.acquireSchedulerLease = async (...args) => { leases++; return lease(...args); };
+    h.store.put = async (key, payload, opts) => { puts++; return put(key, payload, opts); };
+    h.clock.now += 10_000;
+    assert.equal((await h.run()).skipped, "up_to_date");
+    assert.deepEqual([leases, puts, h.asked.length], [0, 0, 1]);
+  });
+
+  it("counts closed bars a re-read changed, and only those", () => {
+    const first = rebuildSeries(null, [bar(NOW, 1)], NOW + 2 * MIN);
+    const previous = { ...first, lastClosedStartMs: NOW + 2 * MIN };
+    const later = rebuildSeries(first, [bar(NOW + MIN, 5)], NOW + 3 * MIN);
+    // NOW+1m was a fill and is now traded; NOW+2m's fill carries the new close; NOW+3m is new.
+    assert.equal(countCorrections(previous, later.bars), 2);
+    assert.equal(countCorrections(previous, previous.bars), 0);
+    assert.equal(countCorrections(null, later.bars), 0);
   });
 });

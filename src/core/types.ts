@@ -25,6 +25,13 @@ export interface JobSpec {
   intervalMs: number;
   /** Optional upper bound of extra random delay added to each interval. */
   jitterMs?: number;
+  /**
+   * When set, the delay to the next run is computed from the wall clock at each
+   * tick instead of `intervalMs + jitter` — for a job that must run at a fixed
+   * offset from a boundary (e.g. 20 s after every minute closes) rather than on
+   * a drifting interval. `intervalMs` is still validated. Floored at 100 ms.
+   */
+  nextDelayMs?: (now: number) => number;
   /** Maximum wall-clock time a single run may take before it is failed. */
   timeoutMs: number;
   /**

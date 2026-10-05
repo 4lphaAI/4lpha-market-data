@@ -15,10 +15,16 @@
  * its end and the last {@link REFRESH_TAIL} closed minutes are re-read every
  * cycle (a late trade corrects a bar rather than being lost).
  *
- * Latency (MEME-BARS-LATENCY-HANDOFF-2026-10-05): the job ticks every 2 s but
- * reads Sintral only when a new minute has closed, so each minute is read once,
- * {@link SETTLE_MS} plus a few seconds after it ends, instead of up to a full
- * 60 s cycle later. Idle ticks cost one store read and nothing upstream. Missing minutes
+ * Latency (MEME-BARS-LATENCY-HANDOFF-2026-10-05): the job is scheduled to run
+ * {@link SETTLE_MS} after every minute ends ({@link msUntilNextRun}), so each
+ * minute is read once, right after it closes, instead of up to a full 60 s
+ * cycle later. There are no idle runs, so `/status` health is the real cycle's.
+ * Each cycle counts the closed bars its re-read changed (`corrected`). Measured
+ * 2026-10-05 (`scripts/meme-bars-corrections-probe.ts`, 10 cycles, ~75 tokens):
+ * 0-3 per cycle, and every one was Sintral narrowing a wick after the fact —
+ * high or low pulled back to max/min(open, close), 0.5-6%, 1-4 min after the
+ * close — never trades, volume or close, and never a widening. That is the
+ * source revising, not the close delay being short: 45 s would see it too. Missing minutes
  * are zero-filled explicitly — `trades: 0`, `volume: 0`, OHLC at the previous
  * close — so a flat chart reads as silence, not as a gap. Each token keeps the
  * last {@link MEME_BARS_KEEP} closed minutes, backfilled on entry and extended
@@ -57,14 +63,21 @@ export const MEME_BARS_KEEP = 180;
 /**
  * A minute is closed this long after its end. Measured 2026-10-05
  * (`scripts/sintral-settle-probe.ts`, 61 traded bars over three minutes): 57/61
- * final at +6 s, 58/61 at +10 s, 61/61 at +15 s and every later offset. A late
- * change past this is still corrected by the {@link REFRESH_TAIL} re-read.
- * 20 s gave a measured read lag of p50 59.6 s; 15 s with a 2 s tick leaves margin
- * under the handoff's p50 60 s / p90 90 s target.
+ * final at +6 s, 58/61 at +10 s, 61/61 at +15 s and every later offset; an
+ * independent probe of one busy token saw a last change at +15.0 s. 20 s keeps a
+ * margin past that, and with runs aligned to the close (no tick phase) the read
+ * lag still meets the handoff's p50 60 s / p90 90 s. A later change is corrected
+ * by the {@link REFRESH_TAIL} re-read and counted as `corrected`.
  */
-export const SETTLE_MS = 15_000;
-/** Tick: how soon after a minute closes the job notices. */
-export const MEME_BARS_TICK_MS = 2_000;
+export const SETTLE_MS = 20_000;
+
+/** Delay from `now` to the next run: {@link SETTLE_MS} after the next minute end. */
+export function msUntilNextRun(now: number): number {
+  let target = Math.floor(now / MINUTE) * MINUTE + SETTLE_MS;
+  // Half a second of slack so a run that fires a little early does not schedule itself again at once.
+  if (target <= now + 500) target += MINUTE;
+  return target - now;
+}
 /** Closed minutes re-read every cycle, so a late-published trade corrects its bar. */
 export const REFRESH_TAIL = 3;
 export const LEAVE_AFTER_MS = 30 * 60_000;
@@ -128,6 +141,7 @@ export interface BarsIndex {
     calls: number;
     failures: number;
     throttled: boolean;
+    corrected: number;
     boardFresh: boolean;
   } | null;
 }
@@ -194,6 +208,22 @@ export function rebuildSeries(
 }
 
 /**
+ * Exported for tests: closed minutes already served whose bar the rebuild
+ * changed — a trade Sintral published after the close delay.
+ */
+export function countCorrections(previous: Pick<BarSeries, "bars" | "lastClosedStartMs"> | null, rebuilt: readonly StoredBar[]): number {
+  if (previous === null) return 0;
+  const before = new Map(previous.bars.map((bar) => [bar[0], JSON.stringify(bar)]));
+  let changed = 0;
+  for (const bar of rebuilt) {
+    if (bar[0] > previous.lastClosedStartMs) continue;
+    const old = before.get(bar[0]);
+    if (old !== undefined && old !== JSON.stringify(bar)) changed += 1;
+  }
+  return changed;
+}
+
+/**
  * How many Sintral rows to ask for: everything on entry, the gap plus the
  * re-read tail after that. `+ 2` everywhere: the newest two rows are the minute
  * in progress and the one still settling, so a full window needs 182 rows.
@@ -219,6 +249,8 @@ export interface MemeBarsResult {
   calls: number;
   failures: number;
   throttled: boolean;
+  /** Closed bars already served that this cycle's re-read changed. */
+  corrected: number;
 }
 
 interface Candidate {
@@ -280,8 +312,8 @@ export async function runMemeBars(
   const fetchBars = options.fetchBars ?? ((address, limit, s) => fetchSintralMinuteBars({ address, limit, signal: s }));
   const lastClosed = lastClosedMinute(now);
   const index = await readIndex(store);
-  const idle = { tracked: Object.keys(index.tokens).length, candidates: 0, capped: false, calls: 0, failures: 0, throttled: false };
-  // Most ticks: this minute was already read. One store read, no write, no upstream.
+  const idle = { tracked: Object.keys(index.tokens).length, candidates: 0, capped: false, calls: 0, failures: 0, throttled: false, corrected: 0 };
+  // A restart or a second replica inside the same minute: already read.
   if (index.closedThrough !== null && index.closedThrough >= lastClosed) return { skipped: "up_to_date", ...idle };
   // Silent: the throttled cycle already logged when it started backing off.
   if (index.backoff !== null && now < index.backoff.until) return { skipped: "backoff", ...idle };
@@ -308,6 +340,7 @@ export async function runMemeBars(
   let calls = 0;
   let failures = 0;
   let throttled = false;
+  let corrected = 0;
   const queue = Object.entries(selection.tokens);
   const worker = async (): Promise<void> => {
     for (;;) {
@@ -322,6 +355,7 @@ export async function runMemeBars(
         calls += 1;
         const fetched = await fetchBars(address, fetchLimit(previous, lastClosed), signal);
         const rebuilt = rebuildSeries(previous, fetched, lastClosed);
+        corrected += countCorrections(previous, rebuilt.bars);
         const series: BarSeries = {
           address,
           symbol: entry.symbol,
@@ -353,6 +387,7 @@ export async function runMemeBars(
     calls,
     failures,
     throttled,
+    corrected,
   };
   // Departures: a token that left keeps its series for BARS_DEAD_MS, then its key goes.
   const departed: Record<string, number> = {};
@@ -367,13 +402,14 @@ export async function runMemeBars(
   const streak = throttled ? (index.backoff?.streak ?? 0) + 1 : 0;
   const backoff = throttled ? { until: now + backoffMs(streak), streak } : null;
   // A minute is read once: a token that failed waits for the next minute (its
-  // re-read tail catches it up) rather than retrying every 5 s against a failing host.
+  // re-read tail catches it up) rather than retrying at once against a failing host.
   const next: BarsIndex = { tokens: selection.tokens, departed, backoff, closedThrough: lastClosed, lastCycle: { at: now, ...result, boardFresh } };
   if (throttled) console.log(`[${MEME_BARS_JOB}] 429: backing off until ${new Date(backoff!.until).toISOString()}`);
   await store.put(MEME_BARS_INDEX_KEY, next, { source: MEME_BARS_JOB, freshForMs: BARS_FRESH_MS, deadAfterMs: BARS_DEAD_MS });
   console.log(
     `[${MEME_BARS_JOB}] tracked=${result.tracked} calls=${calls} failures=${failures}` +
       (throttled ? " throttled=429" : "") +
+      (corrected > 0 ? ` corrected=${corrected}` : "") +
       (selection.capped ? ` cap=${MEME_BARS_CAP} of ${selection.candidates}` : "") +
       (boardFresh ? "" : " board=not_fresh"),
   );
@@ -469,9 +505,9 @@ const HOLDER = randomUUID();
 export function memeBarsJob(store: SnapshotStore): JobSpec {
   return {
     name: MEME_BARS_JOB,
-    // Ticks often, works once per closed minute (see the latency note above).
-    intervalMs: MEME_BARS_TICK_MS,
-    jitterMs: 500,
+    // Runs SETTLE_MS after every minute end (see the latency note above).
+    intervalMs: MINUTE,
+    nextDelayMs: msUntilNextRun,
     // Up to 120 Sintral reads, four at a time, ~0.2-0.3 s each.
     timeoutMs: 45_000,
     run: async (signal) => {
