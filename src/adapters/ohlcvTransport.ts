@@ -1,6 +1,7 @@
 /** Shared, fail-fast upstream budgets. Lease slots are atomic across replicas. */
 import { randomUUID } from "node:crypto";
 import type { SnapshotStore } from "../core/store.js";
+import { dexPaprikaQuotaScope } from "./dexPaprika.js";
 import { AdapterError, type FetchFn } from "./http.js";
 
 export type OhlcvProvider = "geckoterminal" | "dexpaprika";
@@ -32,7 +33,7 @@ export class OhlcvTransport {
       if (init?.signal?.aborted) throw new AdapterError(provider, "request aborted");
       const stats = this.counters[provider];
       const cooldowns = await Promise.all([402, 429, 500].map((status) =>
-        this.store.get<{ until: number }>(`ohlcv-control:${provider}:cooldown:${status}`)));
+        this.store.get<{ until: number }>(cooldownKey(provider, status))));
       if (cooldowns.some((entry) => (entry?.data.until ?? 0) > this.now())) {
         stats.cooldownDenied++;
         throw new AdapterError(provider, "cooling down");
@@ -76,10 +77,10 @@ export class OhlcvTransport {
             if (Number.isFinite(reset) && reset > now) until = reset;
           } catch { /* Missing reset: wait until the next UTC month. */ }
         }
-        const cooldownKey = `ohlcv-control:${provider}:cooldown:${response.status >= 500 ? 500 : response.status}`;
-        const prior = await this.store.get<{ until: number }>(cooldownKey);
+        const key = cooldownKey(provider, response.status >= 500 ? 500 : response.status);
+        const prior = await this.store.get<{ until: number }>(key);
         until = Math.max(until, prior?.data.until ?? 0);
-        await this.store.put(cooldownKey, { until }, {
+        await this.store.put(key, { until }, {
           source: provider, freshForMs: until - now, deadAfterMs: until - now,
         });
       }
@@ -87,6 +88,17 @@ export class OhlcvTransport {
     };
   }
 }
+/**
+ * Store key of one cooldown. A 402 is a monthly quota, which belongs to the API
+ * key in use, so for DexPaprika it is scoped by the key's fingerprint: a new key
+ * is not held back by the old key's exhausted month. 429 and 5xx stay
+ * provider-wide (a rate limit or an outage is not cured by another key).
+ */
+export function cooldownKey(provider: OhlcvProvider, status: number): string {
+  if (status === 402 && provider === "dexpaprika") return `ohlcv-control:${provider}:${dexPaprikaQuotaScope()}:cooldown:402`;
+  return `ohlcv-control:${provider}:cooldown:${status}`;
+}
+
 function counters(): OhlcvCounters {
   return { requests: 0, failures: 0, rateLimited: 0, budgetDenied: 0, cooldownDenied: 0 };
 }

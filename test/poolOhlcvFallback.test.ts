@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import { MemoryStore, PostgresStore, type PutOptions } from "../src/core/store.js";
 import { FakePg } from "./fakePg.js";
-import { OhlcvTransport } from "../src/adapters/ohlcvTransport.js";
-import { fetchDexCandles, fetchDexPair } from "../src/adapters/dexPaprika.js";
+import { OhlcvTransport, cooldownKey } from "../src/adapters/ohlcvTransport.js";
+import { dexPaprikaQuotaScope, fetchDexCandles, fetchDexPair } from "../src/adapters/dexPaprika.js";
 import { aggregateCandles, getPoolOhlcv, normalizeChart, poolOhlcvDiagnostics, poolOhlcvKey } from "../src/query/poolOhlcv.js";
 
 const POOL = "0x172fcd41e0913e95784454622d1c3724f546f849";
@@ -212,9 +212,50 @@ describe("OHLCV transport protection", () => {
     const pg = new FakePg(); const store = await PostgresStore.create("postgres://unused", { client: pg });
     const reset = Date.now() + 30 * 86_400_000;
     await new OhlcvTransport(store).fetch("dexpaprika", async () => json({ resets_at: new Date(reset).toISOString() }, 402))("https://unused");
-    const saved = await store.get<{ until: number }>("ohlcv-control:dexpaprika:cooldown:402");
+    const saved = await store.get<{ until: number }>(cooldownKey("dexpaprika", 402));
     assert.equal(saved?.data.until, reset);
     await assert.rejects(new OhlcvTransport(store).fetch("dexpaprika", async () => { assert.fail("must not retry"); })("https://unused"), /cooling down/);
+  });
+  it("scopes a DexPaprika 402 to the key that hit it: a replaced key resumes at once, the old one stays blocked", async () => {
+    const previous = { a: process.env["DEXPAPRIKA_API_KEY"], b: process.env["DexPaprika"] };
+    delete process.env["DexPaprika"];
+    try {
+      const store = new MemoryStore();
+      let calls = 0;
+      const exhausted: typeof fetch = async () => { calls++; return json({}, 402); };
+      const healthy: typeof fetch = async () => { calls++; return json({}); };
+      process.env["DEXPAPRIKA_API_KEY"] = "old-exhausted-key";
+      await new OhlcvTransport(store).fetch("dexpaprika", exhausted)("https://unused");
+      await assert.rejects(new OhlcvTransport(store).fetch("dexpaprika", healthy)("https://unused"), /cooling down/);
+      process.env["DEXPAPRIKA_API_KEY"] = "new-key";
+      assert.equal((await new OhlcvTransport(store).fetch("dexpaprika", healthy)("https://unused")).status, 200);
+      process.env["DEXPAPRIKA_API_KEY"] = "old-exhausted-key";
+      await assert.rejects(new OhlcvTransport(store).fetch("dexpaprika", healthy)("https://unused"), /cooling down/);
+      assert.equal(calls, 2, "the exhausted call and the new key's call; nothing while blocked");
+    } finally {
+      if (previous.a === undefined) delete process.env["DEXPAPRIKA_API_KEY"]; else process.env["DEXPAPRIKA_API_KEY"] = previous.a;
+      if (previous.b !== undefined) process.env["DexPaprika"] = previous.b;
+    }
+  });
+  it("keeps 429 and 5xx cooldowns provider-wide, whatever the key", async () => {
+    const previous = process.env["DEXPAPRIKA_API_KEY"];
+    try {
+      process.env["DEXPAPRIKA_API_KEY"] = "key-one";
+      const one = cooldownKey("dexpaprika", 429);
+      process.env["DEXPAPRIKA_API_KEY"] = "key-two";
+      assert.equal(cooldownKey("dexpaprika", 429), one);
+      assert.equal(cooldownKey("dexpaprika", 500), "ohlcv-control:dexpaprika:cooldown:500");
+      assert.equal(cooldownKey("geckoterminal", 402), "ohlcv-control:geckoterminal:cooldown:402");
+    } finally {
+      if (previous === undefined) delete process.env["DEXPAPRIKA_API_KEY"]; else process.env["DEXPAPRIKA_API_KEY"] = previous;
+    }
+  });
+  it("fingerprints the key without revealing it", () => {
+    const scope = dexPaprikaQuotaScope({ DEXPAPRIKA_API_KEY: "api_secret_value_123" });
+    assert.match(scope, /^key-[0-9a-f]{12}$/u);
+    assert.equal(scope.includes("secret"), false);
+    assert.equal(dexPaprikaQuotaScope({ DexPaprika: " api_secret_value_123 " }), scope, "the legacy name and whitespace map to the same quota");
+    assert.equal(dexPaprikaQuotaScope({}), "nokey");
   });
 });
 

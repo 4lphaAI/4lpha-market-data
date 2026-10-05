@@ -1,4 +1,5 @@
 /** Exact-pool price ratios, not token-wide USD candles. Optional free API key. */
+import { createHash } from "node:crypto";
 import type { Candle } from "../core/models.js";
 import { AdapterError, fetchJson, isRecord, normalizeAddress, parseNum, parseStr, type FetchFn } from "./http.js";
 import type { GeckoTokenRef } from "./geckoTerminal.js";
@@ -7,9 +8,25 @@ const SOURCE = "dexpaprika";
 export type DexCandle = Omit<Candle, "volume"> & {volume: number | null};
 const BASE = "https://api.dexpaprika.com/networks/bsc/pools";
 /** The mixed-case alias supports the operator's existing .env without editing it. */
+function readKey(env: NodeJS.ProcessEnv = process.env): string | null {
+  const key = (env["DEXPAPRIKA_API_KEY"] ?? env["DexPaprika"])?.trim();
+  return key ? key : null;
+}
 function headers(): Record<string, string> {
-  const key = (process.env["DEXPAPRIKA_API_KEY"] ?? process.env["DexPaprika"])?.trim();
+  const key = readKey();
   return key ? { Authorization: key } : {};
+}
+
+/**
+ * Which quota the current requests draw on: a short SHA-256 fingerprint of the
+ * key (never the key itself), or `nokey`. A monthly-quota 402 belongs to one key,
+ * so its cooldown is scoped by this — replacing an exhausted key resumes calls
+ * at once instead of waiting out the old key's month (2026-10-05: a new key sat
+ * unused behind the old key's 402 cooldown).
+ */
+export function dexPaprikaQuotaScope(env: NodeJS.ProcessEnv = process.env): string {
+  const key = readKey(env);
+  return key === null ? "nokey" : `key-${createHash("sha256").update(key).digest("hex").slice(0, 12)}`;
 }
 export interface DexPair { base: GeckoTokenRef & { address: string }; quote: GeckoTokenRef & { address: string } }
 export interface DexParams {
