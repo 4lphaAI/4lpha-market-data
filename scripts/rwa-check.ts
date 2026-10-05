@@ -12,7 +12,7 @@ import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import { createServer } from "../src/server.js";
 import { hasBinanceRwaCredentials } from "../src/adapters/binanceRwa.js";
-import { runBinanceRwa } from "../src/jobs/binanceRwa.js";
+import { readShareFactsOnChain, runBinanceRwa } from "../src/jobs/binanceRwa.js";
 import { VENUES_PER_CYCLE, runStockVenues } from "../src/jobs/stockVenues.js";
 import type { UniverseEntry } from "../src/core/models.js";
 
@@ -26,7 +26,7 @@ if (!hasBinanceRwaCredentials()) {
   console.log("BINANCE_WEB3_API_KEY/SECRET_KEY not set — static bStocks only");
 } else {
   const t0 = Date.now();
-  const rwa = await runBinanceRwa(store, AbortSignal.timeout(20_000));
+  const rwa = await runBinanceRwa(store, AbortSignal.timeout(20_000), { readShareFacts: readShareFactsOnChain });
   console.log(`binance-rwa ${Date.now() - t0}ms`, rwa);
 }
 

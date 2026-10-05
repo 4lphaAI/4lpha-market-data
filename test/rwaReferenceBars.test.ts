@@ -207,8 +207,9 @@ describe("reference-price recorder: the 1 bp change floor and the anchor (R4.4)"
   it("moves below 1 bp never count", async () => {
     assert.equal(await changesOf([100, 100.005, 100, 100.0099, 99.9901]), 0);
   });
-  it("a move of exactly 1 bp counts", async () => {
-    assert.equal(await changesOf([100, 100.01]), 1);
+  it("a move of exactly 1 bp counts, an integer-exact vector so the boundary is inclusive", async () => {
+    assert.equal(await changesOf([10000, 10001]), 1);
+    assert.equal(await changesOf([10000, 10000.5]), 0);
   });
   it("a slow drift of 0.4 bp per sample counts on its third sample, then restarts from the new anchor", async () => {
     assert.equal(await changesOf([100, 100.004, 100.008]), 0);

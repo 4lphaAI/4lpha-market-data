@@ -432,6 +432,15 @@ describe("underlying features job and routes", () => {
     assert.equal(JSON.stringify((await store.get(FEATURE_INDEX_KEY_V2))?.data), poolBefore);
   });
 
+  it("takes its producer lease for 60 000 ms under the pinned name", async () => {
+    const store = await world([rwaRow(T1)]);
+    const calls: Array<[string, number]> = [];
+    const original = store.acquireSchedulerLease.bind(store);
+    store.acquireSchedulerLease = async (lease, holder, ttlMs) => { calls.push([lease, ttlMs]); return original(lease, holder, ttlMs); };
+    await quietly(() => run(store, clock.t));
+    assert.deepEqual(calls, [["trading-underlying-features:v1:producer", 60_000]]);
+  });
+
   it("a second holder inside the lease window attempts nothing", async () => {
     const store = await world([rwaRow(T1)]);
     await quietly(() => run(store, clock.t));
@@ -489,6 +498,17 @@ describe("underlying features job and routes", () => {
       const attempt = (await stateOf(store))[key(T1, "15m")]!;
       assert.equal(attempt.state, "ready");
       assert.equal(attempt.reason, "ready");
+    });
+
+    it("a too_few_real_bars 15m series keeps the 300 s floor even a minute before its next close", async () => {
+      const store = await world([rwaRow(T1)]);
+      // 5 hours of recording: 20 real 15m buckets, below the 30 floor.
+      await recordSeries(store, [T1], Date.UTC(2026, 9, 7, 11, 0, 0), END);
+      const now = END + 14 * MIN + 30_000; // refreshAfter (16:15:15) is 45 s away; the recorder is 870 s old
+      await run(store, now);
+      const attempt = (await stateOf(store))[key(T1, "15m")]!;
+      assert.equal(attempt.reason, "too_few_real_bars");
+      assert.ok(attempt.nextAttempt - now >= 300_000, `nextAttempt is ${attempt.nextAttempt - now} ms away`);
     });
 
     it("writes a snapshot only when its id changed", async () => {
