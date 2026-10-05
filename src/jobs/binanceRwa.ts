@@ -29,9 +29,12 @@ import {
 } from "../adapters/binanceRwa.js";
 import type { FetchFn } from "../adapters/http.js";
 import { normalizeAddress, sanitizeMessage } from "../adapters/http.js";
+import { randomUUID } from "node:crypto";
 import { allowlistedStocks } from "../allowlist.js";
+import { isContractLevelFailure, withBscClient } from "../chain/rpc.js";
 import { MEME_BOARD_KEY } from "./memeBoard.js";
 import { RWA_MEMBERS_KEY, RWA_UNIVERSE_KEY, RWA_VENUES_KEY } from "../universe.js";
+import { RECORDER_DEADLINE_MS, recordReferenceBars, type ReferenceObservation } from "./rwaReferenceBars.js";
 import { mergeTokenIntoStore } from "./tokenStore.js";
 
 export const BINANCE_RWA_JOB = "binance-rwa";
@@ -74,8 +77,69 @@ export function normalizeRwaMembers(data: unknown): RwaMembers {
   return out;
 }
 
+/**
+ * What the chain says about one per-address stock's share ratio. `uiMultiplier`
+ * is the raw 1e18-scaled value; range checks belong to the caller so they hold
+ * for every reader.
+ */
+export interface ShareFacts {
+  uiMultiplier: bigint;
+  decimals: number;
+}
+
+/**
+ * One read set for every per-address stock. `null` for a token means its own
+ * contract answered with a revert (a definite "no"); a throw means the whole set
+ * is unknown. Either way the ratio stays null this cycle, never a carried value.
+ */
+export type ShareFactsReader = (
+  addresses: readonly string[],
+  signal: AbortSignal,
+) => Promise<ReadonlyMap<string, ShareFacts | null>>;
+
+/** The combined D1 chain-read deadline (R5.3); the recorder has its own. */
+export const SHARE_READ_DEADLINE_MS = 2_500;
+
+const SHARE_FACTS_ABI = [
+  { type: "function", name: "uiMultiplier", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
+  { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ type: "uint8" }] },
+] as const;
+
+/**
+ * The live reader: `uiMultiplier()` and `decimals()` of each token on one
+ * endpoint, replayed on the next endpoint when one fails as transport. Measured
+ * 2026-10-04: `uiMultiplier / 1e18` equals Binance's own `tokenToShareRatio` on
+ * 46 of 46 listed bStocks.
+ */
+export const readShareFactsOnChain: ShareFactsReader = (addresses, signal) =>
+  withBscClient(async (client) => {
+    const out = new Map<string, ShareFacts | null>();
+    await Promise.all(addresses.map(async (address) => {
+      try {
+        const target = address as `0x${string}`;
+        const [uiMultiplier, decimals] = await Promise.all([
+          client.readContract({ address: target, abi: SHARE_FACTS_ABI, functionName: "uiMultiplier" }),
+          client.readContract({ address: target, abi: SHARE_FACTS_ABI, functionName: "decimals" }),
+        ]);
+        out.set(address, { uiMultiplier, decimals });
+      } catch (error) {
+        if (!isContractLevelFailure(error)) throw error;
+        out.set(address, null);
+      }
+    }));
+    return out;
+  }, { signal });
+
 export interface RunBinanceRwaOptions {
   fetchFn?: FetchFn | undefined;
+  /**
+   * Chain reader for the per-address share ratio (D1). Absent = no chain read, so
+   * a bare `runBinanceRwa` stays offline and the ratio fails closed to null;
+   * `binanceRwaJob` supplies {@link readShareFactsOnChain}.
+   */
+  readShareFacts?: ShareFactsReader | undefined;
+  /** Clock for the reference-price recorder's observation time; tests inject it. */
+  now?: (() => number) | undefined;
 }
 
 export interface BinanceRwaCycle {
@@ -100,11 +164,13 @@ export async function runBinanceRwa(
   options: RunBinanceRwaOptions = {},
 ): Promise<BinanceRwaCycle> {
   const listed = await fetchRwaTokens({ signal, fetchFn: options.fetchFn });
+  // The recorder's observation time: the data-plane clock right after the list call returned.
+  const observedAt = (options.now ?? Date.now)();
   const { dropped } = listed;
   // An empty list is an outage or a shape change, not a real universe; keeping
   // the previous snapshot is strictly better than publishing nothing.
   if (listed.tokens.length === 0) throw new Error("rwa token list returned no BSC rows");
-  const extras = await fetchUnlistedAllowlisted(listed.tokens, signal, options.fetchFn);
+  const extras = await fetchUnlistedAllowlisted(listed.tokens, signal, options.fetchFn, options.readShareFacts);
   const tokens = [...listed.tokens, ...extras.rows];
 
   const byPlatform: Record<string, number> = {};
@@ -127,6 +193,10 @@ export async function runBinanceRwa(
     freshForMs: RWA_MEMBERS_FRESH_FOR_MS,
     deadAfterMs: RWA_MEMBERS_DEAD_AFTER_MS,
   });
+
+  // Underlying reference prices for the feature series. After both puts above and under its
+  // own deadline, so it can neither delay nor fail the snapshot those puts published.
+  await recordReferences(store, tokens, signal, observedAt);
 
   // The token surface gets the documented price. `volume24H` is the
   // underlying equity's exchange volume and is deliberately not written to
@@ -162,6 +232,46 @@ export async function runBinanceRwa(
     perAddressMissed: extras.missed,
     quoteStocks,
   };
+}
+
+/**
+ * One recorder pass over the bStock rows of this cycle. Any error is logged once and
+ * swallowed: the job result and the published snapshot do not depend on it.
+ */
+async function recordReferences(
+  store: SnapshotStore,
+  tokens: readonly RwaToken[],
+  signal: AbortSignal,
+  observedAt: number,
+): Promise<void> {
+  try {
+    const observations: ReferenceObservation[] = [];
+    for (const token of tokens) {
+      const value = token.referencePriceUsd;
+      if (token.platform !== "bstock" || value === null || !Number.isFinite(value) || !(value > 0)) continue;
+      observations.push({
+        token: token.address,
+        underlyingTicker: token.underlyingTicker,
+        endpoint: token.origin === "per-address" ? "price" : "tokens",
+        value,
+      });
+    }
+    const result = await recordReferenceBars(store, observations, {
+      observedAt,
+      holder: randomUUID(),
+      jobSignal: signal,
+      deadline: AbortSignal.timeout(RECORDER_DEADLINE_MS),
+    });
+    if (result.reason === "lease_lost") console.warn(`[${BINANCE_RWA_JOB}] recorder lease lost; open state not written`);
+    if (result.deadlineFired) {
+      console.warn(`[${BINANCE_RWA_JOB}] recorder deadline: deferred ${result.deferred} of ${result.closes + result.deferred} closes, ${result.ms} ms`);
+    }
+    if (result.closes15m > 0) {
+      console.log(`[${BINANCE_RWA_JOB}] recorder boundary: ${result.closes} closes, ${result.storeOps} store ops, ${result.ms} ms`);
+    }
+  } catch (error) {
+    console.warn(`[${BINANCE_RWA_JOB}] recorder failed: ${sanitizeMessage(error)}`);
+  }
 }
 
 /** Store key for bStocks that quote memes but are not in `universe:rwa` (see {@link refreshQuoteStocks}). */
@@ -278,6 +388,7 @@ async function fetchUnlistedAllowlisted(
   listed: readonly RwaToken[],
   signal: AbortSignal,
   fetchFn: FetchFn | undefined,
+  readShareFacts: ShareFactsReader | undefined,
 ): Promise<{ rows: RwaToken[]; missed: string[] }> {
   const known = new Set(listed.map((token) => token.address));
   const wanted = allowlistedStocks().filter((entry) => entry.readPerAddress && !known.has(entry.address));
@@ -303,8 +414,13 @@ async function fetchUnlistedAllowlisted(
       continue;
     }
     const price = prices.get(entry.address);
+    // `/rwa/price.tokenPrice` is the per-share price here (measured: one ratio
+    // below the listed rows' `tokenPrice`, equal to their `referencePrice`), so
+    // it is the reference on the same basis as the 46 listed rows. Its own
+    // `referencePrice` is one ratio lower and `/rwa/underlying-market`'s has no
+    // measured basis; neither is used.
     const tokenPriceUsd = price?.tokenPriceUsd ?? null;
-    const referencePriceUsd = price?.referencePriceUsd ?? market.referencePriceUsd;
+    const referencePriceUsd = tokenPriceUsd;
     rows.push({
       address: entry.address,
       symbol: entry.symbol,
@@ -327,7 +443,71 @@ async function fetchUnlistedAllowlisted(
       origin: "per-address",
     });
   }
+  await fillShareFacts(rows, readShareFacts, signal);
   return { rows, missed };
+}
+
+/**
+ * D1: `tokenToShareRatio` and `decimals` of the per-address rows from the chain,
+ * read this cycle or null. Both fields are set together or stay null together,
+ * and a failed, hung or out-of-range read never falls back to an earlier cycle.
+ *
+ * The read runs under its own deadline (R5.3) and never touches the Binance
+ * reads above, whose `signal.aborted` break would drop rows. With a ratio the
+ * row's `tokenPriceUsd` becomes the token's fair price (`reference x ratio`);
+ * without one it stays the per-share price, never null.
+ */
+async function fillShareFacts(
+  rows: RwaToken[],
+  read: ShareFactsReader | undefined,
+  jobSignal: AbortSignal,
+): Promise<void> {
+  if (rows.length === 0 || read === undefined) return;
+  let facts: ReadonlyMap<string, ShareFacts | null>;
+  try {
+    const deadline = AbortSignal.any([jobSignal, AbortSignal.timeout(SHARE_READ_DEADLINE_MS)]);
+    facts = await raceAbort(read(rows.map((row) => row.address), deadline), deadline);
+  } catch (error) {
+    console.warn(`[${BINANCE_RWA_JOB}] share-ratio chain read failed: ${sanitizeMessage(error)}`);
+    return;
+  }
+  for (const row of rows) {
+    const fact = facts.get(row.address);
+    if (fact === undefined || fact === null) continue;
+    const decimals = fact.decimals;
+    if (typeof fact.uiMultiplier !== "bigint" || fact.uiMultiplier <= 0n) continue;
+    if (typeof decimals !== "number" || !Number.isInteger(decimals) || decimals < 0 || decimals > 36) continue;
+    const ratio = Number(fact.uiMultiplier) / 1e18;
+    if (!(ratio > 0) || !Number.isFinite(ratio)) continue;
+    row.tokenToShareRatio = ratio;
+    row.decimals = decimals;
+    if (row.referencePriceUsd !== null) {
+      row.tokenPriceUsd = row.referencePriceUsd * ratio;
+      row.navPremiumBps = premiumBps(row.tokenPriceUsd, row.referencePriceUsd);
+    }
+  }
+}
+
+/** Rejects with the signal's reason when it fires, whether or not `work` ever settles. */
+function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /** Deepest venue's 24h volume per token, from the `stock-venues` snapshot; empty when unswept. */
@@ -360,7 +540,7 @@ export function binanceRwaJob(store: SnapshotStore): JobSpec {
     jitterMs: 5_000,
     timeoutMs: 20_000,
     run: async (signal) => {
-      const result = await runBinanceRwa(store, signal);
+      const result = await runBinanceRwa(store, signal, { readShareFacts: readShareFactsOnChain });
       if (result.dropped > 0) {
         console.warn(`[${BINANCE_RWA_JOB}] dropped ${result.dropped} unparseable rows of ${result.rows + result.dropped}`);
       }

@@ -30,6 +30,8 @@ import { MAX_KLINE_LIMIT, SUPPORTED_INTERVALS, getKlines, parseInterval } from "
 import { getPoolOhlcv, poolOhlcvDiagnostics } from "./query/poolOhlcv.js";
 import { FEATURE_INDEX_KEY, FEATURE_INDEX_KEY_V2, FEATURE_VERSION, FEATURE_VERSION_V2, featureKey, isFeatureInterval, readTradingFeatures, readFeatureAttempt,
   type FeatureSnapshot } from "./query/tradingFeatures.js";
+import { UNDERLYING_FEATURE_INDEX_KEY, UNDERLYING_FEATURE_VERSION, isUnderlyingInterval, readUnderlyingAttempt, readUnderlyingFeatures,
+  type UnderlyingFeatureIndex } from "./query/tradingFeatures.js";
 import type { FeatureIndex } from "./jobs/tradingFeatures.js";
 import { readEquityRegime } from "./query/equityRegime.js";
 import { getSecurity } from "./query/security.js";
@@ -1298,6 +1300,40 @@ export function createServer(deps: ServerDeps): Hono {
     return c.json({ data: Object.fromEntries(entries), meta: { version, interval, count: entries.length } });
   });
   }
+
+// underlying-features-v1 (agentic-rfq-stocks): bStocks with no pool series, indicators over the recorded
+  // underlying reference price. Store-only reads under their own prefix; a request never triggers upstream work.
+  const UNDERLYING_PREFIX = "/trading/underlying-features/v1";
+  app.get(`${UNDERLYING_PREFIX}/tokens`, async (c) => {
+    const index = await deps.store.get<UnderlyingFeatureIndex>(UNDERLYING_FEATURE_INDEX_KEY);
+    const series = index ? await Promise.all(index.data.tokens.flatMap((t) => index.data.intervals.map(async (interval) => ({
+      tokenAddress: t.tokenAddress, interval, producer: await readUnderlyingAttempt(deps.store, t.tokenAddress, interval),
+    })))) : [];
+    return c.json({ data: index ? { ...index.data, series } : null, meta: { version: UNDERLYING_FEATURE_VERSION,
+      asOf: index?.asOf ?? null, staleness: index?.staleness ?? "dead" } });
+  });
+
+  app.get(UNDERLYING_PREFIX, async (c) => {
+    const raw = (c.req.query("tokens") ?? "").split(",");
+    const interval = c.req.query("interval") ?? "";
+    const tokens = raw.map((value) => normalizeAddress(value));
+    if (raw.length > 10 || tokens.some((value) => value === null) || !isUnderlyingInterval(interval)
+      || Object.keys(c.req.query()).some((key) => !["tokens", "interval"].includes(key))) {
+      return c.json({ data: null, error: { code: "invalid_request", message: "1..10 token addresses and interval 15m or 1h required" } }, 400);
+    }
+    const index = await deps.store.get<UnderlyingFeatureIndex>(UNDERLYING_FEATURE_INDEX_KEY);
+    const version = UNDERLYING_FEATURE_VERSION;
+    const entries = await Promise.all([...new Set(tokens as string[])].map(async (token) => {
+      if (!index?.data.tokens.some((entry) => entry.tokenAddress === token)) return [token, { data: null, error: { code: "outside_feature_watchlist" } }] as const;
+      try {
+        const producer = await readUnderlyingAttempt(deps.store, token, interval);
+        const result = await readUnderlyingFeatures(deps.store, token, interval, Date.now());
+        return [token, result ? { data: result, meta: { version, producer } }
+          : { data: null, error: { code: producer.state === "unavailable" ? "features_unavailable" : "features_pending", reason: producer.reason }, meta: { version, producer } }] as const;
+      } catch { return [token, { data: null, error: { code: "store_unavailable" } }] as const; }
+    }));
+    return c.json({ data: Object.fromEntries(entries), meta: { version, interval, count: entries.length } });
+  });
 
   app.get("/pools/:address/ohlcv", async (c) => {
     const poolAddress = c.req.param("address").toLowerCase();

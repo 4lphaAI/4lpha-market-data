@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, it } from "node:test";
 import type { SnapshotStore } from "../src/core/store.js";
 import { MemoryStore, PostgresStore } from "../src/core/store.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { createServer } from "../src/server.js";
-import { runBinanceRwa, type RwaUniverseSnapshot } from "../src/jobs/binanceRwa.js";
+import { runBinanceRwa, type RwaUniverseSnapshot, type ShareFactsReader } from "../src/jobs/binanceRwa.js";
 import {
   VENUES_MIN_SPACING_MS,
   runStockVenues,
@@ -340,6 +341,197 @@ describe("GET /universe with the RWA lanes", () => {
     const keys = body.data.snapshots.map((s) => s.key);
     assert.ok(keys.includes("universe:rwa"));
     assert.ok(keys.includes("venues:rwa"));
+  });
+});
+
+describe("per-address share ratio, decimals and reference basis (D1, R3.8, R5.9)", () => {
+  const PYPLB = "0x2806a561fc1f9259b2d54a281796bde0d92762ae";
+  const AAPLB = "0x431a3bee82e2ca41e49895cbece5bb0f76a89b7a";
+  const COHRB = "0x5131859a059b2446abeefe0f5d313b3c54ff3d36";
+  const CRDOB = "0x6e7d451f9d30327d32020f116fa79c23b24e9c8d";
+  const PER_ADDRESS = [PYPLB, AAPLB, COHRB, CRDOB];
+  // On-chain `uiMultiplier()` values measured 2026-10-04.
+  const MULTIPLIER: Record<string, bigint> = {
+    [PYPLB]: 1001771778813000000n, [AAPLB]: 1000603906076000000n, [COHRB]: 1000000000000000000n, [CRDOB]: 1000000000000000000n,
+  };
+  // `/rwa/price`: tokenPrice is the per-share price, referencePrice is one ratio lower; `underlying-market`
+  // carries a deliberately absurd referencePrice that must never be used.
+  const PRICE: Record<string, { tokenPrice: string; referencePrice: string }> = {
+    [PYPLB]: { tokenPrice: "53.11", referencePrice: "53.016067" },
+    [AAPLB]: { tokenPrice: "333.55", referencePrice: "333.35" },
+    [COHRB]: { tokenPrice: "336.96", referencePrice: "336.96" },
+    [CRDOB]: { tokenPrice: "120.5", referencePrice: "120.5" },
+  };
+  function upstream(): ReturnType<typeof fakeFetch> {
+    return fakeFetch((call) => {
+      if (call.url.includes("/rwa/tokens")) return ok([NVDAB_ROW]);
+      if (call.url.includes("/rwa/price")) {
+        return ok(PER_ADDRESS.map((a) => ({ tokenContractAddress: a, platformId: "bstock", ...PRICE[a] })));
+      }
+      if (call.url.includes("/rwa/underlying-market")) {
+        const address = PER_ADDRESS.find((a) => call.url.includes(a));
+        return ok({ tokenContractAddress: address, platformId: "bstock", statusInfo: { openState: true, marketStatus: null, reasonCode: "TRADING" },
+          marketData: { referencePrice: "999999", marketCap: "1" } });
+      }
+      return jsonResponse({ code: 500, msg: "unexpected", data: null }, 500);
+    });
+  }
+  const fullReader = (calls?: string[][]): ShareFactsReader => async (addresses) => {
+    calls?.push([...addresses]);
+    return new Map(addresses.map((a) => [a, { uiMultiplier: MULTIPLIER[a]!, decimals: 18 }]));
+  };
+  async function rowsOf(options: Parameters<typeof runBinanceRwa>[2]): Promise<Map<string, Record<string, unknown>>> {
+    setCredentials();
+    const store = new MemoryStore();
+    await runBinanceRwa(store, signal(), options);
+    const snapshot = (await store.get<RwaUniverseSnapshot>(RWA_UNIVERSE_KEY))!.data;
+    return new Map(snapshot.rows.map((row) => [row.address, row as unknown as Record<string, unknown>]));
+  }
+
+  it("fills the ratio as uiMultiplier / 1e18 and decimals from the chain (vector PYPLB 1.001771778813)", async () => {
+    const calls: string[][] = [];
+    const rows = await rowsOf({ fetchFn: upstream().fetch, readShareFacts: fullReader(calls) });
+    assert.equal(calls.length, 1, "one read set per cycle");
+    assert.deepEqual([...calls[0]!].sort(), [...PER_ADDRESS].sort(), "per-address rows only, never the listed ones");
+    assert.equal(rows.get(PYPLB)?.["tokenToShareRatio"], Number(1001771778813000000n) / 1e18);
+    assert.ok(Math.abs((rows.get(PYPLB)?.["tokenToShareRatio"] as number) - 1.001771778813) < 1e-12);
+    assert.equal(rows.get(COHRB)?.["tokenToShareRatio"], 1);
+    for (const a of PER_ADDRESS) assert.equal(rows.get(a)?.["decimals"], 18);
+  });
+
+  it("sets referencePriceUsd to /rwa/price tokenPrice, never the underlying-market value, and tokenPriceUsd to reference x ratio", async () => {
+    const rows = await rowsOf({ fetchFn: upstream().fetch, readShareFacts: fullReader() });
+    const pypl = rows.get(PYPLB)!;
+    assert.equal(pypl["referencePriceUsd"], 53.11);
+    assert.ok(Math.abs((pypl["tokenPriceUsd"] as number) - 53.11 * (Number(1001771778813000000n) / 1e18)) < 1e-9);
+    assert.equal(pypl["navPremiumBps"], 18, "ratio minus one in bps");
+    assert.equal(rows.get(COHRB)?.["referencePriceUsd"], 336.96);
+    assert.equal(rows.get(COHRB)?.["tokenPriceUsd"], 336.96);
+    assert.equal(rows.get(COHRB)?.["navPremiumBps"], 0);
+    for (const a of PER_ADDRESS) assert.notEqual(rows.get(a)?.["referencePriceUsd"], 999999, "the underlying-market reference is never used");
+  });
+
+  it("QCOMB-style vector: price 188.56 with ratio 1.003804323224 gives reference 188.56, token 189.2773, +38 bps", async () => {
+    const reader: ShareFactsReader = async (addresses) =>
+      new Map(addresses.map((a) => [a, { uiMultiplier: 1003804323224000000n, decimals: 18 }]));
+    const fake = fakeFetch((call) => {
+      if (call.url.includes("/rwa/tokens")) return ok([NVDAB_ROW]);
+      if (call.url.includes("/rwa/price")) return ok([{ tokenContractAddress: COHRB, platformId: "bstock", tokenPrice: "188.56", referencePrice: "187.845" }]);
+      if (call.url.includes("/rwa/underlying-market") && call.url.includes(COHRB)) {
+        return ok({ tokenContractAddress: COHRB, platformId: "bstock", statusInfo: { openState: true, reasonCode: "TRADING" }, marketData: {} });
+      }
+      return jsonResponse({ code: 500, msg: "down", data: null }, 500);
+    });
+    const row = (await rowsOf({ fetchFn: fake.fetch, readShareFacts: reader })).get(COHRB)!;
+    assert.equal(row["referencePriceUsd"], 188.56);
+    assert.ok(Math.abs((row["tokenPriceUsd"] as number) - 189.2773) < 1e-4);
+    assert.equal(row["navPremiumBps"], 38);
+  });
+
+  it("a ratio that cannot be read leaves ratio and decimals null and keeps tokenPriceUsd the per-share price", async () => {
+    const rows = await rowsOf({ fetchFn: upstream().fetch });
+    for (const a of PER_ADDRESS) {
+      const row = rows.get(a)!;
+      assert.equal(row["tokenToShareRatio"], null);
+      assert.equal(row["decimals"], null);
+      assert.equal(row["tokenPriceUsd"], row["referencePriceUsd"]);
+      assert.equal(row["navPremiumBps"], 0);
+    }
+  });
+
+  it("a failed or zero multiplier read, a decimals of 255 and a revert each null both fields for that token only", async () => {
+    const reader: ShareFactsReader = async () => new Map([
+      [PYPLB, { uiMultiplier: 0n, decimals: 18 }],
+      [AAPLB, { uiMultiplier: MULTIPLIER[AAPLB]!, decimals: 255 }],
+      [COHRB, null],
+      [CRDOB, { uiMultiplier: MULTIPLIER[CRDOB]!, decimals: 18 }],
+    ]);
+    const rows = await rowsOf({ fetchFn: upstream().fetch, readShareFacts: reader });
+    for (const a of [PYPLB, AAPLB, COHRB]) {
+      assert.equal(rows.get(a)?.["tokenToShareRatio"], null, a);
+      assert.equal(rows.get(a)?.["decimals"], null, a);
+    }
+    assert.equal(rows.get(CRDOB)?.["tokenToShareRatio"], 1);
+    assert.equal(rows.get(CRDOB)?.["decimals"], 18);
+  });
+
+  it("a throwing reader nulls every per-address token and still publishes the four rows", async () => {
+    const rows = await rowsOf({ fetchFn: upstream().fetch, readShareFacts: async () => { throw new Error("all rpc endpoints failed"); } });
+    for (const a of PER_ADDRESS) {
+      assert.ok(rows.has(a), a);
+      assert.equal(rows.get(a)?.["tokenToShareRatio"], null);
+      assert.equal(rows.get(a)?.["decimals"], null);
+    }
+  });
+
+  it("a ratio from an earlier cycle is never carried into a cycle that fails to read", async () => {
+    setCredentials();
+    const store = new MemoryStore();
+    const fake = upstream();
+    await runBinanceRwa(store, signal(), { fetchFn: fake.fetch, readShareFacts: fullReader() });
+    await runBinanceRwa(store, signal(), { fetchFn: fake.fetch, readShareFacts: async () => { throw new Error("down"); } });
+    const rows = (await store.get<RwaUniverseSnapshot>(RWA_UNIVERSE_KEY))!.data.rows;
+    assert.equal(rows.find((r) => r.address === PYPLB)?.tokenToShareRatio, null);
+  });
+
+  it("a hanging chain read still yields four per-address rows, with null ratios, within the 2.5 s budget", { timeout: 15_000 }, async () => {
+    setCredentials();
+    const store = new MemoryStore();
+    const started = Date.now();
+    const never: ShareFactsReader = () => new Promise(() => {});
+    await runBinanceRwa(store, signal(), { fetchFn: upstream().fetch, readShareFacts: never });
+    assert.ok(Date.now() - started < 6_000, "published within 6 s");
+    const rows = (await store.get<RwaUniverseSnapshot>(RWA_UNIVERSE_KEY))!.data.rows;
+    for (const a of PER_ADDRESS) {
+      const row = rows.find((r) => r.address === a);
+      assert.ok(row, `${a} present`);
+      assert.equal(row?.tokenToShareRatio, null);
+      assert.equal(row?.decimals, null);
+    }
+  });
+
+  it("per-address Binance reads slower than the D1 budget are not cut by it: all four rows stay", async () => {
+    setCredentials();
+    const base = upstream().fetch;
+    const slowFetch: typeof base = async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/rwa/underlying-market")) await new Promise((resolve) => setTimeout(resolve, 1_000));
+      return base(input, init);
+    };
+    const rows = await rowsOf({ fetchFn: slowFetch, readShareFacts: fullReader() });
+    for (const a of PER_ADDRESS) {
+      assert.ok(rows.has(a), a + " present");
+      assert.equal(rows.get(a)?.["decimals"], 18, "the chain read ran after the Binance reads, on its own budget");
+    }
+  });
+
+  it("the scheduled job wires the live chain reader; a bare runBinanceRwa stays offline", () => {
+    const source = readFileSync(new URL("../src/jobs/binanceRwa.ts", import.meta.url), "utf8");
+    assert.ok(source.includes("runBinanceRwa(store, signal, { readShareFacts: readShareFactsOnChain })"));
+  });
+
+  it("a per-address row with no /rwa/price answer has null prices: the underlying-market reference is never a fallback", async () => {
+    const withoutCohrb = fakeFetch((call) => {
+      if (call.url.includes("/rwa/tokens")) return ok([NVDAB_ROW]);
+      if (call.url.includes("/rwa/price")) return ok(PER_ADDRESS.filter((a) => a !== COHRB).map((a) => ({ tokenContractAddress: a, platformId: "bstock", ...PRICE[a] })));
+      if (call.url.includes("/rwa/underlying-market")) {
+        const address = PER_ADDRESS.find((a) => call.url.includes(a));
+        return ok({ tokenContractAddress: address, platformId: "bstock", statusInfo: { openState: true, marketStatus: null, reasonCode: "TRADING" },
+          marketData: { referencePrice: "999999", marketCap: "1" } });
+      }
+      return jsonResponse({ code: 500, msg: "unexpected", data: null }, 500);
+    });
+    const row = (await rowsOf({ fetchFn: withoutCohrb.fetch, readShareFacts: fullReader() })).get(COHRB)!;
+    assert.equal(row["referencePriceUsd"], null);
+    assert.equal(row["tokenPriceUsd"], null);
+    assert.equal(row["navPremiumBps"], null);
+    assert.equal(row["openState"], true, "the session fields still come from underlying-market");
+  });
+
+  it("listed rows are byte-identical with and without the chain reader", async () => {
+    const withReader = await rowsOf({ fetchFn: upstream().fetch, readShareFacts: fullReader() });
+    const without = await rowsOf({ fetchFn: upstream().fetch });
+    assert.deepEqual(withReader.get(NVDAB), without.get(NVDAB));
   });
 });
 
