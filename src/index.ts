@@ -14,6 +14,7 @@ import { flapLaunchesJob } from "./jobs/flapLaunches.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { majorsPricesJob } from "./jobs/majorsPrices.js";
 import { memeBoardJob } from "./jobs/memeBoard.js";
+import { memeMeasureJob } from "./jobs/memeMeasure.js";
 import { pancakePoolsJob } from "./jobs/pancakePools.js";
 import { tradingFeaturesJob } from "./jobs/tradingFeatures.js";
 import { tradingUnderlyingFeaturesJob } from "./jobs/tradingUnderlyingFeatures.js";
@@ -76,6 +77,9 @@ scheduler.register(flapLaunchesJob(store));
 // The classified meme board (Binance Meme Rush + OnchainOS activity/signals).
 // Writes its own keys; the two lanes above are untouched by it.
 scheduler.register(memeBoardJob(store));
+// Social / smart-inflow measurement (one cycle per 5 minutes, 7 days). Export
+// only: nothing on the board or any trading read consumes it.
+scheduler.register(memeMeasureJob(store));
 scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
 // Tokenized stocks: the Binance Web3 RWA list (needs the signed key) and the
