@@ -317,7 +317,8 @@ export interface SintralMinuteBar {
 /**
  * Fetches up to `limit` one-minute bars. Sintral returns only minutes that
  * traded, and the last row is the minute still in progress (it keeps changing
- * ~20 s past its close). An unknown token answers an empty list.
+ * briefly past its close: measured final for 61/61 bars by +15 s). An unknown
+ * token answers an empty list.
  */
 export async function fetchSintralMinuteBars(params: BaseParams & { address: string; limit: number }): Promise<SintralMinuteBar[]> {
   const address = params.address.toLowerCase();

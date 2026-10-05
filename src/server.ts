@@ -222,7 +222,7 @@ function barsMeta(limit: number): Record<string, unknown> {
     unit: MEME_BARS_UNIT,
     closedAfterMs: SETTLE_MS,
     zeroFill: "a minute without trades is a bar with filled true, trades 0, volume 0 and OHLC at the previous close",
-    gate: "staleness says when the series was written; also check now - lastClosedStartMs (up to ~5 min while fresh)",
+    gate: "staleness says when the series was written; also check now - (lastClosedStartMs + 60 s): ~20-82 s in normal running, more if the job stalls",
     tracked: "true while the job keeps the token; a token that left serves its last series for 30 min with tracked false",
     trades: "Sintral's count; below on-chain swap events (measured 0.5-0.9 of them), a relative activity measure",
     freshForMs: BARS_FRESH_MS,

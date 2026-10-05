@@ -13,10 +13,14 @@ import {
   MEME_BARS_INDEX_KEY,
   MEME_BARS_KEEP,
   MEME_BARS_LEASE,
+  SETTLE_MS,
   BARS_DEAD_MS,
   UNKNOWN_RETRY_MS,
   backoffMs,
+  countCorrections,
   fetchLimit,
+  memeBarsJob,
+  msUntilNextRun,
   lastClosedMinute,
   memeBarsKey,
   readMemeBars,
@@ -105,9 +109,9 @@ describe("normalizeSintralMinuteBars", () => {
     assert.deepEqual(bars.map((b) => [b.startMs, b.close, b.trades]), [[NOW, 0.00031, 4], [NOW + MIN, 0.00038, 98]]);
   });
 
-  it("closes a minute 45 s after its end", () => {
-    assert.equal(lastClosedMinute(NOW + MIN + 45_000), NOW);
-    assert.equal(lastClosedMinute(NOW + MIN + 44_999), NOW - MIN);
+  it("closes a minute 20 s after its end", () => {
+    assert.equal(lastClosedMinute(NOW + MIN + 20_000), NOW);
+    assert.equal(lastClosedMinute(NOW + MIN + 19_999), NOW - MIN);
   });
 });
 
@@ -162,7 +166,7 @@ describe("rebuildSeries", () => {
 // ─── Tracked set ─────────────────────────────────────────────────────────────
 
 describe("selectTracked", () => {
-  const empty: BarsIndex = { tokens: {}, departed: {}, backoff: null, lastCycle: null };
+  const empty: BarsIndex = { tokens: {}, departed: {}, backoff: null, closedThrough: null, lastCycle: null };
 
   it("tracks live meme stocks and shortlisted rows, nothing else", () => {
     const board = [row(1), row(2, { quote: "bnb" }), dead(3), row(4)];
@@ -171,14 +175,14 @@ describe("selectTracked", () => {
   });
 
   it("keeps a token 30 minutes after it was last live, then lets it go", () => {
-    const index: BarsIndex = { tokens: { [addr(9)]: { symbol: "OLD", enteredAt: NOW - HOUR, lastLiveAt: NOW - LEAVE_AFTER_MS } }, departed: {}, backoff: null, lastCycle: null };
+    const index: BarsIndex = { tokens: { [addr(9)]: { symbol: "OLD", enteredAt: NOW - HOUR, lastLiveAt: NOW - LEAVE_AFTER_MS } }, departed: {}, backoff: null, closedThrough: null, lastCycle: null };
     assert.ok(addr(9) in selectTracked(index, [], new Set(), NOW).tokens);
     assert.equal(addr(9) in selectTracked(index, [], new Set(), NOW + 1).tokens, false);
   });
 
   it("caps the set, live and shortlisted first, then by 5-minute trades, and says so", () => {
     const board = Array.from({ length: MEME_BARS_CAP + 5 }, (_, i) => row(100 + i, { txs5m: i }));
-    const index: BarsIndex = { tokens: { [addr(9)]: { symbol: "OLD", enteredAt: NOW - HOUR, lastLiveAt: NOW - MIN } }, departed: {}, backoff: null, lastCycle: null };
+    const index: BarsIndex = { tokens: { [addr(9)]: { symbol: "OLD", enteredAt: NOW - HOUR, lastLiveAt: NOW - MIN } }, departed: {}, backoff: null, closedThrough: null, lastCycle: null };
     const result = selectTracked(index, board, new Set([addr(100)]), NOW);
     assert.equal(result.capped, true);
     assert.equal(result.candidates, MEME_BARS_CAP + 6);
@@ -223,7 +227,7 @@ describe("runMemeBars", () => {
   it("backfills each live meme stock on entry, closed minutes only, then reads incrementally", async () => {
     const h = await harness();
     const first = await h.run();
-    assert.deepEqual(first, { tracked: 2, candidates: 2, capped: false, calls: 2, failures: 0, throttled: false });
+    assert.deepEqual(first, { tracked: 2, candidates: 2, capped: false, calls: 2, failures: 0, throttled: false, corrected: 0 });
     assert.deepEqual(h.asked.map(([, limit]) => limit), [MEME_BARS_KEEP + 2, MEME_BARS_KEEP + 2]);
     const one = (await series(h.store, addr(1)))!;
     assert.equal(one.lastClosedStartMs, NOW);
@@ -287,7 +291,7 @@ describe("GET /memes/bars and /memes/:address/bars", () => {
       bars: [[lastClosed - MIN, 1, 1.1, 0.9, 1, 50, 3, 0], [lastClosed, 1, 1, 1, 1, 0, 0, 1]],
     };
     await store.put(memeBarsKey(addr(1)), stored, { source: "sintral", freshForMs: 3 * MIN, deadAfterMs: 30 * MIN });
-    const index: BarsIndex = { tokens: { [addr(1)]: { symbol: "M1", enteredAt: now, lastLiveAt: now } }, departed: {}, backoff: null, lastCycle: null };
+    const index: BarsIndex = { tokens: { [addr(1)]: { symbol: "M1", enteredAt: now, lastLiveAt: now } }, departed: {}, backoff: null, closedThrough: null, lastCycle: null };
     await store.put(MEME_BARS_INDEX_KEY, index, { source: "test", freshForMs: 3 * MIN, deadAfterMs: 30 * MIN });
     const server = createServer({ scheduler: createScheduler(store), store });
     return { request: (path: string) => server.request(path), lastClosed };
@@ -425,5 +429,61 @@ describe("bars audit round", () => {
     assert.equal(await pgStore.delete(memeBarsKey(addr(1))), true);
     assert.equal(await pgStore.get(memeBarsKey(addr(1))), null);
     assert.equal(await pgStore.delete(memeBarsKey(addr(1))), false);
+  });
+});
+
+describe("bars latency (MEME-BARS-LATENCY-HANDOFF)", () => {
+  it("schedules each run SETTLE_MS after the next minute end", () => {
+    assert.equal(msUntilNextRun(NOW), SETTLE_MS);
+    assert.equal(msUntilNextRun(NOW + 5_000), SETTLE_MS - 5_000);
+    assert.equal(msUntilNextRun(NOW + SETTLE_MS), MIN, "a run that fired on time waits for the next minute");
+    assert.equal(msUntilNextRun(NOW + SETTLE_MS - 200), MIN + 200, "a slightly early run does not refire at once");
+    assert.equal(msUntilNextRun(NOW + 50_000), MIN - 50_000 + SETTLE_MS);
+  });
+
+  it("is registered to run on that schedule, not on a fixed interval", () => {
+    const spec = memeBarsJob(new MemoryStore());
+    assert.equal(spec.nextDelayMs, msUntilNextRun);
+    assert.equal(spec.intervalMs, MIN);
+  });
+
+  it("reads each minute once, SETTLE_MS after it ends, with no idle runs", async () => {
+    const h = await harness([row(1)]);
+    let t = NOW + MIN + 3_000; // first run lands mid-minute: the entry backfill
+    const runs: Array<{ at: number; closed: number | null; skipped: string | undefined }> = [];
+    for (let i = 0; i < 6; i++) {
+      h.clock.now = t;
+      await h.store.put(MEME_BOARD_KEY, [row(1)], TTL);
+      const result = await h.run();
+      runs.push({ at: t, closed: (await series(h.store, addr(1)))?.lastClosedStartMs ?? null, skipped: result.skipped });
+      t += msUntilNextRun(t);
+    }
+    assert.ok(runs.every((r) => r.skipped === undefined), "every scheduled run does work");
+    for (const r of runs.slice(1)) assert.equal(r.at - (r.closed! + MIN), SETTLE_MS, "read exactly SETTLE_MS after the minute ends");
+    assert.equal(h.asked.length, runs.length, "one Sintral call per token per closed minute");
+  });
+
+  it("skips a second run inside the same minute without a lease or a write (restart, second replica)", async () => {
+    const h = await harness([row(1)]);
+    await h.run();
+    let leases = 0;
+    let puts = 0;
+    const lease = h.store.acquireSchedulerLease.bind(h.store);
+    const put = h.store.put.bind(h.store);
+    h.store.acquireSchedulerLease = async (...args) => { leases++; return lease(...args); };
+    h.store.put = async (key, payload, opts) => { puts++; return put(key, payload, opts); };
+    h.clock.now += 10_000;
+    assert.equal((await h.run()).skipped, "up_to_date");
+    assert.deepEqual([leases, puts, h.asked.length], [0, 0, 1]);
+  });
+
+  it("counts closed bars a re-read changed, and only those", () => {
+    const first = rebuildSeries(null, [bar(NOW, 1)], NOW + 2 * MIN);
+    const previous = { ...first, lastClosedStartMs: NOW + 2 * MIN };
+    const later = rebuildSeries(first, [bar(NOW + MIN, 5)], NOW + 3 * MIN);
+    // NOW+1m was a fill and is now traded; NOW+2m's fill carries the new close; NOW+3m is new.
+    assert.equal(countCorrections(previous, later.bars), 2);
+    assert.equal(countCorrections(previous, previous.bars), 0);
+    assert.equal(countCorrections(null, later.bars), 0);
   });
 });

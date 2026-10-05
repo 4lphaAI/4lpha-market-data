@@ -293,6 +293,27 @@ describe("scheduler lifecycle", () => {
     }, /timeoutMs/);
   });
 
+  it("takes the next delay from nextDelayMs when a job sets it, floored at 100 ms", async () => {
+    const store = new MemoryStore();
+    const scheduler = createScheduler(store);
+    const runs: number[] = [];
+    const asked: number[] = [];
+    scheduler.register({
+      name: "aligned",
+      intervalMs: 60_000,
+      timeoutMs: 500,
+      nextDelayMs: (now) => { asked.push(now); return 0; },
+      run: async () => { runs.push(Date.now()); },
+    });
+    scheduler.start();
+    await sleep(350);
+    await scheduler.stop();
+    assert.ok(runs.length >= 2, `ran ${runs.length} times; a 60 s interval would have run once`);
+    assert.ok(runs.length <= 5, `ran ${runs.length} times; the 100 ms floor caps it`);
+    assert.ok(asked.length >= 1);
+    await store.close();
+  });
+
   it("applies jitter within the configured bound", async () => {
     const store = new MemoryStore();
     const scheduler = createScheduler(store, { random: () => 0.5 });

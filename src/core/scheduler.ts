@@ -114,7 +114,8 @@ export function createScheduler(store: SnapshotStore, options: SchedulerOptions 
   function tick(state: JobState): void {
     state.timer = null;
     // The next tick is armed up front so a slow run cannot stall the cadence.
-    schedule(state, state.spec.intervalMs + jitterMs(state.spec));
+    const nextDelay = state.spec.nextDelayMs;
+    schedule(state, nextDelay === undefined ? state.spec.intervalMs + jitterMs(state.spec) : Math.max(100, nextDelay(now())));
     if (state.inFlight !== null) {
       console.warn(`[scheduler] job=${state.spec.name} skipped: previous run still in flight`);
       return;
