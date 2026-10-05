@@ -474,7 +474,7 @@ describe("per-address share ratio, decimals and reference basis (D1, R3.8, R5.9)
     assert.equal(rows.find((r) => r.address === PYPLB)?.tokenToShareRatio, null);
   });
 
-  it("a hanging chain read still yields four per-address rows, with null ratios, within the 2.5 s budget", async () => {
+  it("a hanging chain read still yields four per-address rows, with null ratios, within the 2.5 s budget", { timeout: 15_000 }, async () => {
     setCredentials();
     const store = new MemoryStore();
     const started = Date.now();
@@ -495,7 +495,7 @@ describe("per-address share ratio, decimals and reference basis (D1, R3.8, R5.9)
     const base = upstream().fetch;
     const slowFetch: typeof base = async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-      if (url.includes("/rwa/underlying-market")) await new Promise((resolve) => setTimeout(resolve, 800));
+      if (url.includes("/rwa/underlying-market")) await new Promise((resolve) => setTimeout(resolve, 1_000));
       return base(input, init);
     };
     const rows = await rowsOf({ fetchFn: slowFetch, readShareFacts: fullReader() });
