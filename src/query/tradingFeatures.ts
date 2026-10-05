@@ -1,6 +1,7 @@
 /** Deterministic facts over one observed, exact-pool series. No trading decisions. */
 import { createHash } from "node:crypto";
 import type { SnapshotStore } from "../core/store.js";
+import { USD_ANCHOR } from "../jobs/majorsPrices.js";
 import type { PoolCandle, PoolOhlcvResult } from "./poolOhlcv.js";
 import type { OhlcvAttempt } from "./poolOhlcv.js";
 import { ORB_WINDOW_MS, SESSION_CLOCK, sessionAt, type Session, type SessionState } from "./sessionClock.js";
@@ -30,7 +31,12 @@ export type UnavailableReason = "insufficient_history" | "gap" | "stale_input" |
   | "interval_too_coarse" | "orb_not_formed" | "not_rth"
   // indicatorRevision 3 (handoff §11): a Sintral-sourced series with too little
   // real trading to be worth forward-filling into flat-but-valid indicators.
-  | "too_few_real_bars";
+  | "too_few_real_bars"
+  // underlying-features-v1 (source "binance-rwa"): the metric's own trailing window is
+  // mostly flat (fewer than 60 % of its buckets changed), so the value would be an artefact.
+  | "flat_input";
+/** Real bars below this make every metric of a sintral or binance-rwa series unavailable. */
+export const MIN_REAL_BARS = 30;
 export interface Metric {
   value: number | null;
   available: boolean;
@@ -79,6 +85,11 @@ export interface FeatureInput {
   observedAt: number;
   candles: PoolCandle[];
   conflictingTimestamps: number[];
+  /**
+   * Source "binance-rwa" only (and absent, not empty, on every other source: it is part of the
+   * retained input and so of the snapshot id): bucket opens whose recorded reference changed.
+   */
+  changedBuckets?: number[];
   /** indicatorRevision 2; absent on older snapshots, read as `null`. */
   referenceSession?: ReferenceSession | null;
 }
@@ -104,6 +115,8 @@ export interface FeatureSnapshot {
      * fields are meaningful (and safe to read) on every version/source.
      */
     realBars: number; filledBars: number;
+    /** Source "binance-rwa" only: bucket opens inside the 120-bucket window with a counted change, ascending. */
+    changedBuckets?: number[];
   };
   parameters: {
     historyBars: 120; rocPeriod: 10; rvolBaseline: 20; emaPeriods: readonly [12, 26];
@@ -149,7 +162,7 @@ function sameBar(a: PoolCandle, b: PoolCandle): boolean {
 }
 /** Bounded replay: observedAt is when this exact revision was first available to us. */
 export function calculateFeatures(input: FeatureInput, now: number, version: FeatureVersion = FEATURE_VERSION): FeatureSnapshot {
-  if (input.candles.length > 501 || input.conflictingTimestamps.length > 501) throw new Error("feature history exceeds bounded input");
+  if (input.candles.length > 501 || input.conflictingTimestamps.length > 501 || (input.changedBuckets?.length ?? 0) > 501) throw new Error("feature history exceeds bounded input");
   const step = FEATURE_INTERVALS[input.interval];
   const cutoff = Math.floor((now - PUBLICATION_LAG_MS) / step) * step;
   const start = cutoff - FEATURE_HISTORY * step;
@@ -183,6 +196,13 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
   // filled (a filled bar's `volume: 0` is real information, not a gap), so a
   // thin pool honestly reads low volume off-hours rather than "unavailable".
   const sintralFill = version === FEATURE_VERSION_V2 && input.source === "sintral";
+  // The recorded underlying reference (agentic-rfq-stocks): no fill, no volume. A real bar is a
+  // bucket whose reference changed, so the series floor counts those, not stored flat buckets.
+  const rwaSampled = version === FEATURE_VERSION_V2 && input.source === "binance-rwa";
+  const reported = new Set(rwaSampled ? input.changedBuckets ?? [] : []);
+  const changedBuckets = [...byTime.keys()].filter((t) => reported.has(t)).sort((a, b) => a - b);
+  const changedSet = new Set(changedBuckets);
+  const realBarCount = rwaSampled ? changedBuckets.length : realBars.length;
   if (sintralFill && realBars.length > 0) {
     const filled: PoolCandle[] = [];
     let lastClose = realBars[0]!.close;
@@ -202,12 +222,12 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
   }
   const address = /^0x[0-9a-f]{40}$/u;
   const identityValid = input.chainId === 56 && [input.poolAddress, input.baseAddress, input.quoteAddress].every((s) => address.test(s))
-    && input.baseAddress !== input.quoteAddress && ["geckoterminal", "dexpaprika", "sintral"].includes(input.source);
+    && input.baseAddress !== input.quoteAddress && ["geckoterminal", "dexpaprika", "sintral", "binance-rwa"].includes(input.source);
   const globalReason: UnavailableReason | null = !identityValid ? "invalid_identity"
     : !Number.isFinite(now) || !Number.isFinite(input.observedAt) || input.observedAt > now ? "observation_after_evaluation"
     // A dead pool forward-filled into 90+ synthetic bars must not produce
     // flat-but-valid indicators; require real evidence, not real-or-carried.
-    : sintralFill && realBars.length < 30 ? "too_few_real_bars"
+    : (sintralFill || rwaSampled) && realBarCount < MIN_REAL_BARS ? "too_few_real_bars"
     : closeTime !== null && now >= closeTime + step + PUBLICATION_LAG_MS + SCHEDULING_GRACE_MS ? "stale_input" : null;
   const reasonWithin = (windowStart: number, required: number, contiguity: boolean): UnavailableReason | null => {
     if (globalReason) return globalReason;
@@ -219,16 +239,27 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
   };
   const reasonFor = (required: number): UnavailableReason | null =>
     reasonWithin((latest?.timestamp ?? cutoff) - (required - 1) * step, required, true);
+  /**
+   * Source "binance-rwa": a metric reading `required` >= 2 buckets needs at least ceil(0.6 x required)
+   * of its own trailing window (ending at the latest bar) to have changed. One-bucket metrics are exempt.
+   */
+  const flatReason = (required: number): UnavailableReason | null => {
+    if (!rwaSampled || required < 2 || !latest) return null;
+    const from = latest.timestamp - (required - 1) * step;
+    const needed = Math.ceil(required * 3 / 5);
+    return changedBuckets.filter((t) => t >= from).length >= needed ? null : "flat_input";
+  };
   const metric = (required: number, unit: string, calc: () => number, extra: UnavailableReason | null = null): Metric => {
-    let reason = reasonFor(required) ?? extra;
+    let reason = reasonFor(required) ?? extra ?? flatReason(required);
     const value = reason ? null : calc();
     if (value !== null && !Number.isFinite(value)) reason = "numeric_overflow";
     return { value: reason ? null : value, available: reason === null, reason, requiredBars: required, usableBars: Math.min(contiguous, required), unit };
   };
   /** Revision 2 shape: the calculation itself may answer with a reason (zero width, no RTH close ...). */
   const metric2 = (required: number, unit: string, calc: () => number | UnavailableReason,
-    guard: UnavailableReason | null = reasonFor(required), usable = Math.min(contiguous, required), asOf?: number | null): Metric => {
-    let reason = guard;
+    guard: UnavailableReason | null = reasonFor(required), usable = Math.min(contiguous, required), asOf?: number | null,
+    trailingGate = true): Metric => {
+    let reason = guard ?? (trailingGate ? flatReason(required) : null);
     const result = reason ? null : calc();
     if (typeof result === "string") reason = result;
     const value = typeof result === "number" ? result : null;
@@ -309,6 +340,8 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
     if (cutoff < session!.orbEnd) return "orb_not_formed";
     const window = bars.filter((b) => b.timestamp >= session!.orbStart && b.timestamp + step <= session!.orbEnd);
     if (window.length !== orbBars) return "gap";
+    // Source "binance-rwa": the opening range counts only if both of its buckets changed.
+    if (rwaSampled && !window.every((b) => changedSet.has(b.timestamp))) return "flat_input";
     return { high: Math.max(...window.map((b) => b.high)), low: Math.min(...window.map((b) => b.low)) };
   };
   const orbSide = (side: "high" | "low") => (): number | UnavailableReason => { const r = orb(); return typeof r === "string" ? r : r[side]; };
@@ -329,9 +362,9 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
       gapPct: metric2(1, "percent", gapPct, sessionGuard(s?.lastRthOpenAt ?? 0), rthUsable),
       vwapSession: metric2(1, priceUnit, vwap, sessionGuard(s?.sessionStart ?? 0), sessionUsable),
       vwapDistancePct: metric2(1, "percent", vwapDistancePct, sessionGuard(s?.sessionStart ?? 0), sessionUsable),
-      orbHigh: metric2(orbRequired, priceUnit, orbSide("high"), sessionGuard(s?.orbStart ?? 0), orbUsable),
-      orbLow: metric2(orbRequired, priceUnit, orbSide("low"), sessionGuard(s?.orbStart ?? 0), orbUsable),
-      orbBreakPct: metric2(orbRequired, "percent", orbBreakPct, sessionGuard(s?.orbStart ?? 0), orbUsable),
+      orbHigh: metric2(orbRequired, priceUnit, orbSide("high"), sessionGuard(s?.orbStart ?? 0), orbUsable, undefined, false),
+      orbLow: metric2(orbRequired, priceUnit, orbSide("low"), sessionGuard(s?.orbStart ?? 0), orbUsable, undefined, false),
+      orbBreakPct: metric2(orbRequired, "percent", orbBreakPct, sessionGuard(s?.orbStart ?? 0), orbUsable, undefined, false),
     };
   };
   const atr = (): number => {
@@ -370,7 +403,8 @@ export function calculateFeatures(input: FeatureInput, now: number, version: Fea
       firstOpen: bars[0]?.timestamp ?? null, latestClose: closeTime,
       missingBuckets: bars.length ? (latest!.timestamp - bars[0]!.timestamp) / step + 1 - bars.length : 0,
       invalidBars, excludedUnclosedBars, identicalDuplicates, conflictingDuplicates: conflicts.size,
-      realBars: realBars.length, filledBars: sintralFill ? bars.length - realBars.length : 0 },
+      realBars: realBarCount, filledBars: sintralFill ? bars.length - realBars.length : 0,
+      ...(rwaSampled ? { changedBuckets } : {}) },
     parameters: { historyBars: 120, rocPeriod: 10, rvolBaseline: 20, emaPeriods: [12, 26], atrPeriod: 14,
       emaSeed: "sma", atrSmoothing: "wilder", publicationLagMs: PUBLICATION_LAG_MS,
       schedulingGraceMs: SCHEDULING_GRACE_MS, bucketConvention: "UTC-open-ms", warmupBars: warmup,
@@ -443,4 +477,94 @@ export async function readFeatureAttempt(store: SnapshotStore, pool: string, int
   if (!attempt) return {state: "queued", reason: "not_attempted", nextAttempt: null, sources: []};
   if (attempt.state === "refreshing" && now > attempt.attemptedAt + 30_000) return {...attempt, state: "unavailable", reason: "refresh_interrupted"};
   return attempt;
+}
+
+// --- underlying-features-v1 (agentic-rfq-stocks) ----------------------------------------
+// The recorded underlying reference price of a bStock with no pool series: per share, sampled
+// every 60 s by the binance-rwa job, no volume. A separate version, scope and key space, so
+// a pool series and an underlying series can never be mistaken for each other or spliced.
+export const UNDERLYING_FEATURE_VERSION = "underlying-features-v1";
+export const UNDERLYING_FEATURE_INDEX_KEY = "trading:underlying-features:v1:index";
+export const UNDERLYING_FEATURE_STATE_KEY = "trading:underlying-features:v1:producer";
+export const UNDERLYING_FEATURE_MIN_REAL_BARS = MIN_REAL_BARS;
+export const UNDERLYING_INTERVALS = ["15m", "1h"] as const;
+export type UnderlyingInterval = typeof UNDERLYING_INTERVALS[number];
+export type UnderlyingEndpoint = "tokens" | "price";
+export const underlyingFeatureKey = (token: string, interval: UnderlyingInterval): string =>
+  `trading:underlying-features:v1:${token.toLowerCase()}:${interval}`;
+export function isUnderlyingInterval(value: string): value is UnderlyingInterval {
+  return (UNDERLYING_INTERVALS as readonly string[]).includes(value);
+}
+/** One recorded bar, as the binance-rwa recorder stores it. */
+export interface UnderlyingBar { t: number; o: number; h: number; l: number; c: number; samples: number; changes: number }
+export const UNDERLYING_LABEL = "underlying reference price, sampled every 60 s, no volume";
+export interface UnderlyingFeatureSnapshot {
+  version: typeof UNDERLYING_FEATURE_VERSION;
+  snapshotId: string;
+  seriesId: string;
+  identity: {
+    chainId: 56; tokenAddress: string; underlyingTicker: string | null; endpoint: UnderlyingEndpoint; interval: UnderlyingInterval;
+    priceCurrency: "usd"; priceBasis: "usd_per_share"; source: "binance-rwa"; observedAt: number;
+    referenceSession: ReferenceSession | null;
+  };
+  calculatedAt: number;
+  evaluationClose: number | null;
+  refreshAfter: number;
+  expiresAt: number;
+  coverage: FeatureSnapshot["coverage"];
+  parameters: FeatureSnapshot["parameters"];
+  metrics: FeatureSnapshot["metrics"];
+  session: SessionBlock;
+  volume: FeatureSnapshot["volume"];
+  lineage: { scope: "underlying"; series: "binance-rwa-reference-usd"; source: "binance-rwa"; transformation: "sampled_60s";
+    label: typeof UNDERLYING_LABEL; correctionPolicy: string };
+}
+export interface UnderlyingFeatureInput {
+  token: string;
+  underlyingTicker: string | null;
+  interval: UnderlyingInterval;
+  endpoint: UnderlyingEndpoint;
+  bars: readonly UnderlyingBar[];
+  lastObservedAt: number;
+  referenceSession: ReferenceSession | null;
+}
+/**
+ * The shared calculator over the recorded bars. Volume is `null` on every bar and declared
+ * unavailable, so `rvol20` and the VWAP pair answer `unknown_volume_unit`, never a value.
+ */
+export function calculateUnderlyingFeatures(input: UnderlyingFeatureInput, now: number): UnderlyingFeatureSnapshot {
+  const token = input.token.toLowerCase();
+  const inner = calculateFeatures({
+    chainId: 56, poolAddress: token, baseAddress: token, quoteAddress: USD_ANCHOR.address, priceCurrency: "usd",
+    volumeCurrency: "none", volumeUnavailableReason: "no_volume", source: "binance-rwa", interval: input.interval,
+    observedAt: input.lastObservedAt,
+    candles: input.bars.map((b) => ({ timestamp: b.t, open: b.o, high: b.h, low: b.l, close: b.c, volume: null })),
+    conflictingTimestamps: [],
+    changedBuckets: input.bars.filter((b) => b.changes >= 1).map((b) => b.t),
+    referenceSession: input.referenceSession,
+  }, now, FEATURE_VERSION_V2);
+  return {
+    version: UNDERLYING_FEATURE_VERSION,
+    snapshotId: hash({ version: UNDERLYING_FEATURE_VERSION, inner: inner.snapshotId }, true),
+    seriesId: hash({ version: UNDERLYING_FEATURE_VERSION, chainId: 56, token, interval: input.interval, source: "binance-rwa", priceCurrency: "usd" }, true),
+    identity: { chainId: 56, tokenAddress: token, underlyingTicker: input.underlyingTicker, endpoint: input.endpoint, interval: input.interval,
+      priceCurrency: "usd", priceBasis: "usd_per_share", source: "binance-rwa", observedAt: input.lastObservedAt,
+      referenceSession: inner.input.referenceSession ?? null },
+    calculatedAt: inner.calculatedAt, evaluationClose: inner.evaluationClose, refreshAfter: inner.refreshAfter, expiresAt: inner.expiresAt,
+    coverage: inner.coverage, parameters: inner.parameters, metrics: inner.metrics, session: inner.session!, volume: inner.volume,
+    lineage: { scope: "underlying", series: "binance-rwa-reference-usd", source: "binance-rwa", transformation: "sampled_60s",
+      label: UNDERLYING_LABEL, correctionPolicy: "missing buckets stay missing; never filled; never spliced" },
+  };
+}
+/** Reads only the store, as {@link readTradingFeatures} does: computation time cannot renew freshness. */
+export async function readUnderlyingFeatures(store: SnapshotStore, token: string, interval: UnderlyingInterval, now = Date.now()) {
+  const record = await store.get<UnderlyingFeatureSnapshot>(underlyingFeatureKey(token, interval));
+  if (!record || record.data.version !== UNDERLYING_FEATURE_VERSION) return null;
+  const snapshot = record.data;
+  if (snapshot.identity.tokenAddress !== token.toLowerCase() || snapshot.identity.interval !== interval) return null;
+  const future = snapshot.calculatedAt > now || snapshot.identity.observedAt > now;
+  const stale = now >= snapshot.expiresAt || record.staleness === "dead" || future;
+  return { ...snapshot, staleness: stale ? "stale" as const : "fresh" as const,
+    metrics: Object.fromEntries(Object.entries(snapshot.metrics).map(([name, m]) => [name,
+      stale ? { ...m, value: null, available: false, reason: future ? "observation_after_evaluation" : "stale_input" } : m])) };
 }
