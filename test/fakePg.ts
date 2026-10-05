@@ -90,6 +90,7 @@ export class FakePg implements SqlClient {
     if (lowered.startsWith("alter table")) return { rows: this.#alterTable(text) as T[] };
     if (lowered.startsWith("insert into")) return { rows: this.#insert(text, params) as T[] };
     if (lowered.startsWith("select")) return { rows: this.#select(text, params) as T[] };
+    if (lowered.startsWith("delete from")) return { rows: this.#delete(text, params) as T[] };
     throw new Error(`fake-pg: unsupported statement: ${text.slice(0, 60)}`);
   }
 
@@ -202,6 +203,24 @@ export class FakePg implements SqlClient {
       }
       return projected;
     });
+  }
+
+  /** `delete from <table> where <column> = $n [returning <column>]`, the one shape the store issues. */
+  #delete(sql: string, params: unknown[]): Array<Record<string, unknown>> {
+    const name = /delete from (\w+)/iu.exec(sql)?.[1];
+    const table = name === undefined ? undefined : this.#tables.get(name);
+    if (table === undefined) throw new Error(`fake-pg: relation "${String(name)}" does not exist`);
+    const where = /where (\w+) = \$(\d+)/iu.exec(sql);
+    if (where === null) throw new Error("fake-pg: delete without a where clause");
+    const wanted = params[Number(where[2]) - 1];
+    const returning = /returning (\w+)/iu.exec(sql)?.[1];
+    const removed: Array<Record<string, unknown>> = [];
+    for (const [id, row] of table.rows) {
+      if (row[where[1] ?? ""] !== wanted) continue;
+      table.rows.delete(id);
+      if (returning !== undefined) removed.push({ [returning]: render(table.columns.get(returning), row[returning]) });
+    }
+    return removed;
   }
 
   #addTracking(params: unknown[]): Array<Record<string, unknown>> {

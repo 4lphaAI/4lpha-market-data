@@ -5,6 +5,10 @@ import { MemoryStore } from "../src/core/store.js";
 import { createServer } from "../src/server.js";
 import {
   ELIGIBILITY_TTL,
+  LIST_VENUE_DEADLINE_MS,
+  LIST_VENUE_TTL,
+  listVenueFrom,
+  listVenueKey,
   FOURMEME_TOKEN_MANAGER2,
   decideEligibility,
   eligibilityKey,
@@ -259,7 +263,7 @@ describe("decideEligibility", () => {
 });
 
 describe("isEligible", () => {
-  it("answers an allowlisted token from the snapshot alone", async () => {
+  it("decides an allowlisted token from the snapshot alone (a failed chain read only costs the venue)", async () => {
     const result = await isEligible(new MemoryStore(), {
       address: USDT.toUpperCase(),
       readState: forbidChain,
@@ -278,7 +282,7 @@ describe("isEligible", () => {
     assert.equal(result.reason, "invalid_address");
   });
 
-  it("answers an Alpha-listed token from a fresh coins snapshot alone", async () => {
+  it("decides an Alpha-listed token from a fresh coins snapshot alone (a failed chain read only costs the venue)", async () => {
     const store = new MemoryStore();
     await store.put(COINS_UNIVERSE_KEY, [{ address: MEME, symbol: "ALPHA" }], {
       source: "binance",
@@ -502,5 +506,127 @@ describe("GET /eligibility", () => {
     const res = await build().request(`/eligibility?addresses=${addresses}`);
     assert.equal(res.status, 400);
     assert.equal(record(record(await res.json())["error"])["code"], "too_many_addresses");
+  });
+});
+
+describe("venue for list hits (handoff 2026-10-05 item 4)", () => {
+  const alphaStore = async () => {
+    const store = new MemoryStore();
+    await store.put(COINS_UNIVERSE_KEY, [{ address: MEME, symbol: "ALPHA" }], { source: "binance", freshForMs: 60_000, deadAfterMs: 120_000 });
+    return store;
+  };
+
+  it("fills venue and launchpad state for an allowlisted launchpad token, verdict untouched", async () => {
+    const result = await isEligible(new MemoryStore(), { address: USDT, readState: async () => chain({ flap: flapToken() }) });
+    assert.equal(result.eligible, true);
+    assert.equal(result.reason, "allowlist");
+    assert.equal(result.source, "allowlist");
+    assert.equal(result.venue, "flap-bonding");
+    assert.equal(result.flap?.buyTaxBps, 300);
+    assert.equal(result.fourmeme, null);
+  });
+
+  it("fills a graduated Four.Meme venue for an Alpha-listed token", async () => {
+    const result = await isEligible(await alphaStore(), {
+      address: MEME,
+      readState: async () => chain({ fourmeme: fourMeme({ liquidityAdded: true }) }),
+    });
+    assert.equal(result.reason, "binance_alpha");
+    assert.equal(result.source, "binance-alpha");
+    assert.equal(result.venue, "pancake-v2");
+    assert.equal(result.fourmeme?.liquidityAdded, true);
+  });
+
+  it("never changes eligible, reason or source, whatever the chain says", async () => {
+    const reads: Array<() => Promise<ChainOutcomes>> = [
+      async () => chain(),
+      async () => chain({ fourmeme: { kind: "unavailable" } }),
+      async () => chain({ fourmeme: fourMeme({ version: 1 }) }),
+      async () => chain({ flap: flapToken({ status: 3 }) }),
+      async () => { throw new Error("rpc down"); },
+    ];
+    for (const read of reads) {
+      const result = await isEligible(new MemoryStore(), { address: USDT, readState: read });
+      assert.deepEqual([result.eligible, result.reason, result.source, result.venue], [true, "allowlist", "allowlist", null]);
+    }
+  });
+
+  it("answers within the deadline when the chain hangs, without a venue", async () => {
+    const started = Date.now();
+    const result = await isEligible(new MemoryStore(), { address: USDT, readState: () => new Promise<ChainOutcomes>(() => {}) });
+    assert.ok(Date.now() - started < LIST_VENUE_DEADLINE_MS + 1_000);
+    assert.equal(result.eligible, true);
+    assert.equal(result.venue, null);
+  });
+
+  it("caches 'not a launchpad token' and a venue, never an unreadable chain", async () => {
+    const store = new MemoryStore();
+    let reads = 0;
+    const none = async () => { reads++; return chain(); };
+    await isEligible(store, { address: USDT, readState: none });
+    await isEligible(store, { address: USDT, readState: none });
+    assert.equal(reads, 1, "a listed contract never becomes a launchpad token");
+    assert.ok((await store.get(listVenueKey(USDT))) !== null);
+
+    const other = new MemoryStore();
+    let flaky = 0;
+    const down = async () => { flaky++; return chain({ flap: { kind: "unavailable" } }); };
+    await isEligible(other, { address: USDT, readState: down });
+    await isEligible(other, { address: USDT, readState: down });
+    assert.equal(flaky, 2);
+    assert.equal(await other.get(listVenueKey(USDT)), null);
+  });
+
+  it("maps outcomes with the gate's own venue rule", () => {
+    assert.equal(listVenueFrom(chain()), null);
+    assert.equal(listVenueFrom(chain({ flap: { kind: "unavailable" } })), "unavailable");
+    const flap = listVenueFrom(chain({ flap: flapToken({ status: 4 }) }));
+    assert.equal(flap !== null && flap !== "unavailable" ? flap.venue : undefined, "pancake-v2");
+  });
+});
+
+describe("list-hit venue, audit round", () => {
+  it("keeps the state of a launchpad token that is not tradable, cached only as long as a launchpad answer", async () => {
+    let t = 1_791_120_000_000;
+    const store = new MemoryStore(() => t);
+    let reads = 0;
+    const migrating = async () => { reads++; return chain({ flap: flapToken({ status: 3 }) }); };
+    const first = await isEligible(store, { address: USDT, readState: migrating });
+    assert.deepEqual([first.eligible, first.reason, first.venue, first.flap?.status], [true, "allowlist", null, 3]);
+    t += 10_000;
+    await isEligible(store, { address: USDT, readState: migrating });
+    assert.equal(reads, 1, "cached inside the launchpad window");
+    t += LIST_VENUE_TTL.launchpad.freshForMs;
+    const graduated = await isEligible(store, { address: USDT, readState: async () => { reads++; return chain({ flap: flapToken({ status: 4 }) }); } });
+    assert.equal(reads, 2, "re-read after 30 s, not 6 h");
+    assert.equal(graduated.venue, "pancake-v2");
+  });
+
+  it("dates the venue facts by their read, not by the verdict", async () => {
+    let t = 1_791_120_000_000;
+    const store = new MemoryStore(() => t);
+    const readState = async () => chain({ flap: flapToken() });
+    const fresh = await isEligible(store, { address: USDT, readState });
+    assert.ok(typeof fresh.venueCheckedAt === "number");
+    t += 20_000;
+    const again = await isEligible(store, { address: USDT, readState });
+    assert.equal(again.venueCheckedAt, 1_791_120_000_000, "from the cache: the cached read's time");
+    assert.equal(again.cached, false, "the verdict itself is still decided live");
+    assert.equal(listVenueKey(USDT).startsWith("eligibility:"), false, "venue facts stay off the verdict prefix");
+  });
+
+  it("fills venues across a batch of list hits without changing any verdict", async () => {
+    const store = await (async () => {
+      const s = new MemoryStore();
+      await s.put(COINS_UNIVERSE_KEY, [{ address: MEME, symbol: "ALPHA" }], { source: "binance", freshForMs: 60_000, deadAfterMs: 120_000 });
+      return s;
+    })();
+    const results = await isEligibleBatch(store, [USDT, MEME], {
+      readState: async (address) => (address === MEME ? chain({ fourmeme: fourMeme() }) : chain()),
+    });
+    assert.deepEqual(results.map((r) => [r.address, r.eligible, r.reason, r.venue]), [
+      [USDT, true, "allowlist", null],
+      [MEME, true, "binance_alpha", "fourmeme-bonding"],
+    ]);
   });
 });

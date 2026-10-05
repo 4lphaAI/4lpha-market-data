@@ -24,6 +24,8 @@ export interface PutOptions {
 export interface SnapshotStore {
   put(key: string, payload: unknown, opts: PutOptions): Promise<void>;
   get<T>(key: string): Promise<DataRecord<T> | null>;
+  /** Removes one snapshot; `false` when there was none. For producers that retire per-subject keys. */
+  delete(key: string): Promise<boolean>;
   putJobHealth(h: JobHealth): Promise<void>;
   getJobHealth(): Promise<JobHealth[]>;
   addTrackingReference(
@@ -129,6 +131,10 @@ export class MemoryStore implements SnapshotStore {
       source: entry.source,
       staleness: computeStaleness(entry.asOf, this.#now(), entry.freshForMs, entry.deadAfterMs),
     };
+  }
+
+  async delete(key: string): Promise<boolean> {
+    return this.#snapshots.delete(key);
   }
 
   async putJobHealth(h: JobHealth): Promise<void> {
@@ -379,6 +385,14 @@ export class PostgresStore implements SnapshotStore {
         Number(row.dead_after_ms),
       ),
     };
+  }
+
+  async delete(key: string): Promise<boolean> {
+    const result = await this.#pool.query<{ key: string }>(
+      `delete from dp_snapshots where key = $1 returning key`,
+      [key],
+    );
+    return result.rows.length > 0;
   }
 
   async putJobHealth(h: JobHealth): Promise<void> {

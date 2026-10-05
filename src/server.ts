@@ -44,6 +44,17 @@ import { isSector, SECTORS, TRENDING_KEY } from "./query/bstockSectors.js";
 import { readTokenRecords } from "./jobs/tokenStore.js";
 import { MEME_BOARD_CAP, MEME_BOARD_KEY } from "./jobs/memeBoard.js";
 import {
+  BARS_DEAD_MS,
+  BARS_FRESH_MS,
+  MEME_BARS_KEEP,
+  MEME_BARS_SOURCE,
+  MEME_BARS_UNIT,
+  MEME_BARS_INDEX_KEY,
+  SETTLE_MS,
+  readMemeBars,
+  readTrackedSet,
+} from "./jobs/memeBars.js";
+import {
   MEME_MEASURE_LATEST_KEY,
   MEME_MEASURE_RETENTION_MS,
   MEME_MEASURE_SLOT_MS,
@@ -190,7 +201,34 @@ const STATUS_SNAPSHOT_KEYS = [
   FEATURE_INDEX_KEY_V2,
   VENUS_CORE_MARKETS_KEY,
   MEME_MEASURE_LATEST_KEY,
+  MEME_BARS_INDEX_KEY,
 ];
+
+const MEME_BARS_BATCH_MAX = 30;
+const MEME_BARS_DEFAULT_LIMIT = 60;
+
+function parseBarsLimit(raw: string | undefined): number | null {
+  if (raw === undefined) return MEME_BARS_DEFAULT_LIMIT;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 1 && value <= MEME_BARS_KEEP ? value : null;
+}
+
+/** What every `/memes/*bars` answer states about the series. */
+function barsMeta(limit: number): Record<string, unknown> {
+  return {
+    limit,
+    interval: "1m",
+    source: MEME_BARS_SOURCE,
+    unit: MEME_BARS_UNIT,
+    closedAfterMs: SETTLE_MS,
+    zeroFill: "a minute without trades is a bar with filled true, trades 0, volume 0 and OHLC at the previous close",
+    gate: "staleness says when the series was written; also check now - lastClosedStartMs (up to ~5 min while fresh)",
+    tracked: "true while the job keeps the token; a token that left serves its last series for 30 min with tracked false",
+    trades: "Sintral's count; below on-chain swap events (measured 0.5-0.9 of them), a relative activity measure",
+    freshForMs: BARS_FRESH_MS,
+    deadAfterMs: BARS_DEAD_MS,
+  };
+}
 
 /**
  * `/memes/measure` page size, in five-minute slots: 1h by default; 4h at most
@@ -1201,6 +1239,47 @@ export function createServer(deps: ServerDeps): Hono {
         use: "measurement only; not a trading signal",
       },
     });
+  });
+
+  /**
+   * One-minute bars for tracked meme stocks (handoff 2026-10-05 item 1), from
+   * the store only. Up to 30 addresses, answered in input order; a token never
+   * tracked comes back `tracked: false` with no bars. `limit` (1..180, default
+   * 60) is the newest closed minutes per token.
+   */
+  app.get("/memes/bars", async (c) => {
+    const raw = c.req.query("addresses");
+    const limit = parseBarsLimit(c.req.query("limit"));
+    if (limit === null) {
+      return c.json({ error: { code: "invalid_query", message: `limit must be an integer 1..${MEME_BARS_KEEP}` } }, 400);
+    }
+    const addresses = (raw ?? "").split(",").map((value) => value.trim()).filter((value) => value !== "");
+    if (addresses.length === 0 || addresses.length > MEME_BARS_BATCH_MAX) {
+      return c.json({ error: { code: "invalid_query", message: `addresses must list 1..${MEME_BARS_BATCH_MAX} EVM addresses` } }, 400);
+    }
+    const normalized = addresses.map((value) => normalizeAddress(value));
+    if (normalized.some((value) => value === null)) {
+      return c.json({ error: { code: "invalid_address", message: "every address must be an EVM address" } }, 400);
+    }
+    const tracked = await readTrackedSet(deps.store);
+    const data = await Promise.all((normalized as string[]).map((address) => readMemeBars(deps.store, address, limit, tracked)));
+    return c.json({ data, meta: barsMeta(limit) });
+  });
+
+  app.get("/memes/:address/bars", async (c) => {
+    const address = normalizeAddress(c.req.param("address"));
+    if (address === null) {
+      return c.json({ error: { code: "invalid_address", message: "address must be an EVM address" } }, 400);
+    }
+    const limit = parseBarsLimit(c.req.query("limit"));
+    if (limit === null) {
+      return c.json({ error: { code: "invalid_query", message: `limit must be an integer 1..${MEME_BARS_KEEP}` } }, 400);
+    }
+    const view = await readMemeBars(deps.store, address, limit, await readTrackedSet(deps.store));
+    if (view.source === null) {
+      return c.json({ error: { code: "not_tracked", message: "no bars are kept for this token" } }, 404);
+    }
+    return c.json({ data: view, meta: barsMeta(limit) });
   });
 
   app.get("/memes/:address", async (c) => {

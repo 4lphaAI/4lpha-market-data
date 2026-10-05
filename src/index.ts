@@ -15,6 +15,7 @@ import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { majorsPricesJob } from "./jobs/majorsPrices.js";
 import { memeBoardJob } from "./jobs/memeBoard.js";
 import { memeMeasureJob } from "./jobs/memeMeasure.js";
+import { memeBarsJob } from "./jobs/memeBars.js";
 import { pancakePoolsJob } from "./jobs/pancakePools.js";
 import { tradingFeaturesJob } from "./jobs/tradingFeatures.js";
 import { tradingUnderlyingFeaturesJob } from "./jobs/tradingUnderlyingFeatures.js";
@@ -80,6 +81,8 @@ scheduler.register(memeBoardJob(store));
 // Social / smart-inflow measurement (one cycle per 5 minutes, 7 days). Export
 // only: nothing on the board or any trading read consumes it.
 scheduler.register(memeMeasureJob(store));
+// One-minute bars for the live meme stocks (Sintral, USD), served by /memes/bars.
+scheduler.register(memeBarsJob(store));
 scheduler.register(binanceUniverseJob(store));
 scheduler.register(binancePricesJob(store));
 // Tokenized stocks: the Binance Web3 RWA list (needs the signed key) and the

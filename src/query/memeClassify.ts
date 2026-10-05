@@ -16,6 +16,8 @@
 import type { MemeLaunchpad, MemeRushRow } from "../adapters/binanceWeb3.js";
 import type { SignalWalletType, SmartSignal, TokenActivity } from "../adapters/onchainos.js";
 import type { QuoteInfo, QuoteKind } from "./quoteKind.js";
+import type { FlapDividend } from "../adapters/flap.js";
+import type { LaunchpadVenue } from "./launchpadState.js";
 
 export type MemeStage = "new" | "bonding" | "graduating" | "graduated";
 export type MemeStatus = "runner" | "active" | "quiet" | "fading" | "dead" | "unknown";
@@ -169,6 +171,59 @@ export interface MemeSmartMoney {
   maxWallets: number | null;
   /** `soldRatioPct` of the newest signal. */
   lastSoldRatioPct: number | null;
+  /**
+   * Binance's smart-money net-inflow rank over the last 5 minutes / hour.
+   * `null` when the token was not ranked — which is not zero inflow — or the
+   * rank could not be read. Never feeds `smart_money` or any other flag.
+   */
+  inflow5m: SmartInflow | null;
+  inflow1h: SmartInflow | null;
+}
+
+/**
+ * One window of the smart-money net-inflow rank. Only `netUsd` and `traders`
+ * describe smart money: the upstream's buy/sell counts on the same row are the
+ * token's whole market (they match OKX's trade counts), so they are not carried.
+ */
+export interface SmartInflow {
+  /** Signed net inflow from tagged smart-money wallets, USD. */
+  netUsd: number | null;
+  /** Smart-money wallets behind it. */
+  traders: number | null;
+  /**
+   * 1-based position in Binance's list (~3–15 rows for 5m, at most 50 for 1h).
+   * The ordering is Binance's own and opaque — it is not by net inflow (a live
+   * 1h list had +$169 at 1 and −$27,966 at 5) — so read `netUsd`, not the rank.
+   */
+  rank: number;
+  /** When the rank was read. */
+  rankedAt: number;
+}
+
+/**
+ * Where a buy executes and what it costs on top of the price, from the
+ * launchpads on chain (see `jobs/memeVenues.ts` for the refresh rules).
+ * Every field `null` = not read yet, never a default.
+ */
+export interface MemeVenueInfo {
+  venue: LaunchpadVenue | null;
+  /** Token tax per direction in bps; Flap only (the Four.Meme helper does not report one). */
+  tax: { buyBps: number; sellBps: number } | null;
+  /** Graduated PancakeSwap V2 pair; Flap only. */
+  pool: string | null;
+  nativeToQuoteSwapEnabled: boolean | null;
+  /** Flap tax-token dividend: reward token (zero address = BNB) and share of tax routed to it; `bps: 0` = no automatic payout. */
+  dividend: FlapDividend | null;
+  /** When venue, tax and pool were last read. */
+  checkedAt: number;
+}
+
+/** A trade split from OKX's hot ranking for one window. */
+export interface MemeFlow {
+  buys: number | null;
+  sells: number | null;
+  uniqueTraders: number | null;
+  inflowUsd: number | null;
 }
 
 export interface MemeBoardRow {
@@ -216,12 +271,22 @@ export interface MemeBoardRow {
    */
   listedOn: string[];
   /** The last hour's trade split from OKX's hot ranking, when it ranked there. */
-  flow1h: { buys: number | null; sells: number | null; uniqueTraders: number | null; inflowUsd: number | null } | null;
+  flow1h: MemeFlow | null;
+  /** The same for the last 5 minutes; `null` outside OKX's top 100 for that window. */
+  flow5m: MemeFlow | null;
   lastListedAt: number;
   firstSeenAt: number;
   /** When `status` first became `dead`; cleared when it trades again. */
   deadSince: number | null;
   classifiedAt: number;
+  /** `flap-bonding` | `fourmeme-bonding` | `pancake-v2`; `null` until read, or when the launchpad will not trade it. */
+  venue: MemeVenueInfo["venue"];
+  tax: MemeVenueInfo["tax"];
+  pool: MemeVenueInfo["pool"];
+  nativeToQuoteSwapEnabled: MemeVenueInfo["nativeToQuoteSwapEnabled"];
+  dividend: MemeVenueInfo["dividend"];
+  /** When venue/tax/pool were read; `null` when never. */
+  venueCheckedAt: number | null;
 }
 
 export interface ClassifyInput {
@@ -232,6 +297,10 @@ export interface ClassifyInput {
   cloneOf: string | null;
   listedOn?: string[] | undefined;
   flow1h?: MemeBoardRow["flow1h"] | undefined;
+  flow5m?: MemeBoardRow["flow5m"] | undefined;
+  inflow5m?: SmartInflow | null | undefined;
+  inflow1h?: SmartInflow | null | undefined;
+  venue?: MemeVenueInfo | null | undefined;
   lastListedAt: number;
   firstSeenAt: number;
   previousDeadSince: number | null;
@@ -395,16 +464,25 @@ export function classifyMeme(input: ClassifyInput): MemeBoardRow {
       lastSignalAt,
       maxWallets,
       lastSoldRatioPct,
+      inflow5m: input.inflow5m ?? null,
+      inflow1h: input.inflow1h ?? null,
     },
-    dev: { address: rush.devAddress, soldAll: rush.devSoldAll, migrateCount: rush.devMigrateCount },
+    dev:{ address: rush.devAddress, soldAll: rush.devSoldAll, migrateCount: rush.devMigrateCount },
     cloneOf: input.cloneOf,
     socials: rush.socials,
     listedOn: input.listedOn ?? [],
     flow1h: input.flow1h ?? null,
+    flow5m: input.flow5m ?? null,
     lastListedAt: input.lastListedAt,
     firstSeenAt: input.firstSeenAt,
     deadSince: status === "dead" ? (input.previousDeadSince ?? now) : null,
     classifiedAt: now,
+    venue: input.venue?.venue ?? null,
+    tax: input.venue?.tax ?? null,
+    pool: input.venue?.pool ?? null,
+    nativeToQuoteSwapEnabled: input.venue?.nativeToQuoteSwapEnabled ?? null,
+    dividend: input.venue?.dividend ?? null,
+    venueCheckedAt: input.venue?.checkedAt ?? null,
   };
 }
 

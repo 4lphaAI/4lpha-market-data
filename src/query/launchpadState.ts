@@ -14,7 +14,7 @@
  */
 
 import { sanitizeMessage } from "../adapters/http.js";
-import { FLAP_STATUS_DEX, readFlapMarketStates } from "../adapters/flap.js";
+import { FLAP_STATUS_DEX, FLAP_STATUS_TRADABLE, readFlapMarketStates, type FlapMarketState } from "../adapters/flap.js";
 import { withBscClient, isContractLevelFailure } from "../chain/rpc.js";
 import { FOURMEME_HELPER, helperAbi } from "./eligibility.js";
 import type { MemeLaunchpad } from "../adapters/binanceWeb3.js";
@@ -29,7 +29,23 @@ export interface LaunchpadState {
   quote: string | null;
   /** Epoch ms of the launch, when the launchpad records it. */
   launchedAt: number | null;
+  /**
+   * Where a buy executes now — the same answer `/eligibility` gives. `null` when
+   * the launchpad knows the token but will not trade it (a Flap status other
+   * than Tradable or DEX). Optional so a state built by an older reader still types.
+   */
+  venue?: LaunchpadVenue | null;
+  /** The graduated PancakeSwap V2 pair; `null` while on the curve, and for Four.Meme (the helper does not say). */
+  pool?: string | null;
+  /** Token tax per direction in bps (Flap lens); `null` for Four.Meme, whose helper does not report it. */
+  tax?: { buyBps: number; sellBps: number } | null;
+  /** Flap only: whether the Portal swaps BNB into a non-native quote for the buyer. */
+  nativeToQuoteSwapEnabled?: boolean | null;
 }
+
+export type LaunchpadVenue = "flap-bonding" | "fourmeme-bonding" | "pancake-v2";
+
+const ZERO = "0x0000000000000000000000000000000000000000";
 
 export type LaunchpadStateReader = (
   items: readonly { address: string; launchpad: MemeLaunchpad }[],
@@ -44,13 +60,7 @@ export const readLaunchpadStates: LaunchpadStateReader = async (items, signal) =
   if (flap.length > 0) {
     try {
       for (const [address, state] of await readFlapMarketStates(flap, signal)) {
-        const migrated = state.status === FLAP_STATUS_DEX;
-        out.set(address, {
-          migrated,
-          progress: migrated ? 100 : scaledPercent(state.progress),
-          quote: state.quote,
-          launchedAt: null,
-        });
+        out.set(address, fromFlapState(state));
       }
     } catch (error) {
       console.warn(`[${SOURCE}] flap read failed: ${sanitizeMessage(error)}`);
@@ -74,6 +84,21 @@ export const readLaunchpadStates: LaunchpadStateReader = async (items, signal) =
   return out;
 };
 
+/** Exported for tests: one Flap lens answer as a launchpad state. Only Tradable (1) and DEX (4) have a venue. */
+export function fromFlapState(state: FlapMarketState): LaunchpadState {
+  const migrated = state.status === FLAP_STATUS_DEX;
+  return {
+    migrated,
+    progress: migrated ? 100 : scaledPercent(state.progress),
+    quote: state.quote,
+    launchedAt: null,
+    venue: migrated ? "pancake-v2" : state.status === FLAP_STATUS_TRADABLE ? "flap-bonding" : null,
+    pool: state.pool === ZERO ? null : state.pool,
+    tax: { buyBps: state.buyTaxBps, sellBps: state.sellTaxBps },
+    nativeToQuoteSwapEnabled: state.nativeToQuoteSwapEnabled ?? null,
+  };
+}
+
 type Client = Parameters<Parameters<typeof withBscClient>[0]>[0];
 
 /** `null` when the helper does not know the token (`version == 0`, or a revert). */
@@ -96,6 +121,10 @@ async function readFourMemeState(client: Client, address: string): Promise<Launc
       quote: info[2].toLowerCase(),
       // `launchTime` is genuinely 0 for many fresh launches; 0 is "not recorded".
       launchedAt: launchTime > 0 ? launchTime * 1000 : null,
+      venue: migrated ? "pancake-v2" : "fourmeme-bonding",
+      pool: null,
+      tax: null,
+      nativeToQuoteSwapEnabled: null,
     };
   } catch (error) {
     if (isContractLevelFailure(error)) return null;

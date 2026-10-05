@@ -17,8 +17,10 @@ import {
   type MemeBoardRow,
   type MemeCategory,
   type MemeFlag,
+  type MemeFlow,
   type MemeStage,
   type MemeStatus,
+  type SmartInflow,
 } from "./memeClassify.js";
 
 export class MemeQueryError extends Error {}
@@ -403,6 +405,21 @@ export interface MemeShortlistRow {
   flags: MemeFlag[];
   /** When OKX observed the activity numbers. */
   observedAt: number | null;
+  /** OKX hot-ranking trade split per window, with net inflow; `null` outside its top 100 for that window. */
+  flow5m: MemeFlow | null;
+  flow1h: MemeFlow | null;
+  /** Binance smart-money net-inflow rank per window; `null` = not ranked or unread, never zero. */
+  smartInflow5m: SmartInflow | null;
+  smartInflow1h: SmartInflow | null;
+  /** Where a buy executes now, from the launchpad on chain; `null` = not read yet. */
+  venue: MemeBoardRow["venue"];
+  /** Token tax per direction in bps (Flap); `null` = unknown, not zero. */
+  tax: MemeBoardRow["tax"];
+  pool: MemeBoardRow["pool"];
+  nativeToQuoteSwapEnabled: MemeBoardRow["nativeToQuoteSwapEnabled"];
+  /** Flap tax-token dividend; a reward paid in the quote bStock lands in the holder's wallet. */
+  dividend: MemeBoardRow["dividend"];
+  venueCheckedAt: number | null;
 }
 
 export interface Shortlist {
@@ -629,5 +646,16 @@ export function toShortlistRow(
     smartMoney: smartMoneyCount(row),
     flags: row.flags,
     observedAt: row.activity?.observedAt ?? null,
+    // `?? null`: a board written before these fields existed lacks them.
+    flow5m: row.flow5m ?? null,
+    flow1h: row.flow1h ?? null,
+    smartInflow5m: row.smartMoney.inflow5m ?? null,
+    smartInflow1h: row.smartMoney.inflow1h ?? null,
+    venue: row.venue ?? null,
+    tax: row.tax ?? null,
+    pool: row.pool ?? null,
+    nativeToQuoteSwapEnabled: row.nativeToQuoteSwapEnabled ?? null,
+    dividend: row.dividend ?? null,
+    venueCheckedAt: row.venueCheckedAt ?? null,
   };
 }

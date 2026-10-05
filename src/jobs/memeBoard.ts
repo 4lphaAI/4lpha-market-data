@@ -27,9 +27,11 @@ import type { SnapshotStore } from "../core/store.js";
 import type { JobSpec } from "../core/types.js";
 import {
   fetchMemeRush,
+  fetchSmartMoneyInflow,
   type MemeLaunchpad,
   type MemeRushRow,
   type MemeRushStage,
+  type SmartInflowRow,
 } from "../adapters/binanceWeb3.js";
 import { sanitizeMessage } from "../adapters/http.js";
 import {
@@ -42,8 +44,9 @@ import {
   type TokenActivity,
 } from "../adapters/onchainos.js";
 import { readLaunchpadStates, type LaunchpadState, type LaunchpadStateReader } from "../query/launchpadState.js";
-import { MEME_RULES, classifyMeme, findClones, type MemeBoardRow } from "../query/memeClassify.js";
+import { MEME_RULES, classifyMeme, findClones, type MemeBoardRow, type SmartInflow } from "../query/memeClassify.js";
 import { resolveQuotes, type IssuerReader } from "../query/quoteKind.js";
+import { readDividendsOnchain, refreshVenues, type CachedVenue, type DividendReader } from "./memeVenues.js";
 
 export const MEME_BOARD_JOB = "meme-board";
 /** Public board, served by `GET /memes`. */
@@ -66,8 +69,11 @@ const BOARD_DEAD_MS = 30 * 60_000;
 /** Later lists win when a token is on two at once: migrated is more news than new. */
 const STAGE_ORDER: MemeRushStage[] = ["new", "finalizing", "migrated"];
 const LAUNCHPADS: MemeLaunchpad[] = ["flap", "fourmeme"];
-/** 1h first: its trade split is the one carried on the row as `flow1h`. */
+/** 1h first, so a hot-only token is seeded from its 1h row. Both splits ride on the row (`flow1h`, `flow5m`). */
 const HOT_TIMEFRAMES: HotTimeframe[] = ["1h", "5m"];
+/** Smart-money net-inflow windows read every cycle (two keyless Binance calls). */
+type InflowWindow = "5m" | "1h";
+const INFLOW_WINDOWS: InflowWindow[] = ["5m", "1h"];
 
 interface TrackedToken {
   /**
@@ -104,7 +110,9 @@ export interface RunMemeBoardOptions {
   fetchHot?:
     | ((launchpad: MemeLaunchpad, timeframe: HotTimeframe, signal: AbortSignal) => Promise<HotToken[]>)
     | undefined;
+  fetchInflow?: ((window: InflowWindow, signal: AbortSignal) => Promise<SmartInflowRow[]>) | undefined;
   readStates?: LaunchpadStateReader | undefined;
+  readDividends?: DividendReader | undefined;
   readIssuer?: IssuerReader | undefined;
   now?: (() => number) | undefined;
 }
@@ -122,7 +130,9 @@ export async function runMemeBoard(
   const fetchSignals = options.fetchSignals ?? ((s) => fetchOnchainosSignals({ signal: s }));
   const fetchHot =
     options.fetchHot ?? ((launchpad, timeframe, s) => fetchOnchainosHotTokens({ launchpad, timeframe, signal: s }));
+  const fetchInflow = options.fetchInflow ?? ((window, s) => fetchSmartMoneyInflow({ period: window, signal: s }));
   const readStates = options.readStates ?? readLaunchpadStates;
+  const readDividends = options.readDividends ?? readDividendsOnchain;
   const failures: string[] = [];
 
   // 1. Discovery, from two sources that see different tokens. Meme Rush is the
@@ -149,13 +159,14 @@ export async function runMemeBoard(
     }
   }
   const hot1h = new Map<string, HotToken>();
+  const hot5m = new Map<string, HotToken>();
   const hotOnly = new Map<string, HotToken>();
   for (const launchpad of LAUNCHPADS) {
     for (const timeframe of HOT_TIMEFRAMES) {
       try {
         for (const row of await fetchHot(launchpad, timeframe, signal)) {
           tag(row.address, `okx-hot:${timeframe}`);
-          if (timeframe === "1h") hot1h.set(row.address, row);
+          (timeframe === "1h" ? hot1h : hot5m).set(row.address, row);
           if (!listed.has(row.address) && !hotOnly.has(row.address)) hotOnly.set(row.address, row);
         }
       } catch (error) {
@@ -197,6 +208,40 @@ export async function runMemeBoard(
     .slice(0, MEME_BOARD_CAP);
   const addresses = tracked.map((token) => token.rush.address);
 
+  // 2b. Venue, tax and dividend from the launchpads (cached; see memeVenues.ts).
+  // If the refresh itself fails (the cache key could not be read or written),
+  // each row keeps what the previous board said rather than reading as "never
+  // read"; the board never fails for it (audit F2).
+  let venues = new Map<string, CachedVenue>();
+  try {
+    const refreshed = await refreshVenues(
+      store,
+      tracked.map((token) => ({
+        address: token.rush.address,
+        launchpad: token.rush.launchpad,
+        status: previousBoard.get(token.rush.address)?.status,
+      })),
+      states,
+      { readStates, readDividends, now, signal },
+    );
+    venues = refreshed.venues;
+    failures.push(...refreshed.failures);
+  } catch (error) {
+    failures.push(`venues: ${sanitizeMessage(error)}`);
+    for (const row of previousBoard.values()) {
+      if (row.venueCheckedAt == null) continue;
+      venues.set(row.address, {
+        launchpad: row.launchpad,
+        venue: row.venue ?? null,
+        tax: row.tax ?? null,
+        pool: row.pool ?? null,
+        nativeToQuoteSwapEnabled: row.nativeToQuoteSwapEnabled ?? null,
+        dividend: row.dividend ?? null,
+        checkedAt: row.venueCheckedAt,
+      });
+    }
+  }
+
   // 3. Liveness. An OKX failure falls back to each row's previous activity
   // rather than turning the whole board `unknown` — `observedAt` still dates it.
   let activity = new Map<string, TokenActivity>();
@@ -231,6 +276,25 @@ export async function runMemeBoard(
     signalsByToken.set(s.address, list);
   }
 
+  // 4b. Smart-money net inflow, ranked per window by Binance. A window that
+  // cannot be read keeps last cycle's rank while it is younger than the board's
+  // own freshness; past that the row says `null` (unknown) rather than carry an
+  // old rank as current.
+  const inflow: Record<InflowWindow, Map<string, SmartInflow>> = { "5m": new Map(), "1h": new Map() };
+  for (const window of INFLOW_WINDOWS) {
+    try {
+      for (const row of await fetchInflow(window, signal)) {
+        inflow[window].set(row.address, { netUsd: row.netInflowUsd, traders: row.traders, rank: row.rank, rankedAt: now });
+      }
+    } catch (error) {
+      failures.push(`inflow:${window}: ${sanitizeMessage(error)}`);
+      for (const row of previousBoard.values()) {
+        const last = window === "5m" ? row.smartMoney?.inflow5m : row.smartMoney?.inflow1h;
+        if (last != null && now - last.rankedAt < BOARD_FRESH_MS) inflow[window].set(row.address, last);
+      }
+    }
+  }
+
   // 5. Quote kinds (cached forever) and clones (relative to what is tracked).
   const quotes = await resolveQuotes(
     store,
@@ -249,6 +313,10 @@ export async function runMemeBoard(
       cloneOf: clones.get(token.rush.address) ?? null,
       listedOn: listedOn.get(token.rush.address) ?? [],
       flow1h: flowOf(hot1h.get(token.rush.address)),
+      flow5m: flowOf(hot5m.get(token.rush.address)),
+      inflow5m: inflow["5m"].get(token.rush.address) ?? null,
+      inflow1h: inflow["1h"].get(token.rush.address) ?? null,
+      venue: venues.get(token.rush.address) ?? null,
       lastListedAt: token.lastListedAt,
       firstSeenAt: token.firstSeenAt,
       previousDeadSince: token.deadSince,
@@ -439,7 +507,8 @@ export function memeBoardJob(store: SnapshotStore): JobSpec {
     name: MEME_BOARD_JOB,
     intervalMs: 60_000,
     jitterMs: 5_000,
-    // Six Meme Rush lists, up to six 100-token price-info batches, one signal call,
+    // Six Meme Rush lists, four hot rankings, up to eight 100-token price-info batches,
+    // one signal call, two smart-money inflow ranks,
     // and at most one batched issuer read for quote tokens never seen before.
     timeoutMs: 45_000,
     run: async (signal) => {

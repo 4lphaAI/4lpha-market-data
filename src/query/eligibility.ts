@@ -243,6 +243,12 @@ export interface EligibilityResult {
   checkedAt: number;
   /** True when this answer came from cache rather than a fresh chain read. */
   cached: boolean;
+  /**
+   * Set only on an allowlist or Alpha hit that carries launchpad facts: when
+   * those facts were read (they may come from a 30 s cache while `checkedAt`
+   * dates the verdict, which is decided live).
+   */
+  venueCheckedAt?: number;
 }
 
 /**
@@ -586,6 +592,94 @@ export function decideEligibility(
   return { ...base, eligible: false, reason: "not_listed" };
 }
 
+/**
+ * Venue for a token admitted by the allowlist or the Binance Alpha list, when
+ * it came from a launchpad (handoff 2026-10-05 item 4).
+ *
+ * Enrichment only: the verdict was decided before this runs and nothing here
+ * can change `eligible`, `reason` or `source`. It is the same chain read and the
+ * same venue rule as an unlisted launchpad token, with its own bounds so a list
+ * hit keeps answering at list speed when the chain does not: a deadline of
+ * {@link LIST_VENUE_DEADLINE_MS}, and a cache — short for a launchpad token,
+ * because graduation moves the venue, long for "not a launchpad token", because
+ * a launchpad never adopts an existing contract. A failed or late read answers
+ * `venue: null` and is not cached.
+ */
+export const LIST_VENUE_DEADLINE_MS = 1_500;
+export const LIST_VENUE_TTL = {
+  launchpad: { freshForMs: 30_000, deadAfterMs: 30_000 },
+  none: { freshForMs: 6 * 3_600_000, deadAfterMs: 6 * 3_600_000 },
+} as const;
+
+export function listVenueKey(address: string): string {
+  // Outside the `eligibility:` prefix on purpose: these are venue facts, not
+  // verdicts, and the raw snapshot route serves that prefix (audit F7).
+  return `list-venue:${address.toLowerCase()}`;
+}
+
+type ListVenue = Pick<EligibilityResult, "venue" | "fourmeme" | "flap">;
+
+/**
+ * Exported for tests: the venue facts one chain read gives a listed token.
+ * `null` only when neither launchpad knows it. A token a launchpad knows but
+ * will not trade (Flap status other than 1/4, a Four.Meme manager other than
+ * v2) carries its state with `venue: null`, and is cached as a launchpad token,
+ * because its status can still move (audit F1).
+ */
+export function listVenueFrom(outcomes: ChainOutcomes): ListVenue | null | "unavailable" {
+  const { fourmeme, flap } = outcomes;
+  if (fourmeme.kind === "answered" && fourmeme.state.version === SUPPORTED_TOKEN_MANAGER_VERSION) {
+    return { venue: fourmeme.state.liquidityAdded ? "pancake-v2" : "fourmeme-bonding", fourmeme: fourmeme.state, flap: null };
+  }
+  if (flap.kind === "answered") {
+    const venue = isFlapTradable(flap.state.status) ? (flap.state.status === FLAP_STATUS_DEX ? "pancake-v2" : "flap-bonding") : null;
+    return { venue, fourmeme: null, flap: flap.state };
+  }
+  if (fourmeme.kind === "answered" && fourmeme.state.version !== 0) {
+    return { venue: null, fourmeme: fourmeme.state, flap: null };
+  }
+  if (fourmeme.kind === "unavailable" || flap.kind === "unavailable") return "unavailable";
+  return null;
+}
+
+/** A list hit with the venue facts, dated by the read they came from (audit F3). */
+function withVenue(result: EligibilityResult, venue: ListVenue | null, readAt: number): EligibilityResult {
+  return venue === null ? result : { ...result, ...venue, venueCheckedAt: readAt };
+}
+
+async function withListVenue(
+  store: SnapshotStore,
+  result: EligibilityResult,
+  read: (address: string, signal: AbortSignal | undefined) => Promise<ChainOutcomes>,
+  signal: AbortSignal | undefined,
+): Promise<EligibilityResult> {
+  try {
+    const cached = await store.get<{ venue: ListVenue | null }>(listVenueKey(result.address));
+    if (cached !== null && cached.staleness === "fresh" && typeof cached.data === "object" && cached.data !== null) {
+      return withVenue(result, cached.data.venue ?? null, cached.asOf);
+    }
+    const deadline = AbortSignal.timeout(LIST_VENUE_DEADLINE_MS);
+    const bounded = signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+    const outcomes = await Promise.race([
+      read(result.address, bounded),
+      new Promise<never>((_, reject) => {
+        bounded.addEventListener("abort", () => reject(new Error("list venue read timed out")), { once: true });
+      }),
+    ]);
+    const readAt = Date.now();
+    const venue = listVenueFrom(outcomes);
+    if (venue === "unavailable") return result;
+    await store.put(listVenueKey(result.address), { venue }, {
+      source: SOURCE,
+      ...(venue === null ? LIST_VENUE_TTL.none : LIST_VENUE_TTL.launchpad),
+    });
+    return withVenue(result, venue, readAt);
+  } catch (error) {
+    console.warn(`[${SOURCE}] list venue read failed: ${sanitizeMessage(error)}`);
+    return result;
+  }
+}
+
 export interface IsEligibleParams {
   address: string;
   signal?: AbortSignal | undefined;
@@ -637,8 +731,10 @@ export async function isEligible(
 
   // Checked before the cache: a snapshot hit is a local map lookup, and it must
   // keep answering even while the chain is unreachable.
+  const read = params.readState ?? readChainState;
   if (allowlist !== null && allowlist.has(address)) {
-    return { ...decideEligibility(address, "allowlist", null), checkedAt: now, cached: false };
+    const listed: EligibilityResult = { ...decideEligibility(address, "allowlist", null), checkedAt: now, cached: false };
+    return withListVenue(store, listed, read, params.signal);
   }
 
   // Also before the cache, so a token newly added to the Alpha list is admitted
@@ -647,7 +743,8 @@ export async function isEligible(
   // decided from can be replaced by the next job cycle at any moment.
   const alpha = await readAlphaSet(store);
   if (alpha !== null && alpha.has(address)) {
-    return { ...decideEligibility(address, "binance-alpha", null), checkedAt: now, cached: false };
+    const listed: EligibilityResult = { ...decideEligibility(address, "binance-alpha", null), checkedAt: now, cached: false };
+    return withListVenue(store, listed, read, params.signal);
   }
 
   // A stock that passed the veto and is on no other list. Like Alpha, decided
@@ -664,7 +761,6 @@ export async function isEligible(
     return { ...cached.data, checkedAt: cached.asOf, cached: true };
   }
 
-  const read = params.readState ?? readChainState;
   const outcomes = allowlist === null ? null : await read(address, params.signal);
   const decided = decideEligibility(address, null, outcomes);
   const result: EligibilityResult = { ...decided, checkedAt: Date.now(), cached: false };
