@@ -17,15 +17,15 @@ const STEP=300_000;
 const fetch=globalThis.fetch;
 afterEach(()=>{globalThis.fetch=fetch;});
 const json=(value:unknown,status=200)=>new Response(JSON.stringify(value),{status});
-function input(count=120): FeatureInput {
-  const now=Date.now(), end=Math.floor((now-15_000)/STEP)*STEP;
+function input(count=120,interval:"5m"|"15m"="5m"): FeatureInput {
+  const step=interval==="5m"?STEP:900_000, now=Date.now(), end=Math.floor((now-15_000)/step)*step;
   return {chainId:56,poolAddress:POOL,baseAddress:BASE,quoteAddress:QUOTE,priceCurrency:"token",volumeCurrency:"quote_token",
-    volumeUnavailableReason:null,source:"geckoterminal",interval:"5m",observedAt:now,conflictingTimestamps:[],
-    candles:Array.from({length:count},(_,i)=>({timestamp:end-(count-i)*STEP,open:100,high:i===count-1?111:101,low:99,close:i===count-1?110:100,volume:10}))};
+    volumeUnavailableReason:null,source:"geckoterminal",interval,observedAt:now,conflictingTimestamps:[],
+    candles:Array.from({length:count},(_,i)=>({timestamp:end-(count-i)*step,open:100,high:i===count-1?111:101,low:99,close:i===count-1?110:100,volume:10}))};
 }
 function chart(data=input()): PoolOhlcvResult {
   return {schemaVersion:2,candles:data.candles,base:{address:BASE,name:null,symbol:null},quote:{address:QUOTE,name:null,symbol:null},
-    poolAddress:POOL,interval:"5m",limit:500,source:data.source,asOf:data.observedAt,staleness:"fresh",priceCurrency:"token",volumeCurrency:"quote_token",volumeUnavailableReason:null};
+    poolAddress:POOL,interval:data.interval,limit:500,source:data.source,asOf:data.observedAt,staleness:"fresh",priceCurrency:"token",volumeCurrency:"quote_token",volumeUnavailableReason:null};
 }
 function near(value:number|null,expected:number){assert.ok(value!==null&&Math.abs(value-expected)<1e-10,`${value} != ${expected}`);}
 async function config(store:MemoryStore|PostgresStore){await store.put(FEATURE_WATCHLIST_KEY,[{pool:POOL,currency:"token"}],{source:"test",freshForMs:60_000,deadAfterMs:60_000});}
@@ -155,7 +155,7 @@ describe("quality-aware whole-series selection",()=>{
     assert.equal(value.metrics.rvol20.reason,"unknown_volume_unit");
   });
   function serve(gap:boolean,dexBroken=false){
-    const data=input(120);let geckoCalls=0,dexCalls=0;
+    const data=input(120,"15m");let geckoCalls=0,dexCalls=0;
     globalThis.fetch=async request=>{
       const url=new URL(String(request));
       if(url.hostname.includes("gecko")){
@@ -169,7 +169,7 @@ describe("quality-aware whole-series selection",()=>{
     };
     return {data,counts:()=>({geckoCalls,dexCalls})};
   }
-  const params={poolAddress:POOL,interval:"5m" as const,currency:"token" as const,limit:500,qualityPolicy:"trading-v2" as const};
+  const params={poolAddress:POOL,interval:"15m" as const,currency:"token" as const,limit:500,qualityPolicy:"trading-v2" as const};
   it("tries Dex for a fresh but gapped Gecko response and never splices prices",async()=>{
     const stub=serve(true);const attempts:OhlcvAttempt[]=[];const store=new MemoryStore();
     const result=await getPoolOhlcv(store,{...params,onAttempt:a=>attempts.push(a)});
@@ -177,18 +177,18 @@ describe("quality-aware whole-series selection",()=>{
     assert.equal(result!.candles[0]!.volume,null);assert.equal(attempts[0]!.reason,"gap");
     assert.equal(attempts.at(-1)!.reason,"ready");assert.equal(stub.counts().dexCalls,3);
     await getPoolOhlcv(store,{...params,limit:10});assert.equal(stub.counts().dexCalls,3);
-    assert.equal(await store.get(poolOhlcvKey(POOL,"5m",500,"token")),null);
+    assert.equal(await store.get(poolOhlcvKey(POOL,"15m",500,"token")),null);
   });
   it("reuses sufficient chart history without another fetch",async()=>{
-    const data=input(), store=new MemoryStore();
-    await store.put(poolOhlcvKey(POOL,"5m",500,"token"),chart(data),{source:"geckoterminal",freshForMs:60_000,deadAfterMs:60_000});
+    const data=input(120,"15m"), store=new MemoryStore();
+    await store.put(poolOhlcvKey(POOL,"15m",500,"token"),chart(data),{source:"geckoterminal",freshForMs:60_000,deadAfterMs:60_000});
     globalThis.fetch=async()=>{assert.fail("cache must be reused");};
     assert.equal((await getPoolOhlcv(store,params))!.source,"geckoterminal");
   });
   it("tries the alternative even when the cached chart is fresh but gapped",async()=>{
     const stub=serve(true), store=new MemoryStore();
     const cached=chart(stub.data);cached.candles=cached.candles.filter((_,i)=>i!==115);
-    await store.put(poolOhlcvKey(POOL,"5m",500,"token"),cached,{source:"geckoterminal",freshForMs:60_000,deadAfterMs:60_000});
+    await store.put(poolOhlcvKey(POOL,"15m",500,"token"),cached,{source:"geckoterminal",freshForMs:60_000,deadAfterMs:60_000});
     assert.equal((await getPoolOhlcv(store,params))!.source,"dexpaprika");
   });
   it("retains partial real history and diagnostic evidence when the alternative fails",async()=>{
@@ -200,9 +200,9 @@ describe("quality-aware whole-series selection",()=>{
   it("does not trade away complete cached price coverage for a newer gapped series",async()=>{
     const stub=serve(true,true);const store=new MemoryStore();
     const pair={base:{address:BASE,name:null,symbol:null},quote:{address:QUOTE,name:null,symbol:null}};
-    const cached=normalizeChart(stub.data.candles.map(b=>({...b,volume:10})),pair,"token","dexpaprika",0,Date.now(),STEP);
-    await store.put(poolOhlcvKey(POOL,"5m",500,"token",undefined,"trading-v2"),cached,{source:"dexpaprika",freshForMs:0,deadAfterMs:60_000});
-    const before=(await store.get(poolOhlcvKey(POOL,"5m",500,"token",undefined,"trading-v2")))!.asOf;
+    const cached=normalizeChart(stub.data.candles.map(b=>({...b,volume:10})),pair,"token","dexpaprika",0,Date.now(),900_000);
+    await store.put(poolOhlcvKey(POOL,"15m",500,"token",undefined,"trading-v2"),cached,{source:"dexpaprika",freshForMs:0,deadAfterMs:60_000});
+    const before=(await store.get(poolOhlcvKey(POOL,"15m",500,"token",undefined,"trading-v2")))!.asOf;
     const result=await getPoolOhlcv(store,params);assert.equal(result!.source,"dexpaprika");assert.equal(result!.asOf,before);
   });
 });

@@ -26,6 +26,9 @@ function dexPage(url: URL, intervalMs = 60_000) {
     open: 0.5, high: 1, low: 0.25, close: 1 / 3, volume: 50 }]);
 }
 const params = { poolAddress: POOL, interval: "1m" as const, limit: 20, currency: "token" as const };
+// DexPaprika is in the chain from 10m up only (free tier: 403 below), so the Dex fallback runs on 15m.
+const Q = 900_000;
+const dexParams = { ...params, interval: "15m" as const };
 
 describe("exact-pool fallback", () => {
   it("coalesces concurrent limits and caches the shared 500-bucket view", async () => {
@@ -102,9 +105,9 @@ describe("exact-pool fallback", () => {
     globalThis.fetch = async (input) => {
       const u = urlOf(input); urls.push(u);
       if (u.hostname === "api.geckoterminal.com") return json({}, 429);
-      return u.pathname.endsWith("ohlcv") ? dexPage(u) : dexDetail();
+      return u.pathname.endsWith("ohlcv") ? dexPage(u, Q) : dexDetail();
     };
-    const result = await getPoolOhlcv(store, params);
+    const result = await getPoolOhlcv(store, dexParams);
     assert.equal(result?.source, "dexpaprika"); assert.equal(result?.base.address, A);
     assert.equal(result?.quote.address, B); assert.equal(result?.candles.at(-1)?.close, 3);
     assert.equal(result?.candles.at(-1)?.high, 4); assert.equal(result?.candles.at(-1)?.low, 1);
@@ -122,10 +125,10 @@ describe("exact-pool fallback", () => {
   });
   it("preserves the old cache timestamp when both providers fail, and suppresses immediate retries", async () => {
     const now = Date.now(); const store = new MemoryStore(() => now - 180_000);
-    const data = normalizeChart([bar(last() - 180_000)], pair, "token", "geckoterminal", 0, Date.now(), 60_000);
-    await store.put(poolOhlcvKey(POOL, "1m", undefined, "token"), data, { source: "geckoterminal", freshForMs: 0, deadAfterMs: 86_400_000 });
+    const data = normalizeChart([bar(last(Q) - 2 * Q)], pair, "token", "geckoterminal", 0, Date.now(), Q);
+    await store.put(poolOhlcvKey(POOL, "15m", undefined, "token"), data, { source: "geckoterminal", freshForMs: 0, deadAfterMs: 86_400_000 });
     let calls = 0; globalThis.fetch = async () => { calls++; return json({}, 503); };
-    const first = await getPoolOhlcv(store, params); const second = await getPoolOhlcv(store, params);
+    const first = await getPoolOhlcv(store, dexParams); const second = await getPoolOhlcv(store, dexParams);
     assert.equal(first?.asOf, now - 180_000); assert.equal(second?.asOf, first?.asOf);
     assert.equal(first?.staleness, "stale"); assert.equal(calls, 2);
   });
@@ -135,10 +138,22 @@ describe("exact-pool fallback", () => {
       const u = urlOf(input);
       if (u.hostname.includes("gecko")) return json({}, 503);
       if (!u.pathname.endsWith("ohlcv")) return dexDetail();
-      return ++pages === 1 ? dexPage(u) : json({}, 503);
+      return ++pages === 1 ? dexPage(u, Q) : json({}, 503);
     };
-    assert.equal(await getPoolOhlcv(store, params), null);
-    assert.equal(await store.get(poolOhlcvKey(POOL, "1m", undefined, "token")), null);
+    assert.equal(await getPoolOhlcv(store, dexParams), null);
+    assert.equal(pages, 2);
+    assert.equal(await store.get(poolOhlcvKey(POOL, "15m", undefined, "token")), null);
+  });
+  it("never asks DexPaprika below 10m: its free tier answers 1m/5m with 403 plan_required", async () => {
+    for (const interval of ["1m", "5m"] as const) {
+      for (const extra of [{}, { currency: "usd" as const, tokenAddress: A }]) {
+        const hosts: string[] = [];
+        globalThis.fetch = async (input) => { const u = urlOf(input); hosts.push(u.hostname); return json({}, 429); };
+        assert.equal(await getPoolOhlcv(new MemoryStore(), { ...params, ...extra, interval }), null);
+        assert.ok(hosts.length > 0, `${interval}: some provider was tried`);
+        assert.ok(!hosts.some((h) => h.includes("dexpaprika")), `${interval}: DexPaprika must not be called`);
+      }
+    }
   });
   it("fetches six non-overlapping hourly windows for 500 four-hour buckets", async () => {
     const store = new MemoryStore(); let pages = 0;

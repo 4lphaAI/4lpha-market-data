@@ -161,8 +161,10 @@ describe("deterministic closed trading features", () => {
 describe("explicit trading target", () => {
   it("keeps the same explicit ratio target across Gecko 429 and reversed Dex metadata", async () => {
     const fetch = globalThis.fetch;
-    const end = Math.floor(Date.now() / STEP) * STEP;
-    const bars = Array.from({length: 500}, (_, i) => ({ timestamp: end - (500-i)*STEP, open: 2, high: 4, low: 1, close: 2, volume: 10 }));
+    // 15m, not 5m: DexPaprika is only in the chain from 10m up (free-tier 403 below).
+    const Q = 900_000;
+    const end = Math.floor(Date.now() / Q) * Q;
+    const bars = Array.from({length: 500}, (_, i) => ({ timestamp: end - (500-i)*Q, open: 2, high: 4, low: 1, close: 2, volume: 10 }));
     let failGecko = false, dexCalls = 0;
     globalThis.fetch = async (request) => {
       const url = new URL(String(request));
@@ -179,7 +181,7 @@ describe("explicit trading target", () => {
         open:1/b.open,high:1/b.low,low:1/b.high,close:1/b.close,volume:10}))));
     };
     try {
-      const params = {poolAddress:POOL,interval:"5m" as const,currency:"token" as const,tokenAddress:QUOTE,limit:500};
+      const params = {poolAddress:POOL,interval:"15m" as const,currency:"token" as const,tokenAddress:QUOTE,limit:500};
       const primary = await getPoolOhlcv(new MemoryStore(), params);
       failGecko = true;
       const store = new MemoryStore();
@@ -187,8 +189,8 @@ describe("explicit trading target", () => {
       assert.equal(fallback!.source,"dexpaprika"); assert.equal(dexCalls,3);
       assert.equal(fallback!.base.address,QUOTE); assert.equal(fallback!.quote.address,BASE);
       assert.equal(fallback!.priceCurrency,"token"); assert.equal(fallback!.candles.at(-1)!.high,1);
-      const a=calculateFeatures(poolFeatureInput(primary!,"5m"),Date.now());
-      const b=calculateFeatures(poolFeatureInput(fallback!,"5m"),Date.now());
+      const a=calculateFeatures(poolFeatureInput(primary!,"15m"),Date.now());
+      const b=calculateFeatures(poolFeatureInput(fallback!,"15m"),Date.now());
       for (const name of ["roc10Pct","ema12","ema26","emaSpreadPct","atr14","atrPct"] as const) {
         assert.equal(b.metrics[name].available,true); near(b.metrics[name].value,a.metrics[name].value!);
       }

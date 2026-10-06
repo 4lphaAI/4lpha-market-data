@@ -18,9 +18,16 @@ export interface OhlcvAttempt { source: string; reason: string; contiguousBars?:
 
 export type PoolPriceCurrency = "usd" | "token";
 export type PoolCandle = Omit<Candle, "volume"> & { volume: number | null };
+/**
+ * `dex: null` keeps DexPaprika out of the chain for that interval. Its free tier
+ * answers anything below 10m with 403 `plan_required` (measured 2026-10-06 on
+ * the production key: 5m 403, 15m/1h 200), and each refused call still spent one
+ * of its 12 budget slots/min that the working 15m/1h fallbacks needed — 1,808
+ * of them in a day. Restore "1m"/"5m" here only with a Dev/Pro key.
+ */
 const INTERVALS = {
-  "1m": { timeframe: "minute", aggregate: 1, seconds: 60, dex: "1m" },
-  "5m": { timeframe: "minute", aggregate: 5, seconds: 300, dex: "5m" },
+  "1m": { timeframe: "minute", aggregate: 1, seconds: 60, dex: null },
+  "5m": { timeframe: "minute", aggregate: 5, seconds: 300, dex: null },
   "15m": { timeframe: "minute", aggregate: 15, seconds: 900, dex: "15m" },
   "1h": { timeframe: "hour", aggregate: 1, seconds: 3600, dex: "1h" },
   "4h": { timeframe: "hour", aggregate: 4, seconds: 14400, dex: "1h" },
@@ -183,7 +190,7 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
   const sources = [
     ...(sintralInterval ? ["sintral" as const] : []),
     "geckoterminal" as const,
-    ...(currency === "token" || sintralInterval ? ["dexpaprika" as const] : []),
+    ...((currency === "token" || sintralInterval) && mapping.dex !== null ? ["dexpaprika" as const] : []),
   ];
   // Sintral has no on-chain pair to check `token` against, unlike the Gecko
   // branch's own "requested token is not in pool" guard below -- and that
@@ -239,6 +246,8 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
         }
         data = normalizeChart(raw.candles, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000, token);
       } else {
+        const dexInterval = mapping.dex;
+        if (dexInterval === null) continue; // unreachable: filtered out of `sources`
         const pairKey = `pool:ohlcv:dexpair:${pool}`;
         const storedPair = await r.store.get<DexPair>(pairKey);
         const pair = storedPair?.staleness === "fresh" ? storedPair.data : await fetchDexPair({ poolAddress: pool,
@@ -255,7 +264,7 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
           // cross that bound in a non-leap year. Reserve one response slot
           // for an inclusive end boundary, which the adapter then discards.
           const pageStart = Math.max(start, pageEnd - 365 * step);
-          all.push(...await fetchDexCandles({ poolAddress: pool, interval: mapping.dex,
+          all.push(...await fetchDexCandles({ poolAddress: pool, interval: dexInterval,
             start: pageStart, end: pageEnd, limit: (pageEnd - pageStart) / step + 1,
             signal, fetchFn: r.transport.fetch(source) }));
           pageEnd = pageStart;
