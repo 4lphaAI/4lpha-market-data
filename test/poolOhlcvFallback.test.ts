@@ -144,8 +144,8 @@ describe("exact-pool fallback", () => {
     assert.equal(pages, 2);
     assert.equal(await store.get(poolOhlcvKey(POOL, "15m", undefined, "token")), null);
   });
-  it("never asks DexPaprika below 10m: its free tier answers 1m/5m with 403 plan_required", async () => {
-    for (const interval of ["1m", "5m"] as const) {
+  it("never asks DexPaprika for 1m/5m (free tier: <10m is 403) or 4h/1d (7-day reach leaves no chart)", async () => {
+    for (const interval of ["1m", "5m", "4h", "1d"] as const) {
       for (const extra of [{}, { currency: "usd" as const, tokenAddress: A }]) {
         const hosts: string[] = [];
         globalThis.fetch = async (input) => { const u = urlOf(input); hosts.push(u.hostname); return json({}, 429); };
@@ -155,31 +155,20 @@ describe("exact-pool fallback", () => {
       }
     }
   });
-  it("fetches six non-overlapping hourly windows for 500 four-hour buckets", async () => {
-    const store = new MemoryStore(); let pages = 0;
+  it("clamps an hourly Dex window to the free tier's 7-day reach: one page, nothing older", async () => {
+    const store = new MemoryStore(); const pages: URL[] = [];
     globalThis.fetch = async (input) => {
       const u = urlOf(input);
       if (u.hostname.includes("gecko")) return json({}, 503);
       if (!u.pathname.endsWith("ohlcv")) return dexDetail();
-      pages++; assert.equal(u.searchParams.get("interval"), "1h"); return dexPage(u, 3_600_000);
+      pages.push(u); assert.equal(u.searchParams.get("interval"), "1h"); return dexPage(u, 3_600_000);
     };
-    const result = await getPoolOhlcv(store, { ...params, interval: "4h", limit: 500 });
-    assert.equal(pages, 6); assert.equal(result?.source, "dexpaprika");
-    assert.ok(result?.candles.every((row) => row.timestamp % 14_400_000 === 0));
-  });
-  it("bounds daily pages to one year and reserves an inclusive boundary slot", async () => {
-    let pages = 0;
-    globalThis.fetch = async (input) => {
-      const u = urlOf(input);
-      if (u.hostname.includes("gecko")) return json({}, 503);
-      if (!u.pathname.endsWith("ohlcv")) return dexDetail();
-      const buckets = (Number(u.searchParams.get("end")) - Number(u.searchParams.get("start"))) / 86_400;
-      assert.ok(buckets <= 365);
-      assert.equal(Number(u.searchParams.get("limit")), buckets + 1);
-      pages++; return dexPage(u, 86_400_000);
-    };
-    assert.ok(await getPoolOhlcv(new MemoryStore(), { ...params, interval: "1d" }));
-    assert.equal(pages, 2);
+    const result = await getPoolOhlcv(store, { ...params, interval: "1h", limit: 500 });
+    assert.equal(result?.source, "dexpaprika"); assert.equal(pages.length, 1);
+    const start = Number(pages[0]!.searchParams.get("start")), end = Number(pages[0]!.searchParams.get("end"));
+    assert.ok(start >= Date.now() / 1000 - 7 * 86_400, "never reaches past 7 days (free tier answers 403)");
+    assert.equal(start % 3600, 0); assert.ok((end - start) / 3600 >= 120, "still covers the 120-bucket feature window");
+    assert.equal(Number(pages[0]!.searchParams.get("limit")), (end - start) / 3600 + 1);
   });
   it("rejects stale upstream history instead of stamping it fresh", async () => {
     const store = new MemoryStore();

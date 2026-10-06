@@ -19,20 +19,26 @@ export interface OhlcvAttempt { source: string; reason: string; contiguousBars?:
 export type PoolPriceCurrency = "usd" | "token";
 export type PoolCandle = Omit<Candle, "volume"> & { volume: number | null };
 /**
- * `dex: null` keeps DexPaprika out of the chain for that interval. Its free tier
- * answers anything below 10m with 403 `plan_required` (measured 2026-10-06 on
- * the production key: 5m 403, 15m/1h 200), and each refused call still spent one
- * of its 12 budget slots/min that the working 15m/1h fallbacks needed — 1,808
- * of them in a day. Restore "1m"/"5m" here only with a Dev/Pro key.
+ * `dex: null` keeps DexPaprika out of the chain for that interval. The production
+ * key is free tier, which refuses two things with 403 `plan_required` (measured
+ * 2026-10-06): any interval below 10m, and any window reaching back more than
+ * 7 days (one bucket past it is refused). Each refused call still spent one of
+ * its 12 budget slots/min — 1,808 of them in a day. So 1m/5m are out; 15m (500
+ * buckets = 5.2 days) fits as is; 1h is clamped to the last 7 days
+ * (`DEX_HISTORY_S`, 168 buckets, above the 120-bucket feature window); 4h/1d
+ * would get 42 and 7 buckets inside that window, too few to be a chart, so they
+ * are out. With a Dev (30 days) or Pro key, restore these and widen the clamp.
  */
 const INTERVALS = {
   "1m": { timeframe: "minute", aggregate: 1, seconds: 60, dex: null },
   "5m": { timeframe: "minute", aggregate: 5, seconds: 300, dex: null },
   "15m": { timeframe: "minute", aggregate: 15, seconds: 900, dex: "15m" },
   "1h": { timeframe: "hour", aggregate: 1, seconds: 3600, dex: "1h" },
-  "4h": { timeframe: "hour", aggregate: 4, seconds: 14400, dex: "1h" },
-  "1d": { timeframe: "day", aggregate: 1, seconds: 86400, dex: "24h" },
+  "4h": { timeframe: "hour", aggregate: 4, seconds: 14400, dex: null },
+  "1d": { timeframe: "day", aggregate: 1, seconds: 86400, dex: null },
 } as const;
+/** DexPaprika free-tier history: 7 days, less 5 min so clock skew cannot cross it. */
+const DEX_HISTORY_S = 7 * 86_400 - 300;
 const HISTORY = 500;
 const DEAD_AFTER_MS = 24 * 60 * 60_000;
 const REFRESH_TIMEOUT_MS = 25_000;
@@ -257,20 +263,21 @@ async function refresh(r: Runtime, pool: string, interval: KlineInterval, curren
         });
         // Page by fixed time windows (not count of returned bars: inactive
         // periods are sparse). Failures discard the entire paging pass.
-        const step = interval === "4h" ? 3600 : mapping.seconds;
+        // The window starts no earlier than the free tier's history reach,
+        // on a bucket boundary inside it (see `DEX_HISTORY_S`).
+        const step = mapping.seconds;
+        const dexStart = Math.max(start, Math.ceil((Date.now() / 1000 - DEX_HISTORY_S) / step) * step);
         const all: PoolCandle[] = [];
-        for (let pageEnd = end; pageEnd > start;) {
-          // The API also caps each window at one year; 366 daily bars can
-          // cross that bound in a non-leap year. Reserve one response slot
+        for (let pageEnd = end; pageEnd > dexStart;) {
+          // At most 366 rows per response: 365 buckets plus one slot reserved
           // for an inclusive end boundary, which the adapter then discards.
-          const pageStart = Math.max(start, pageEnd - 365 * step);
+          const pageStart = Math.max(dexStart, pageEnd - 365 * step);
           all.push(...await fetchDexCandles({ poolAddress: pool, interval: dexInterval,
             start: pageStart, end: pageEnd, limit: (pageEnd - pageStart) / step + 1,
             signal, fetchFn: r.transport.fetch(source) }));
           pageEnd = pageStart;
         }
-        const bars = interval === "4h" ? aggregateCandles(all, mapping.seconds * 1000) : all;
-        data = normalizeChart(bars, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000, token);
+        data = normalizeChart(all, pair, currency, source, start * 1000, end * 1000, mapping.seconds * 1000, token);
       }
       if (data.candles.length === 0) { onAttempt?.({source, reason: "empty"}); continue; }
       if (cached && (data.base.address !== cached.data.base.address || data.quote.address !== cached.data.quote.address)) {
