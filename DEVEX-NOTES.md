@@ -348,6 +348,70 @@ Friction worth reporting:
 Not measured: fills, RFQ rejection rate, and the guard's own gas. At ~0.06 gwei the whole gas
 difference is ≤ ~$0.015, i.e. ~1.5 bps at $100 and noise from $1k up.
 
+## 2026-10-01 - Transaction API, Wallet API, Address Portfolio on an EIP-7702 agent wallet
+
+Read-only probe (no signature, no broadcast) from the execution session: wallet
+`0x27146E20c2fb2521c7DD73e97bE030C3147c9da6` (Altana EIP-7702 EOA, impl `0xc0f16888…`,
+dozens of relayed bStock swaps since 2026-09-21), 1 USDT -> NVDAB on Pancake V3 fee 2500
+(pool `0x8FB4243b553aC29BA088aCf00B9B7dA24bD6690C`). Latency is per call, from Vietnam.
+
+### OK-29 · `simulate` handles a 7702 batch if you encode it as the wallet's own self-call
+- Our real transaction is a batch the Orchestrator executes on the 7702 account. `evmTx` takes one
+  `{from,to,value,data}`, so a swap-only simulation is useless: it fails `"execution reverted: STF"`
+  because the account's allowance is zero between transactions.
+- Encoding the whole batch as the account's ERC-7821 `execute(bytes32 mode = 0x01…00,
+  abi.encode((address,uint256,bytes)[]))` with `from = to = wallet` works: `SUCCESS`, balance changes
+  `-1e18` USDT / `+4323945330964287` NVDAB, allowance `0 -> 0`. Impossible `minOut` ->
+  `FAILED "execution reverted: Too little received"`. `gas-limit` on the same payload: 225 406.
+- 124-218 ms per call. Not documented anywhere: nothing on the page mentions account-abstraction or
+  7702 batches, and it does not exercise the session key's KeyStore caps (the self-call bypasses
+  them), so it checks market and balances only.
+- Small friction: `balanceChanges[].owner` comes back lowercase while `contractAddress` is checksummed;
+  `tokenType` is `"Erc20"` here, `"ERC20"` in the docs example.
+
+### QUIRK-30 · Address Portfolio does not see relayed (7702 / account-abstraction) trades
+- `portfolio/overview` (timeFrame 3 = 1M): `buyTxCount 0`, `sellTxCount 0`, `realizedPnlUsd 0`, every
+  `dailyPnl` 0. `portfolio/dex-history` (last 30 days): empty list.
+- `portfolio/token/latest-pnl` for NVDAB: all trade fields 0, yet `maxBalanceAmount 0.0703` and
+  `holdingDuration 161608`, so the indexer saw the HOLDING but not the swaps that created it.
+- Most likely cause: the swaps are sent by a relayer (`tx.from` is not the wallet) and the indexer
+  attributes trades by transaction sender. Every agent wallet built on 7702 / ERC-4337 relaying, which is
+  exactly what the AI-agent track pushes builders toward, will show zero PnL here.
+- Consequence built here: Binance PnL is never shown as our PnL and never decides money; at most a
+  display-only cross-check.
+
+### QUIRK-31 · Wallet API balances include airdrop spam flagged `isRiskToken: false`
+- `all-token-balances-by-address` lists the bStock correctly (GOOGLB with `tokenPrice` 350.17) but also
+  a page of unsolicited airdrop tokens (e.g. `取款机` 12 518.56, `币安证券` 124.09) with `tokenPrice: ""`
+  and `isRiskToken: false` (we did not pass `excludeRiskToken`; whether it would drop them is untested). A consumer has to build its own
+  spam filter (empty price is the only usable signal).
+- 130-165 ms per call.
+
+## 2026-10-02 - G0: `simulate` through our production data plane, five cases
+
+Operator-run, no money, `scripts/tradfi-simulate-probe.ts` in the execution repo, wallet `0x2714…9da6`,
+1 USDT -> NVDAB, through `POST /internal/binance/pre-transaction/simulate` on Railway (data plane
+`6ba2cd8`, `BINANCE_SIMULATE_ENABLED=true`). "Upstream" is the Binance call as timed by the data plane;
+"total" is the execution-side call from Vietnam including the Railway hop.
+
+| Case | Status / reason | Total ms | Upstream ms |
+|---|---|---:|---:|
+| Direct Pancake V3 batch | SUCCESS, predicted 4 310 152 465 198 964 NVDAB wei (minOut headroom 101 bps) | 441 | 190 |
+| Direct, impossible minOut | FAILED `"execution reverted: Too little received"` | 416 | 221 |
+| Guard (Binance Flash) batch, sent at once | SUCCESS (guard window left 13 210 ms) | 416 | 231 |
+| Guard batch, sent 3 s late | SUCCESS (guard window left 11 256 ms) | 308 | 233 |
+| Guard batch with an expired deadline (`DeadlineOutOfBounds()`, selector `0xdccae4f5`) | FAILED `"execution reverted"`, nothing else | n/a | 268 |
+
+### QUIRK-32 · `simulate` drops custom-error data: every custom-error revert is a bare `"execution reverted"`
+- A `require` with a string comes back readable (`Too little received`), but a Solidity custom error comes
+  back as the bare string `execution reverted` with no selector and no revert data. The response has no
+  field for revert data at all.
+- Consequence: a caller cannot tell the guard's deadline error from its slippage error
+  (`OutputShortfall`) or any other custom error. Any policy that wants to treat one custom error
+  differently is impossible on this API today; we block all bare reverts on buys and log them on sells.
+- Ask: return the raw revert data (hex) next to `failReason`, as `eth_call` does.
+- No sign of a lagging simulator clock at 3 s of delay (the guard rejects `deadline > block.timestamp + 15`).
+
 ## Open items to measure next
 - ~~Rate ceiling after the limit increase~~ measured 2026-10-01: ~1 200 requests / 60 s per key (PITFALL-6).
 - Whether the key's bucket is per key or per IP (needs a second key or a second host).
