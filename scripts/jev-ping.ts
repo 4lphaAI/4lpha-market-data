@@ -32,4 +32,4 @@ for (const check of checks) {
   }
 }
 console.log(ok ? "PASS: all three answers parse; MEME_JEV_ENABLED may be turned on." : "FAIL: keep MEME_JEV_ENABLED off and report this output.");
-process.exit(ok ? 0 : 1);
+process.exitCode = ok ? 0 : 1;
