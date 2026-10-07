@@ -89,6 +89,17 @@ import {
   normalizeSpreadHistory,
   summarizeSeries,
 } from "./jobs/spreadHistory.js";
+import {
+  STOCK_COMPARE_ABOUT_SAME_BPS,
+  STOCK_COMPARE_AVOID_COST_BPS,
+  STOCK_COMPARE_KEY,
+  STOCK_COMPARE_SIZES_USDT,
+  STOCK_COMPARE_STALE_MS,
+  STOCK_COMPARE_TICKER_PATTERN,
+  computeVerdicts,
+  normalizeStockCompare,
+  stockCompareStaleness,
+} from "./query/stockCompare.js";
 import { fetchPancakePoolStats, poolKey } from "./adapters/pancake.js";
 import { type RangeRequest, estimateRange, loadRangeSnapshot } from "./query/poolRange.js";
 import {
@@ -1730,6 +1741,54 @@ export function createServer(deps: ServerDeps): Hono {
    * record is served whatever its staleness, and `meta.staleness` says whether
    * the writer is alive.
    */
+  /**
+   * Cross-issuer stock compare (bStock vs Ondo), store-only: reads the `stocks:compare` snapshot the
+   * `stock-compare` job writes and never calls an upstream. `?ticker=NVDA` returns that row plus
+   * per-size verdicts computed here; without it, the list of tickers with their `quotedAt`.
+   * Staleness comes from each row's own `quotedAt`, not the record's write time.
+   */
+  app.get("/trading/stock-compare", async (c) => {
+    const ticker = c.req.query("ticker");
+    if (ticker !== undefined && !STOCK_COMPARE_TICKER_PATTERN.test(ticker)) {
+      return c.json({ data: null, error: { code: "invalid_ticker" } }, 400);
+    }
+    const record = await deps.store.get<unknown>(STOCK_COMPARE_KEY);
+    const rows = normalizeStockCompare(record?.data).rows;
+    const nowMs = Date.now();
+    const limits = {
+      sizesUsdt: STOCK_COMPARE_SIZES_USDT,
+      aboutSameBps: STOCK_COMPARE_ABOUT_SAME_BPS,
+      avoidCostBps: STOCK_COMPARE_AVOID_COST_BPS,
+    };
+    if (ticker !== undefined) {
+      const row = rows[ticker];
+      if (row === undefined) return c.json({ data: null, error: { code: "ticker_not_found" } }, 404);
+      return c.json({
+        data: { ...row, verdicts: computeVerdicts(row) },
+        meta: {
+          staleness: stockCompareStaleness(row.quotedAt, nowMs),
+          quotedAt: row.quotedAt,
+          ageMs: Math.max(0, nowMs - row.quotedAt),
+          ...limits,
+        },
+      });
+    }
+    const list = Object.values(rows)
+      .map((row) => ({ ticker: row.ticker, quotedAt: row.quotedAt }))
+      .sort((a, b) => (a.ticker < b.ticker ? -1 : 1));
+    const newest = list.reduce((max, row) => Math.max(max, row.quotedAt), 0);
+    return c.json({
+      data: list,
+      meta: {
+        count: list.length,
+        staleness: list.length === 0 ? "dead" : stockCompareStaleness(newest, nowMs),
+        newestQuotedAt: list.length === 0 ? null : newest,
+        retentionMs: STOCK_COMPARE_STALE_MS,
+        ...limits,
+      },
+    });
+  });
+
   app.get("/spreads", async (c) => {
     const hours = parseHours(c.req.query("hours"));
     if (hours === null) {

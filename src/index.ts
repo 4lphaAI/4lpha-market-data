@@ -10,6 +10,7 @@ import { bstockTrendingJob } from "./jobs/bstockTrending.js";
 import { hasBinanceRwaCredentials, readBinanceRwaRps } from "./adapters/binanceRwa.js";
 import { stockVenuesJob } from "./jobs/stockVenues.js";
 import { spreadHistoryJob } from "./jobs/spreadHistory.js";
+import { stockCompareJobIfEnabled } from "./jobs/stockCompare.js";
 import { flapLaunchesJob } from "./jobs/flapLaunches.js";
 import { fourmemeRankingJob } from "./jobs/fourmemeRanking.js";
 import { majorsPricesJob } from "./jobs/majorsPrices.js";
@@ -91,6 +92,9 @@ if (hasBinanceRwaCredentials()) {
   scheduler.register(binanceRwaJob(store));
   // One signed call a day (the fixed sector baskets are a frozen file).
   scheduler.register(bstockTrendingJob(store));
+  // Cross-issuer quotes (bStock vs Ondo) through the shared Flash bucket, live agents first. Off by default.
+  const stockCompare = stockCompareJobIfEnabled(store);
+  if (stockCompare !== null) scheduler.register(stockCompare);
   console.log("[binance-rwa] credentials present; tokenized-stock lanes armed");
 } else console.warn("[binance-rwa] BINANCE_WEB3_API_KEY/SECRET_KEY not set; bstocks lane is static only, ondo lane empty");
 scheduler.register(stockVenuesJob(store));
