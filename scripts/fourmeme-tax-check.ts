@@ -2,7 +2,10 @@
  * Runs a few real `meme-board` cycles into one in-memory store and tallies the
  * Four.Meme tax on the board (FOURMEME-TAX-SPEC.md). Read-only.
  *
- *   node --import tsx scripts/fourmeme-tax-check.ts [cycles]
+ *   node --import tsx scripts/fourmeme-tax-check.ts [cycles] [gapSeconds] [address ...]
+ *
+ * The tally is printed after every cycle (FOURMEME-CURVE-PAPER-SPEC G0d: a curve row that flickers to `tax null` shows up between two cycles);
+ * run at least 13 cycles with a 60 s gap to cross the 5- and 10-minute rate cache boundaries.
  */
 import { loadDotEnv } from "../src/config/env.js";
 import { MemoryStore } from "../src/core/store.js";
@@ -13,25 +16,26 @@ import type { MemeBoardRow } from "../src/query/memeClassify.js";
 loadDotEnv();
 
 const store = new MemoryStore();
-const cycles = Number(process.argv[2] ?? 4);
+const cycles = Number(process.argv[2] ?? 4), gapMs = Number(process.argv[3] ?? 0) * 1_000;
+let rows: MemeBoardRow[] = [];
 for (let i = 0; i < cycles; i += 1) {
+  if (i > 0 && gapMs > 0) await new Promise((resolve) => setTimeout(resolve, gapMs));
   const t0 = performance.now();
   const result = await runMemeBoard(store, AbortSignal.timeout(60_000));
   console.log(`cycle ${i + 1}: ${Math.round(performance.now() - t0)} ms rows ${result.rows} failures ${JSON.stringify(result.failures)}`);
+  rows = ((await store.get<MemeBoardRow[]>(MEME_BOARD_KEY))?.data ?? []) as MemeBoardRow[];
+  const venues = ((await store.get<Record<string, CachedVenue>>(MEME_VENUES_KEY))?.data ?? {}) as Record<string, CachedVenue>;
+  const tally: Record<string, number> = {};
+  for (const row of rows.filter((r) => r.launchpad === "fourmeme")) {
+    const code = venues[row.address]?.fourmemeCode;
+    const template = code === undefined ? "unread" : (matchFourMemeTemplate(code)?.id ?? `UNRECOGNISED ${code.code} type ${code.creatorType}`);
+    const tax = row.tax === null ? "null" : `${row.tax.buyBps}/${row.tax.sellBps}`;
+    const key = `${row.venue} ${template} tax ${tax}`;
+    tally[key] = (tally[key] ?? 0) + 1;
+  }
+  for (const [key, count] of Object.entries(tally).sort((a, b) => b[1] - a[1])) console.log(String(count).padStart(4), key);
 }
-
-const rows = ((await store.get<MemeBoardRow[]>(MEME_BOARD_KEY))?.data ?? []) as MemeBoardRow[];
-const venues = ((await store.get<Record<string, CachedVenue>>(MEME_VENUES_KEY))?.data ?? {}) as Record<string, CachedVenue>;
-const tally: Record<string, number> = {};
-for (const row of rows.filter((r) => r.launchpad === "fourmeme")) {
-  const code = venues[row.address]?.fourmemeCode;
-  const template = code === undefined ? "unread" : (matchFourMemeTemplate(code)?.id ?? `UNRECOGNISED ${code.code} type ${code.creatorType}`);
-  const tax = row.tax === null ? "null" : `${row.tax.buyBps}/${row.tax.sellBps}`;
-  const key = `${row.venue} ${template} tax ${tax}`;
-  tally[key] = (tally[key] ?? 0) + 1;
-}
-for (const [key, count] of Object.entries(tally).sort((a, b) => b[1] - a[1])) console.log(String(count).padStart(4), key);
-for (const address of process.argv.slice(3)) {
+for (const address of process.argv.slice(4)) {
   const row = rows.find((r) => r.address === address.toLowerCase());
   console.log(address, row === undefined ? "not on board" : JSON.stringify({ venue: row.venue, tax: row.tax, pool: row.pool, venueCheckedAt: row.venueCheckedAt }));
 }
