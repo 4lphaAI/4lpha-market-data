@@ -49,6 +49,9 @@ import {
   atomicToNumber,
   buildAnsweredSize,
   buildFailedSize,
+  cleanMarketStatus,
+  isStockCompareAddress,
+  isStockCompareSymbol,
   mergeStockCompareRows,
   normalizeStockCompare,
   type StockCompareCode,
@@ -131,7 +134,8 @@ export function planStockCompareTickers(rows: readonly RwaToken[]): PlannedTicke
     if (row.platform !== "bstock" && row.platform !== "ondo") continue;
     const ticker = row.underlyingTicker;
     if (ticker === null || !STOCK_COMPARE_TICKER_PATTERN.test(ticker)) continue;
-    if (row.tokenToShareRatio === null || !(row.tokenToShareRatio > 0)) continue;
+    if (row.tokenToShareRatio === null || !Number.isFinite(row.tokenToShareRatio) || !(row.tokenToShareRatio > 0)) continue;
+    if (!isStockCompareSymbol(row.symbol) || !isStockCompareAddress(row.address)) continue;
     const entry = byTicker.get(ticker) ?? {};
     entry[row.platform] ??= row;
     byTicker.set(ticker, entry);
@@ -140,7 +144,7 @@ export function planStockCompareTickers(rows: readonly RwaToken[]): PlannedTicke
   for (const [ticker, entry] of byTicker) {
     const { bstock, ondo } = entry;
     if (bstock === undefined || ondo === undefined) continue;
-    const reference = [bstock.referencePriceUsd, ondo.referencePriceUsd].find((p): p is number => p !== null && p > 0);
+    const reference = [bstock.referencePriceUsd, ondo.referencePriceUsd].find((p): p is number => p !== null && Number.isFinite(p) && p > 0);
     if (reference === undefined) continue;
     planned.push({
       ticker,
@@ -377,7 +381,7 @@ export async function runStockCompare(
           address: version.row.address,
           ratio: version.row.tokenToShareRatio as number,
           openState: version.row.openState,
-          marketStatus: version.row.marketStatus,
+          marketStatus: cleanMarketStatus(version.row.marketStatus),
           sizes,
         });
       }

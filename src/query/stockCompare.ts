@@ -285,19 +285,30 @@ function normalizeSize(value: unknown): StockCompareSize | null {
   return size;
 }
 
+const SYMBOL_PATTERN = /^[A-Za-z0-9._-]{1,24}$/u;
+const ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/u;
+const MARKET_STATUS_PATTERN = /^[A-Za-z0-9._ -]{1,32}$/u;
+
+/** What the store will accept for a version's symbol; the job skips a row that fails it rather than write a row that cannot be read back. */
+export const isStockCompareSymbol = (value: unknown): value is string => typeof value === "string" && SYMBOL_PATTERN.test(value);
+export const isStockCompareAddress = (value: unknown): value is string => typeof value === "string" && ADDRESS_PATTERN.test(value);
+/** A session label as stored: anything outside the tight charset (or empty) becomes null. */
+export function cleanMarketStatus(value: unknown): string | null {
+  return typeof value === "string" && MARKET_STATUS_PATTERN.test(value) ? value : null;
+}
+
 function normalizeVersion(value: unknown): StockCompareVersion | null {
   if (!isRecord(value)) return null;
   const issuer = value["issuer"];
   if (issuer !== "bstock" && issuer !== "ondo") return null;
   const symbol = value["symbol"];
   const address = value["address"];
-  if (typeof symbol !== "string" || !/^[A-Za-z0-9._-]{1,24}$/u.test(symbol)) return null;
-  if (typeof address !== "string" || !/^0x[0-9a-f]{40}$/u.test(address)) return null;
+  if (!isStockCompareSymbol(symbol) || !isStockCompareAddress(address)) return null;
   if (!finite(value["ratio"]) || value["ratio"] <= 0) return null;
   const openState = value["openState"];
   if (openState !== null && typeof openState !== "boolean") return null;
-  const marketStatus = value["marketStatus"];
-  if (marketStatus !== null && (typeof marketStatus !== "string" || !/^[A-Za-z0-9._ -]{1,32}$/u.test(marketStatus))) return null;
+  const marketStatus = value["marketStatus"] === null ? null : cleanMarketStatus(value["marketStatus"]);
+  if (marketStatus === null && value["marketStatus"] !== null) return null;
   if (!Array.isArray(value["sizes"])) return null;
   const sizes = value["sizes"].slice(0, 8).map(normalizeSize);
   if (sizes.some((s) => s === null)) return null;

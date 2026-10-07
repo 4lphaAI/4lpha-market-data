@@ -372,6 +372,24 @@ describe("runStockCompare", () => {
     assert.ok(nvda.quotedAt > T0 && nvda.quotedAt < c.state.t);
   });
 
+  it("every row it publishes reads back unchanged through the normalizer, even for odd issuer data", async () => {
+    const store = new MemoryStore();
+    const weird = { ...NVDA_O, marketStatus: "" };
+    const badSymbol = [
+      rwaRow({ address: "0x00000000000000000000000000000000000000b1", symbol: "MU B", platform: "bstock", underlyingTicker: "MU" }),
+      rwaRow({ address: "0x00000000000000000000000000000000000000b2", symbol: "MUon", platform: "ondo", underlyingTicker: "MU" }),
+    ];
+    await seedUniverse(store, [NVDA_B, weird, SPY_B, SPY_O, ...badSymbol]);
+    const c = clock();
+    const { limiter } = fakeLimiter(() => 18);
+    const { quote } = scriptedQuote(c.now, (request) => (request.tokenOut === SPYON_A ? noRoute() : undefined));
+    const result = await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter, quote, now: c.now, sleep: c.sleep });
+    assert.equal(result.tickersPlanned, 2, "a row whose symbol the store would not read back is not quoted");
+    const raw = (await store.get<{ rows: Record<string, StockCompareRow> }>(STOCK_COMPARE_KEY))!.data;
+    assert.deepEqual(normalizeStockCompare(raw), raw);
+    assert.equal(raw.rows["NVDA"]!.versions[1]!.marketStatus, null);
+  });
+
   it("no route (40465) skips the sell-back; other failures are quote_failed; a failed sell-back keeps the buy", async () => {
     const store = new MemoryStore();
     await seedUniverse(store, [NVDA_B, NVDA_O]);

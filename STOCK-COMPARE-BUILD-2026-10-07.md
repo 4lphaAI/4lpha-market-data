@@ -14,7 +14,7 @@ Branch `stock-compare`, base master 945f939. Plan: exec repo `MD here/STOCK-COMP
 - `src/server.ts`: `GET /trading/stock-compare` (store-only, behind the existing `x-dp-token` middleware).
 - `src/index.ts`: registers the job when `STOCK_COMPARE_ENABLED === "true"` (inside the existing
   `hasBinanceRwaCredentials()` block; off or no credentials = not registered).
-- `test/stockCompare.test.ts`: 47 tests.
+- `test/stockCompare.test.ts`: 48 tests.
 
 Store contract unchanged: one jsonb key `stocks:compare`, payload `{ rows: { [ticker]: row } }`. `test/fakePg.ts`
 needs nothing new (one test round-trips the snapshot through `PostgresStore` + `FakePg`).
@@ -67,7 +67,7 @@ Route type: `rfq` when every leg name starts with `Rfq `, `amm` when none does, 
 had no legs). Venues: leg names only (no percentages), deduplicated in order of first appearance, at most 4, charset
 `[A-Za-z0-9 ._-]`, 32 chars.
 
-## Route shape (verbatim from a run of the real handler on a seeded store)
+## Route shape (verbatim output of the real handler on a seeded store; the NUMBERS in the example are illustrative, not measurements)
 
 `GET /trading/stock-compare?ticker=NVDA` (the 5000 bStock size is a `no_route` example):
 
@@ -140,12 +140,12 @@ Data-plane suite (`npm test`):
 | | TESTS | PASS | FAIL | SKIPPED |
 |---|---|---|---|---|
 | before (base 945f939) | 1021 | 1021 | 0 | 0 |
-| after | 1068 | 1068 | 0 | 0 |
+| after | 1069 | 1069 | 0 | 0 |
 
-`npx tsc --noEmit`: clean. New file: 47 tests (maths against step-0 numbers, route classification and venue names,
+`npx tsc --noEmit`: clean. New file: 48 tests (maths against step-0 numbers, route classification and venue names,
 verdict edges 19/20/21 bps and 199/200/201 bps, single version, none answered, per-size verdicts, staleness
 boundaries, merge and 2 h expiry and bound, normalizer, planner, the cycle with a fake limiter and scripted
-aggregator, the default quote path with a fake fetch, config, registration flag, the route, Postgres-fake round trip).
+aggregator, the default quote path with a fake fetch, config, registration flag, the route, Postgres-fake round trip, published rows read back unchanged through the normalizer).
 
 ## Mutation results
 
@@ -164,7 +164,7 @@ Each mutation was applied with `sed` to a copy-restored source and confirmed app
 | `avoid` `>` -> `>=` | 1 fails |
 | `avoid` threshold 200 -> 300 | 2 fail |
 
-All ten killed; sources restored byte-for-byte afterwards (checked with `cmp`).
+All ten killed (re-run on the final commit); sources restored byte-for-byte afterwards (checked with `cmp`).
 
 ## Deviations and things to know
 
@@ -190,7 +190,10 @@ All ten killed; sources restored byte-for-byte afterwards (checked with `cmp`).
 7. Closed-session Ondo versions are quoted and stored with `openState` / `marketStatus` (ruling Q2); a quote that
    fails there is `quote_failed` (an unfamiliar envelope code is not distinguishable from "session closed").
 8. `stocks:compare` was not added to `/status` snapshot keys (flag-gated key); job health is in `/status` anyway.
-9. Live check owed to the operator: `STOCK_COMPARE_ENABLED=true` on Railway after review, watch one cycle's log line
+9. Throttling is assumed to be HTTP 429 `42900` (`Retry-After` 1-10 s), as measured in PITFALL-6 and the 2026-10-01 rate-limit reply; no in-band non-zero code for throttling is documented, so an in-band failure is recorded as `quote_failed` and does not stop the cycle. The 30 s headroom gate and the 2 rps pace are what keep a misread from hurting the live agents.
+10. Per-address bStocks (AAPLB, PYPLB, CRDOB, COHRB) get `tokenToShareRatio` from the chain in `binance-rwa` (D1, `uiMultiplier / 1e18`). If that read failed in the last cycle the ratio is null and the planner skips the ticker (shares cannot be computed) until it succeeds; nothing is guessed.
+11. The job only quotes rows the store can read back (symbol `[A-Za-z0-9._-]{1,24}`, lowercase 40-hex address; an empty or odd `marketStatus` is stored as null), otherwise the ticker would vanish on every read and be re-quoted first each cycle.
+12. Live check owed to the operator: `STOCK_COMPARE_ENABLED=true` on Railway after review, watch one cycle's log line
    (`ended`, `quotes`, `headroomWaits`, `ms`) and the live agents' Flash proxy for `rate_budget_exhausted`.
 
 ## Paragraph for the data plane CLAUDE.md (gitignored; paste when merging)
