@@ -10,11 +10,18 @@ were restored and `git status --porcelain -- src/` is empty.
 
 ## Verdict: SHIP WITH FIXES
 
-The core safety property the operator asked about holds inside one process, and I verified it by
-reading the code path rather than by trusting the report. The two fixes I would want before
-`STOCK_COMPARE_ENABLED=true` are HIGH-1 (one-writer guard, because the first cycle fires during a
-deploy overlap) and HIGH-2 (the verdict tells a user "about the same" for a version that costs 62 %
-to exit). Everything else can ship as a named residual.
+No BLOCKER, and no HIGH-severity build defect: the data-plane build conforms to plan section 3 and
+ruling Q1, and the core safety property the operator asked about holds inside one process, which I
+verified by reading the code path rather than by trusting the report.
+
+What makes this "with fixes" rather than a plain ship is three cheap MEDIUM items I would want landed
+before `STOCK_COMPARE_ENABLED=true`, each a few lines: the one-writer guard (MEDIUM-1, because the
+first cycle fires inside a deploy overlap and this is the operator's stated concern), a
+consecutive-failure brake (MEDIUM-2, because nothing today bounds the cost of a degraded upstream),
+and a decimals cross-check (MEDIUM-3, the only path I found that produces a confidently wrong
+verdict). HIGH-1 is listed above them because it is the most consequential thing in the review, but
+it is **not** a build defect: the build follows plan section 3.2 literally and the gap needs an
+operator ruling, not a correction. Everything else can ship as a named residual.
 
 ## Verification of the budget question (plan section 6, "can the job delay a live agent")
 
@@ -58,37 +65,14 @@ ones), so roughly 40-50 tickers and 480-600 quotes, matching the plan's ~580 and
 
 ## Findings
 
-### HIGH-1. No one-writer guard, and the first cycle fires inside the deploy overlap
+### HIGH-1. `about_same` cancels the only exit-cost signal, so a 62 % exit reads as a tie
 
-`src/jobs/stockCompare.ts:415-441` registers the job with `intervalMs` and `jitterMs` only. The
-scheduler's `start()` schedules the first run after jitter alone (`src/core/scheduler.ts:162`), so
-with `STOCK_COMPARE_JITTER_MS = 30_000` (`:66`) the first cycle begins 0-30 s after boot. Seven
-sibling jobs in this plane take a cross-process lease for exactly this reason
-(`src/jobs/memeBars.ts:334`, `src/jobs/memeMeasure.ts:356`, `src/jobs/rwaReferenceBars.ts:253`,
-`src/jobs/tradingFeatures.ts:207`, `src/jobs/tradingUnderlyingFeatures.ts:71`,
-`src/jobs/venusCore.ts:236`), including a signed-RWA one; `stock-compare` takes none.
-
-Failure scenario: a Railway deploy of `data-plane` starts the new container, waits for `/health`,
-then stops the old one. For that overlap the old and new processes each hold their own in-process
-bucket of 18 rps against one key whose real ceiling is ~1 200 / 60 s (~20 rps), and the new process
-begins a fresh ~580-quote stock-compare cycle within 30 s of boot. Each process's headroom gate reads
-only its own bucket and sees plenty of room, so both keep sending at 2 rps while the live agents'
-Flash proxy is also running on both. The key window is then breached by the pair, Binance answers
-HTTP 429, and a live agent's `POST /trading/binance/quote-and-swap` fails. `binanceRwa` and
-`bstockTrending` have the same gap today but spend one list call and one call a day; this job spends
-two orders of magnitude more, which is what makes the gap matter here. If the service is ever scaled
-past one replica the condition stops being a short window and becomes permanent.
-
-Fix: take a lease around the cycle, as `rwaReferenceBars` does (TTL about one interval), and/or give
-the job an initial delay of one full interval through `JobSpec.nextDelayMs` so a deploy never starts
-a cycle. Two lines either way.
-
-### HIGH-2. `about_same` cancels the only exit-cost signal, so a 62 % exit reads as a tie
-
-This is the reviewer brief's item 5 (build deviation 6), and it is worse than the deviation note
-says. `avoid` keys off buy cost only (`src/query/stockCompare.ts:206-208`), which the plan asked for,
-but `about_same` is then computed from shares alone (`:219`) and the build report's own rule is
-"treat `best` as no winner whenever `about_same` is true".
+**Not a build defect: the build follows plan section 3.2 literally. This needs an operator ruling
+before the skill ships, not a correction to this branch.** It is the reviewer brief's item 5 (build
+deviation 6), and it is more consequential than the deviation note says. `avoid` keys off buy cost
+only (`src/query/stockCompare.ts:206-208`), which is exactly what the plan defines, but `about_same`
+is then computed from shares alone (`:219`) and the build report's own rule is "treat `best` as no
+winner whenever `about_same` is true".
 
 Failure scenario, with step-0 numbers: TSLA at 500 USDT measured bStock 1.3331 shares (cost 4 bps,
 round trip 3 bps) and Ondo 1.3322 shares (cost 11 bps, round trip **6 236 bps**). The verdict this
@@ -103,9 +87,45 @@ Fix, smallest shape: extend `avoid` with a round-trip rule (an answered version 
 `about_same` when the two versions' `roundTripBps` differ by more than that threshold. The data is
 already in the row, so this is read-time only and needs no new quote. The build report itself
 suggests it ("Consider adding a round-trip rule"); I would make it a condition of shipping the skill
-rather than a consideration, because the skill is the surface a user acts on.
+rather than a consideration, because the skill is the surface a user acts on. Because it changes what
+a user sees, it is the operator's call under the exec `CLAUDE.md` confirmation rule, not the builder's.
 
-### MEDIUM-1. In-band failures never stop the cycle, and there is no consecutive-failure brake
+### MEDIUM-1. No one-writer guard, and the first cycle fires inside the deploy overlap
+
+`src/jobs/stockCompare.ts:415-441` registers the job with `intervalMs` and `jitterMs` only. The
+scheduler's `start()` schedules the first run after jitter alone (`src/core/scheduler.ts:162`), so
+with `STOCK_COMPARE_JITTER_MS = 30_000` (`:66`) the first cycle begins 0-30 s after boot. Six sibling
+job families in this plane take a cross-process lease for exactly this reason
+(`src/jobs/memeBars.ts:334`, `src/jobs/memeMeasure.ts:356`, `src/jobs/rwaReferenceBars.ts:253` which
+is the recorder pass called from inside the `binance-rwa` job itself,
+`src/jobs/tradingFeatures.ts:207`, `src/jobs/tradingUnderlyingFeatures.ts:71`, and four jobs via
+`src/jobs/venusCore.ts:236`); `stock-compare` takes none. None of those is itself a signed-request
+spender, so the precedent is single-writer correctness rather than key budget, but the primitive is
+there and is one line to use.
+
+Scoping this honestly: two processes already means two independent in-process buckets, each able to
+dispense up to 1 098 requests per rolling 60 s against one key whose ceiling is about 1 200, so the
+live agents plus the existing RWA jobs can breach that window during an overlap **with this flag
+off**. The job's own contribution is bounded by its 2 rps pace, about 120 requests per 60 s per
+process. So this job does not create the condition; it adds to it, at the worst moment, because its
+first cycle starts within 30 s of boot and runs for about 5 minutes. I cannot see from here whether
+Railway's deploy actually overlaps the old and new containers or for how long, so the size of the
+window is for the operator to confirm.
+
+Failure scenario: a deploy brings up the new container while the old one still serves. The new
+process begins a fresh ~580-quote cycle within 30 s; each process's headroom gate reads only its own
+bucket and sees plenty of room, so both keep spending while the live agents' Flash proxy runs on
+both. The key window tips over, Binance answers HTTP 429, and a live agent's
+`POST /trading/binance/quote-and-swap` fails. If the service is ever scaled past one replica the
+condition stops being a short window and becomes permanent. `binanceRwa` and `bstockTrending` have
+the same gap today but spend one list call and one call a day; this job spends two orders of
+magnitude more, which is why it is worth closing here.
+
+Fix: take a lease around the cycle (TTL about one interval), and/or give the job an initial delay of
+one full interval through `JobSpec.nextDelayMs` so a deploy never starts a cycle. Two lines either
+way, and it is the operator's stated concern, so it is cheap insurance even at MEDIUM.
+
+### MEDIUM-2. In-band failures never stop the cycle, and there is no consecutive-failure brake
 
 An HTTP 200 with a non-zero envelope code becomes an `AdapterError` whose `status` is `undefined`
 and whose `upstreamCode` is the code (`src/adapters/binanceRwa.ts:267-271`). In `attempt()` that
@@ -124,7 +144,7 @@ Fix: stop the cycle after N consecutive failed attempts (N around 10 is already 
 largest legitimate run of `no_route` at a single size), and treat `no_route` as the only in-band
 failure that does not count toward N.
 
-### MEDIUM-2. The answer's own `toToken.decimal` is trusted over the store, with no plausibility floor
+### MEDIUM-3. The answer's own `toToken.decimal` is trusted over the store, with no plausibility floor
 
 `parseFlashRouterResult` accepts any integer `decimal` in 0..36 (`src/jobs/stockCompare.ts:196`) and
 `quoteSize` prefers it over the store's value (`:362`, `buy.raw.decimals ?? tokenDecimals`). Nothing
@@ -141,7 +161,7 @@ Fix: when `version.row.decimals` is non-null and the answer's decimal differs, r
 `quote_failed` instead of trusting either; and refuse a `costBps` below a floor (for example
 -2 000 bps, since no aggregator sells a share at a 20 % discount) rather than publishing it.
 
-### MEDIUM-3. The headroom ruling is an absolute count, so it silently re-interprets if the bucket moves
+### MEDIUM-4. The headroom ruling is an absolute count, so it silently re-interprets if the bucket moves
 
 `readBoundedInt` only caps `STOCK_COMPARE_MIN_HEADROOM` at `BINANCE_RWA_RPS`
 (`src/jobs/stockCompare.ts:91-100`). The operator ruled "at least 10 of the 18 budget slots free",
@@ -174,7 +194,7 @@ after a 12 min timeout `inFlight` clears while `runStockCompare` is still inside
 the next `gate()` (`:309`), within one 5 s request, but its `finally` still writes
 (`src/jobs/stockCompare.ts:394-403`). If that write lands after the next cycle has read `previous`
 (`:300`), the next cycle's own publish overwrites those rows. Bounded to a few seconds and to rows
-that would be re-quoted anyway, but it is a silent write-write race. A lease (HIGH-1) closes it too.
+that would be re-quoted anyway, but it is a silent write-write race. A lease (MEDIUM-1) closes it too.
 
 ### LOW-3. `stocks:compare` is not on `/status`, so "job off" and "job broken" look alike
 
@@ -282,5 +302,5 @@ a winner the evidence does not support, instead of relying on every consumer to 
 
 `STOCK_COMPARE_ENABLED=true` on Railway after the fixes, with `BINANCE_RWA_RPS` confirmed at 18;
 watch one cycle's log line (`ended`, `tickers`, `quotes`, `headroomWaits`, `ms`) and the live agents'
-Flash proxy for `rate_budget_exhausted` and `upstream_failure` across that window. With HIGH-1 open,
+Flash proxy for `rate_budget_exhausted` and `upstream_failure` across that window. With MEDIUM-1 open,
 also watch the first cycle after the deploy itself, which is when two processes can coexist.
