@@ -341,8 +341,8 @@ export async function runMemeBoard(
   }
   state.tracked = nextTracked;
 
-  // A run past its timeout writes nothing, so a board write never lands outside
-  // the window its phase allows (see BOARD_PHASE_MS).
+  // A run past its write deadline or its timeout writes nothing, so a board
+  // write never lands outside the window its phase allows (see BOARD_PHASE_MS).
   signal.throwIfAborted();
   await store.put(MEME_STATE_KEY, state, {
     source: MEME_BOARD_JOB,
@@ -516,13 +516,16 @@ async function readBoard(store: SnapshotStore): Promise<Map<string, MemeBoardRow
 }
 
 /**
- * The board run starts this long after every minute boundary. With the 45 s
- * timeout its write lands between second 30 and second 15 of the next minute,
- * never between the `meme-bars` selection (second 20) and the execution plane's
- * shortlist and bars reads (second 25), so a token the lane sees on the
- * shortlist was on the board the bars job selected from (2026-10-07).
+ * The board run starts this long after every minute boundary and may write only
+ * until {@link BOARD_WRITE_DEADLINE_MS} of the minute it started in, so a write
+ * lands between second 8 and second 19: always before the `meme-bars` selection
+ * (second 20), never between it and the execution plane's shortlist and bars
+ * reads (second 25). A token the lane sees on the shortlist was on the board the
+ * bars job selected from, and the board it reads is about 10-17 s old (2026-10-07).
  */
-export const BOARD_PHASE_MS = 30_000;
+export const BOARD_PHASE_MS = 8_000;
+/** A run that has not written by this offset of the minute it started in writes nothing; the board stays the previous one. */
+export const BOARD_WRITE_DEADLINE_MS = 19_000;
 
 /** Delay from `now` to the next board run: {@link BOARD_PHASE_MS} after the next minute boundary. */
 export function msUntilBoardRun(now: number): number {
@@ -530,6 +533,19 @@ export function msUntilBoardRun(now: number): number {
   // Half a second of slack so a run that fires a little early does not schedule itself again at once.
   if (target <= now + 500) target += 60_000;
   return target - now;
+}
+
+/**
+ * Exported for tests: `signal`, also aborted at {@link BOARD_WRITE_DEADLINE_MS}
+ * of the minute `startedAt` falls in (at once when that is already past, e.g. an
+ * off-phase first run after a restart).
+ */
+export function boardWriteSignal(signal: AbortSignal, startedAt: number): AbortSignal {
+  const deadline = new AbortController();
+  const ms = Math.floor(startedAt / 60_000) * 60_000 + BOARD_WRITE_DEADLINE_MS - startedAt;
+  if (ms <= 0) deadline.abort(new Error("board write deadline passed"));
+  else setTimeout(() => deadline.abort(new Error("board write deadline passed")), ms).unref();
+  return AbortSignal.any([signal, deadline.signal]);
 }
 
 /** Job registration for the scheduler. */
@@ -545,7 +561,14 @@ export function memeBoardJob(store: SnapshotStore): JobSpec {
     // and at most one batched issuer read for quote tokens never seen before.
     timeoutMs: 45_000,
     run: async (signal) => {
-      await runMemeBoard(store, signal);
+      const write = boardWriteSignal(signal, Date.now());
+      try {
+        await runMemeBoard(store, write);
+      } catch (error) {
+        // Past the write deadline (not the timeout): nothing was written, the previous board stands.
+        if (signal.aborted || !write.aborted) throw error;
+        console.warn(`[${MEME_BOARD_JOB}] past the write deadline: nothing written this minute`);
+      }
     },
   };
 }

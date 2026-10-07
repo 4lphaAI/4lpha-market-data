@@ -17,7 +17,7 @@ import { QUOTE_STOCKS_KEY } from "../src/jobs/binanceRwa.js";
 import { RWA_UNIVERSE_KEY } from "../src/universe.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
-import { MEME_BOARD_KEY, MEME_STATE_KEY, runMemeBoard } from "../src/jobs/memeBoard.js";
+import { BOARD_WRITE_DEADLINE_MS, MEME_BOARD_KEY, MEME_STATE_KEY, boardWriteSignal, runMemeBoard } from "../src/jobs/memeBoard.js";
 import type { FourMemeCode, FourMemeTaxRead } from "../src/query/fourmemeTax.js";
 import { MEME_VENUES_KEY } from "../src/jobs/memeVenues.js";
 import {
@@ -387,6 +387,23 @@ describe("runMemeBoard", () => {
       }),
       /timed out/,
     );
+    assert.equal(await store.get(MEME_BOARD_KEY), null);
+    assert.equal(await store.get(MEME_STATE_KEY), null);
+  });
+
+  it("writes nothing when it runs past the :19 write deadline (here an off-phase start after a restart)", async () => {
+    const store = new MemoryStore();
+    for (const startOffset of [BOARD_WRITE_DEADLINE_MS, 25_000, 59_000]) {
+      await assert.rejects(
+        runMemeBoard(store, boardWriteSignal(new AbortController().signal, NOW + startOffset), {
+          ...fakeUpstreams({ finalizing: [rush()] }),
+          fetchActivity: async () => new Map([[addr(1), activity()]]),
+          fetchSignals: async () => [],
+          now: () => NOW + startOffset,
+        }),
+        /deadline/,
+      );
+    }
     assert.equal(await store.get(MEME_BOARD_KEY), null);
     assert.equal(await store.get(MEME_STATE_KEY), null);
   });

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { normalizeSintralMinuteBars, type MemeRushRow, type SintralMinuteBar } from "../src/adapters/binanceWeb3.js";
 import { AdapterError } from "../src/adapters/http.js";
 import type { TokenActivity } from "../src/adapters/onchainos.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore, PostgresStore } from "../src/core/store.js";
 import { FakePg } from "./fakePg.js";
-import { BOARD_PHASE_MS, MEME_BOARD_KEY, memeBoardJob, msUntilBoardRun } from "../src/jobs/memeBoard.js";
+import { BOARD_PHASE_MS, BOARD_WRITE_DEADLINE_MS, MEME_BOARD_KEY, boardWriteSignal, memeBoardJob, msUntilBoardRun } from "../src/jobs/memeBoard.js";
 import { buildShortlist, parseShortlistQuery } from "../src/query/memeQuery.js";
 import { loadStockInfo } from "../src/query/memeStocks.js";
 import {
@@ -552,32 +552,45 @@ describe("bars retry and board phase (2026-10-07)", () => {
     assert.equal(h.asked.length, asked, "no re-ask while backing off");
   });
 
-  it("schedules the board so no write lands between the bars selection (:20) and the execution plane's read (:25)", () => {
+  it("runs the board at :08 and lets it write only until :19, before the bars selection (:20)", () => {
     const spec = memeBoardJob(new MemoryStore());
     assert.equal(spec.nextDelayMs, msUntilBoardRun);
-    const EXEC_READ_MS = 25_000;
-    for (let at = NOW; at < NOW + 2 * MIN; at += 250) {
-      const start = at + msUntilBoardRun(at);
-      const offset = start % MIN;
-      assert.equal(offset, BOARD_PHASE_MS);
-      assert.ok(offset > EXEC_READ_MS, "starts after this minute's read");
-      assert.ok(offset + spec.timeoutMs < MIN + SETTLE_MS, "a write, even at the timeout, lands before the next bars selection");
+    for (let at = NOW; at < NOW + 2 * MIN; at += 250) assert.equal((at + msUntilBoardRun(at)) % MIN, BOARD_PHASE_MS);
+    assert.ok(BOARD_PHASE_MS < BOARD_WRITE_DEADLINE_MS && BOARD_WRITE_DEADLINE_MS < SETTLE_MS);
+  });
+
+  it("cuts a run off at :19 of the minute it started in, at once for an off-phase start past :19 (restart)", () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      for (let offset = 0; offset < MIN; offset += 250) {
+        const write = boardWriteSignal(new AbortController().signal, NOW + offset);
+        if (offset >= BOARD_WRITE_DEADLINE_MS) {
+          assert.equal(write.aborted, true, `a run starting at +${offset} ms may not write`);
+          continue;
+        }
+        assert.equal(write.aborted, false);
+        mock.timers.tick(BOARD_WRITE_DEADLINE_MS - offset - 1);
+        assert.equal(write.aborted, false, `still writable just before :19 (start +${offset} ms)`);
+        mock.timers.tick(1);
+        assert.equal(write.aborted, true, `cut off at :19 (start +${offset} ms)`);
+      }
+    } finally {
+      mock.timers.reset();
     }
   });
 
-  it("serves bars by the next execution-plane read for a token that entered the board after the previous selection", async () => {
+  it("serves bars at the :25 read for a token the board admitted at the latest possible write (:19)", async () => {
     const h = await harness([row(1)]);
     const minute = NOW + MIN;
-    h.clock.now = minute + SETTLE_MS; // bars selection
+    h.clock.now = minute - MIN + SETTLE_MS; // the previous bars selection
     await h.run();
     assert.equal(await series(h.store, addr(1)) !== null, true);
-    // The board admits addr(8) at the latest moment its phase allows (a run that used its whole timeout).
-    h.clock.now = minute + BOARD_PHASE_MS + memeBoardJob(h.store).timeoutMs;
+    h.clock.now = minute + BOARD_WRITE_DEADLINE_MS - 1; // the board admits addr(8) just before its deadline
     await h.store.put(MEME_BOARD_KEY, [row(1), row(8)], TTL);
-    h.upstream.set(addr(8), [bar(NOW + MIN, 4)]);
-    h.clock.now = minute + MIN + SETTLE_MS; // next bars selection
+    h.upstream.set(addr(8), [bar(NOW, 4)]);
+    h.clock.now = minute + SETTLE_MS; // this minute's bars selection
     await h.run();
-    h.clock.now = minute + MIN + 25_000; // the execution plane reads the shortlist, then the bars
+    h.clock.now = minute + 25_000; // the execution plane reads the shortlist, then the bars
     const board = (await h.store.get<MemeBoardRow[]>(MEME_BOARD_KEY))!.data;
     const shortlist = buildShortlist(board, parseShortlistQuery((name) => (name === "segment" ? "memestock" : undefined)), h.clock.now, await loadStockInfo(h.store));
     assert.ok(shortlist.rows.some((r) => r.address === addr(8)), "on the lane's shortlist");
