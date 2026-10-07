@@ -45,7 +45,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { SnapshotStore } from "../core/store.js";
-import type { JobSpec } from "../core/types.js";
+import type { DataRecord, JobSpec } from "../core/types.js";
 import {
   fetchSmartMoneyInflow,
   fetchSocialRush,
@@ -61,6 +61,7 @@ import {
   parseNoulAnswer,
   parseScoreAnswer,
   scrubKey,
+  JEV_SCHEMA_VERSION,
   type JevChoice,
   type JevNoul,
   type JevQuestion,
@@ -134,6 +135,8 @@ export interface MeasureCycle {
   durationMs: number;
   /** Sanitized per-source failures; a failed source is `null` below. */
   failures: string[];
+  /** TypeSafe Jev requests sent this cycle; `null` with Jev off, absent in slots recorded before it existed. */
+  jevRequests?: number | null;
   topics: {
     /** Topic ids in list order. `rising` is `"same"` when it matched `latest`, `null` when unread. */
     lists: { latest: string[]; rising: string[] | "same" | null };
@@ -413,7 +416,8 @@ export async function runMemeMeasure(
   }
 
   // Jev answers, cached or asked now. A failure here is a note, never a failed cycle.
-  let jev: JevAnswers = { stock: new Map(), about: new Map(), tone: new Map() };
+  // `requests` stays 0 when the step throws: it only throws on the store reads made before any request.
+  let jev: JevAnswers = { stock: new Map(), about: new Map(), tone: new Map(), requests: 0 };
   if (options.jevApiKey) {
     try {
       jev = await memeJev(store, signal, fresh?.memeStocks ?? [], allTopics, {
@@ -468,6 +472,7 @@ export async function runMemeMeasure(
     ts: started,
     durationMs: now() - started,
     failures,
+    jevRequests: options.jevApiKey ? jev.requests : null,
     topics,
     inflow: {
       columns: INFLOW_COLUMNS,
@@ -542,14 +547,18 @@ export const JEV_DEADLINE_MS = 30_000;
 /** With less time than this left, nothing is asked this cycle (cached answers are still recorded). */
 const JEV_MIN_BOX_MS = 2_000;
 /**
- * A key whose own request or answer fails (an invalid answer, or a 4xx other
- * than 401/429) is retried after 15 then 30 minutes and given up after the
- * third failure, until its inputs or wording change.
+ * An item whose own request or answer fails (an invalid answer, an unreadable
+ * 2xx body, or HTTP 400/413/422) is retried after 15 then 30 minutes and given
+ * up after the third failure, until its inputs, wording or
+ * `JEV_SCHEMA_VERSION` change. No other failure counts against an item.
  */
 export const JEV_MAX_TRIES = 3;
 const JEV_RETRY_MS = 15 * 60_000;
 /** Longest meme name or topic name sent. */
 export const JEV_TEXT_MAX = 80;
+/** Longest meme symbol sent: the cap the record already applies to it. */
+export const JEV_SYMBOL_MAX = 40;
+const JEV_INVALID_ANSWER = "invalid answer";
 
 /** Score levels of the meme-to-stock relevance; the stored probabilities follow this order. */
 const JEV_STOCK_LEVELS = [
@@ -617,6 +626,8 @@ interface JevAnswers {
   about: Map<string, JevEntry<JevNoul>>;
   /** By topicId. */
   tone: Map<string, JevEntry<JevChoice<JevTone>>>;
+  /** Requests sent this cycle. */
+  requests: number;
 }
 interface JevRetry { digest: string; tries: number; nextAt: number }
 
@@ -632,9 +643,13 @@ function jevAboutKey(topicId: string, address: string): string {
   return `about:${topicId}:${address}`;
 }
 
-/** Short digest of the exact state and question wording; a cached answer counts only while it matches. */
-function jevDigest(state: unknown, questions: Record<string, JevQuestion>): string {
-  return createHash("sha256").update(JSON.stringify({ state, questions })).digest("hex").slice(0, 16);
+/**
+ * Short digest of the request schema version, the exact state and the question
+ * wording; a cached answer or a retry marker counts only while it matches.
+ * `schema` is a parameter for tests only.
+ */
+export function jevDigest(state: unknown, questions: Record<string, JevQuestion>, schema = JEV_SCHEMA_VERSION): string {
+  return createHash("sha256").update(JSON.stringify({ schema, state, questions })).digest("hex").slice(0, 16);
 }
 
 /** A stored entry is re-checked with the answer parser, never trusted. */
@@ -701,11 +716,16 @@ async function jevLookup<A>(items: readonly JevItem<A>[], ctx: JevContext): Prom
     }
     pending.push({ item, digest });
   }
-  const stored = await Promise.all(
-    pending.map(({ item }) =>
-      Promise.all([ctx.store.get<unknown>(JEV_KEY_PREFIX + item.key), ctx.store.get<unknown>(JEV_RETRY_PREFIX + item.key)]),
-    ),
-  );
+  // Cold or restarted cycles read both keys of each pending item, at most JEV_CONCURRENCY items at a time.
+  const stored: Array<[DataRecord<unknown> | null, DataRecord<unknown> | null]> = [];
+  let nextRead = 0;
+  await Promise.all(Array.from({ length: JEV_CONCURRENCY }, async () => {
+    while (nextRead < pending.length) {
+      const i = nextRead++;
+      const key = pending[i]!.item.key;
+      stored[i] = await Promise.all([ctx.store.get<unknown>(JEV_KEY_PREFIX + key), ctx.store.get<unknown>(JEV_RETRY_PREFIX + key)]);
+    }
+  }));
   const due: JevDue[] = [];
   pending.forEach(({ item, digest }, i) => {
     const [answerRecord, retryRecord] = stored[i]!;
@@ -727,7 +747,7 @@ async function jevLookup<A>(items: readonly JevItem<A>[], ctx: JevContext): Prom
       run: async (signal) => {
         const response = await askJev({ apiKey: ctx.apiKey, state: item.state, questions: item.questions, fetchFn: ctx.fetchFn, signal });
         const answer = item.parse(response.answers[questionId]);
-        if (answer === null) throw new Error("invalid answer");
+        if (answer === null) throw new Error(JEV_INVALID_ANSWER);
         const entry: JevEntry<A> = { digest, model: response.model, answer };
         record(item, entry);
         ctx.next.retries.delete(item.key);
@@ -747,10 +767,10 @@ async function jevLookup<A>(items: readonly JevItem<A>[], ctx: JevContext): Prom
  * topic, one Noul per topic-token pair), resolves them from memory or the
  * store, and asks for the rest: at most {@link JEV_MAX_REQUESTS},
  * {@link JEV_CONCURRENCY} at a time, inside a box that ends by
- * {@link JEV_DEADLINE_MS} into the cycle. A failure that is not the key's own
- * (401, 429, 5xx, timeout, network) or a 422 stops the cycle's remaining
- * requests; a key's own failure backs it off. Failures are summed into one
- * `failures` line.
+ * {@link JEV_DEADLINE_MS} into the cycle. An item's own failure (an invalid
+ * answer, an unreadable 2xx, a 400/413/422) backs that item off; any other
+ * failure stops the cycle's remaining requests and counts against nothing.
+ * Failures are summed into one `failures` line.
  */
 async function memeJev(
   store: SnapshotStore,
@@ -759,7 +779,7 @@ async function memeJev(
   topics: readonly SocialTopic[],
   options: { apiKey: string; fetchFn: FetchFn | undefined; now: () => number; deadline: number; failures: string[] },
 ): Promise<JevAnswers> {
-  const out: JevAnswers = { stock: new Map(), about: new Map(), tone: new Map() };
+  const out: JevAnswers = { stock: new Map(), about: new Map(), tone: new Map(), requests: 0 };
   if (memeStocks.length === 0 && !topics.some((topic) => topic.tokens.length > 0)) return out;
   const { apiKey, now } = options;
   const ctx: JevContext = {
@@ -780,12 +800,13 @@ async function memeJev(
     if (row.quote.symbol === null) continue;
     const name = row.name === null ? null : row.name.slice(0, JEV_TEXT_MAX);
     const company = row.quote.address === null ? null : (rwaRows.get(row.quote.address)?.underlyingName ?? null);
+    const symbol = row.symbol.slice(0, JEV_SYMBOL_MAX);
     stockInputs.set(row.address, { hasName: name !== null, hasCompany: company !== null });
     stockItems.push({
       key: `stock:${row.address}`,
       id: row.address,
       state: {
-        meme: name === null ? { symbol: row.symbol } : { symbol: row.symbol, name },
+        meme: name === null ? { symbol } : { symbol, name },
         stock: company === null ? { symbol: row.quote.symbol } : { symbol: row.quote.symbol, company },
       },
       questions: JEV_STOCK_QUESTIONS,
@@ -797,7 +818,8 @@ async function memeJev(
   const aboutItems: Array<JevItem<JevNoul>> = [];
   for (const topic of topics) {
     if (topic.nameEn === null || topic.tokens.length === 0) continue;
-    const t = { name: topic.nameEn.slice(0, JEV_TEXT_MAX), type: topic.type, tags: topic.tags };
+    // Tags sorted, so an upstream reorder does not change the digest and re-ask.
+    const t = { name: topic.nameEn.slice(0, JEV_TEXT_MAX), type: topic.type, tags: [...topic.tags].sort() };
     toneItems.push({
       key: `tone:${topic.topicId}`,
       id: topic.topicId,
@@ -843,10 +865,15 @@ async function memeJev(
         } catch (error) {
           ctx.failed.push(scrubKey(error, apiKey));
           const status = error instanceof AdapterError ? error.status : undefined;
-          // The key's own fault: an invalid answer, an unreadable 2xx, or a 4xx other than 401/429.
-          const keyFault = !(error instanceof AdapterError) || (status !== undefined && status < 500 && status !== 401 && status !== 429);
-          if (!keyFault || status === 422) stopped = true;
-          if (keyFault) {
+          // The item's own fault: its answer was read and is invalid, a 2xx body read in full is
+          // unreadable, or the API refused this request as malformed (400, 413, 422). Anything else
+          // (401, 402, 403, 404, 408, 429, 5xx, transport, abort) is not about this item: it counts
+          // against nothing and stops the cycle's remaining requests.
+          const itemFault =
+            (error instanceof Error && error.message === JEV_INVALID_ANSWER) ||
+            (status !== undefined && ((status >= 200 && status < 300) || status === 400 || status === 413 || status === 422));
+          if (!itemFault) stopped = true;
+          if (itemFault) {
             const retry: JevRetry = { digest: item.digest, tries: item.tries + 1, nextAt: now() + JEV_RETRY_MS * 2 ** item.tries };
             ctx.next.retries.set(item.key, retry);
             try {
@@ -861,6 +888,7 @@ async function memeJev(
     await Promise.all(Array.from({ length: JEV_CONCURRENCY }, worker));
   }
   JEV_MEMORY.set(store, ctx.next);
+  out.requests = asked;
   if (ctx.failed.length > 0) {
     options.failures.push(
       `jev: ${ctx.failed.length} failed of ${asked} requests${stopped ? ", rest of the cycle stopped" : ""} (${ctx.failed[0]})`,
@@ -898,6 +926,7 @@ export function expandCycle(cycle: MeasureCycle): Record<string, unknown> {
     ts: cycle.ts,
     durationMs: cycle.durationMs,
     failures: cycle.failures,
+    jevRequests: cycle.jevRequests ?? null,
     topics: cycle.topics === null
       ? null
       : {

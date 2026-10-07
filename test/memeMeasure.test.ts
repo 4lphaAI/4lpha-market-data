@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { AdapterError } from "../src/adapters/http.js";
-import { askJev, parseChoiceAnswer, parseNoulAnswer, parseScoreAnswer, scrubKey } from "../src/adapters/typesafe.js";
+import { JEV_SCHEMA_VERSION, askJev, parseChoiceAnswer, parseNoulAnswer, parseScoreAnswer, scrubKey } from "../src/adapters/typesafe.js";
 import {
   fetchSmartMoneyInflow,
   fetchSocialRush,
@@ -21,6 +21,8 @@ import {
   JEV_KEY_PREFIX,
   JEV_MAX_REQUESTS,
   JEV_RETRY_PREFIX,
+  JEV_STOCK_QUESTIONS,
+  JEV_SYMBOL_MAX,
   JEV_TEXT_MAX,
   MEME_MEASURE_LATEST_KEY,
   MEME_MEASURE_LEASE,
@@ -29,6 +31,7 @@ import {
   MEME_MEASURE_SLOT_MS,
   expandCycle,
   isMemeMeasureEnabled,
+  jevDigest,
   memeJevApiKey,
   memeMeasureSlotKey,
   readMeasurePage,
@@ -798,19 +801,144 @@ describe("Jev text features", () => {
     }
   });
 
-  it("stops the cycle's remaining requests on 401, 422, 429, 529 and transport failures, not on another 4xx", async () => {
-    for (const [status, expected] of [[401, JEV_CONCURRENCY], [422, JEV_CONCURRENCY], [429, JEV_CONCURRENCY], [529, JEV_CONCURRENCY], [400, 12]] as const) {
+  it("counts only 400, 413 and 422 against an item; every other failure stops the cycle and counts nothing", async () => {
+    const retryOf = async (h: Harness): Promise<number | null> =>
+      (await h.store.get<{ tries: number }>(`${JEV_RETRY_PREFIX}stock:${addr(100)}`))?.data.tries ?? null;
+    for (const status of [400, 413, 422]) {
       const h = await stocksOnly(12);
       const fake = fakeFetch(() => jsonResponse({ error: "no" }, status));
       await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
-      assert.equal(fake.calls.length, expected, `status ${status}`);
-      const failures = (await storedCycle(h.store, NOW))!.failures.join("; ");
-      assert.equal(failures.includes("rest of the cycle stopped"), expected < 12, `status ${status}`);
+      assert.equal(fake.calls.length, 12, `status ${status}: not stopped`);
+      assert.equal(await retryOf(h), 1, `status ${status}: counted`);
     }
+    const stoppers: Array<[string, (call: FakeCall) => Response]> = [
+      ...[401, 402, 403, 404, 408, 429, 500, 529].map((status): [string, (call: FakeCall) => Response] =>
+        [`status ${status}`, () => jsonResponse({ error: "no" }, status)]),
+      ["transport", () => { throw new Error("connect ECONNREFUSED"); }],
+      // A 200 whose body cannot be read to the end is a transport failure, not "invalid JSON".
+      ["body read failed", () => new Response(new ReadableStream({ start: (c) => c.error(new Error("socket reset")) }), { status: 200 })],
+    ];
+    for (const [why, respond] of stoppers) {
+      const h = await stocksOnly(12);
+      const fake = fakeFetch(respond);
+      await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+      assert.equal(fake.calls.length, JEV_CONCURRENCY, `${why}: stopped`);
+      assert.ok((await storedCycle(h.store, NOW))!.failures.some((f) => f.includes("rest of the cycle stopped")), why);
+      assert.equal(await retryOf(h), null, `${why}: counted against nothing`);
+    }
+    // A 200 body read in full that is not JSON is the item's own failure.
     const h = await stocksOnly(12);
-    const fake = fakeFetch(() => { throw new Error("connect ECONNREFUSED"); });
+    const fake = fakeFetch(() => new Response("<html>not json</html>", { status: 200 }));
     await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
-    assert.equal(fake.calls.length, JEV_CONCURRENCY);
+    assert.equal(fake.calls.length, 12);
+    assert.equal(await retryOf(h), 1);
+  });
+
+  it("gives up nothing during an account-level outage and answers every item after it", async () => {
+    const h = await stocksOnly(8);
+    let healthy = false;
+    const fake = fakeFetch((call) => (healthy ? jevAnswer(call) : jsonResponse({ error: "no" }, h.clock.now < NOW + 30 * MIN ? 403 : 402)));
+    const options = { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch };
+    const board = Array.from({ length: 8 }, (_, i) => memeStock(100 + i));
+    // An hour of 403 (then 402) on every cycle.
+    for (let minutes = 0; minutes <= 60; minutes += 5) {
+      h.clock.now = NOW + minutes * MIN;
+      await h.store.put(MEME_BOARD_KEY, board, TTL);
+      await runMemeMeasure(h.store, signal(), options);
+    }
+    assert.equal(fake.calls.length, 13 * JEV_CONCURRENCY, "each outage cycle stops after the requests in flight");
+    for (let i = 0; i < 8; i++) assert.equal(await h.store.get(`${JEV_RETRY_PREFIX}stock:${addr(100 + i)}`), null);
+    healthy = true;
+    h.clock.now = NOW + 65 * MIN;
+    await h.store.put(MEME_BOARD_KEY, board, TTL);
+    await runMemeMeasure(h.store, signal(), options);
+    const cycle = (await storedCycle(h.store, h.clock.now))!;
+    assert.equal(cycle.jevRequests, 8);
+    assert.ok(expandedRows(cycle).board.every((r) => r["jevStockScore"] === 1.9), "every item answered after recovery");
+  });
+
+  it("re-asks a given-up item when its inputs, the question wording or the schema version change", async () => {
+    const giveUp = async (): Promise<{ h: Harness; fake: ReturnType<typeof fakeFetch>; cycleAt: (minutes: number, name?: string | null) => Promise<number> }> => {
+      const h = await stocksOnly(1);
+      let valid = false;
+      const fake = fakeFetch((call) => (valid ? jevAnswer(call) : jsonResponse({ model: "jev-1.13.0", answers: { relevance: { type: "score", score: 7 } } })));
+      const options = { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch };
+      const cycleAt = async (minutes: number, name: string | null = "Meme"): Promise<number> => {
+        valid = minutes >= 60;
+        h.clock.now = NOW + minutes * MIN;
+        const row = classify({
+          rush: rush({ address: addr(100), symbol: "M100", name, quote: NVDAB, createdAt: NOW - HOUR }),
+          activity: activity({ address: addr(100) }),
+          quote: { kind: "bstock", symbol: "NVDAB" },
+          flow1h: { buys: 120, sells: 80, uniqueTraders: 90, inflowUsd: 1_000 },
+        });
+        await h.store.put(MEME_BOARD_KEY, [row], TTL);
+        await runMemeMeasure(h.store, signal(), options);
+        return fake.calls.length;
+      };
+      for (const minutes of [0, 15, 45]) await cycleAt(minutes);
+      assert.equal(await cycleAt(55), 3, "given up");
+      return { h, fake, cycleAt };
+    };
+
+    // Inputs: the name changes.
+    const inputs = await giveUp();
+    assert.equal(await inputs.cycleAt(60, "Meme Two"), 4);
+
+    // Wording: the question text changes.
+    const wording = await giveUp();
+    const question = JEV_STOCK_QUESTIONS["relevance"]!;
+    const before = question.instructions;
+    question.instructions = `${before} (revised)`;
+    try {
+      assert.equal(await wording.cycleAt(60), 4);
+    } finally {
+      question.instructions = before;
+    }
+
+    // Schema version: a give-up marker and an answer written under the previous version are ignored.
+    const schema = await stocksOnly(1);
+    const state = { meme: { symbol: "M100", name: "Meme" }, stock: { symbol: "NVDAB" } };
+    const fake = fakeFetch(jevAnswer);
+    const plant = async (version: number): Promise<void> => {
+      const digest = jevDigest(state, JEV_STOCK_QUESTIONS, version);
+      await schema.store.put(`${JEV_RETRY_PREFIX}stock:${addr(100)}`, { digest, tries: 3, nextAt: 0 }, TTL);
+    };
+    await plant(JEV_SCHEMA_VERSION);
+    await runMemeMeasure(schema.store, signal(), { ...schema.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+    assert.equal(fake.calls.length, 0, "control: given up under the current version");
+    const restarted = await stocksOnly(1);
+    const digest = jevDigest(state, JEV_STOCK_QUESTIONS, JEV_SCHEMA_VERSION - 1);
+    await restarted.store.put(`${JEV_RETRY_PREFIX}stock:${addr(100)}`, { digest, tries: 3, nextAt: 0 }, TTL);
+    await runMemeMeasure(restarted.store, signal(), { ...restarted.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+    assert.equal(fake.calls.length, 1, "asked again under the new version");
+  });
+
+  it("sorts topic tags and records the cycle's request count", async () => {
+    const h = await harness();
+    const listed = (tags: string[]) => async (): Promise<SocialTopic[]> =>
+      normalizeSocialRush({ code: "000000", data: [topic(1, [addr(10), addr(99)], { topicTags: tags })] });
+    h.options.fetchTopics = listed(["Douyin", "CN Culture"]);
+    const fake = fakeFetch(jevAnswer);
+    const options = { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch };
+    await runMemeMeasure(h.store, signal(), options);
+    const tone = fake.calls.find((call) => asked(call) === "tone")!;
+    assert.deepEqual((JSON.parse(tone.body!) as { state: { topic: { tags: string[] } } }).state.topic.tags, ["CN Culture", "Douyin"]);
+    assert.equal((await storedCycle(h.store, NOW))!.jevRequests, 6);
+    // The upstream reorders the tags: nothing is asked again, and the count says so.
+    h.options.fetchTopics = listed(["CN Culture", "Douyin"]);
+    h.clock.now = NOW + SLOT;
+    await h.store.put(MEME_BOARD_KEY, [memeStock(10), memeStock(11), deadMemeStock(12)], TTL);
+    await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+    assert.equal(fake.calls.length, 6);
+    const warm = (await storedCycle(h.store, NOW + SLOT))!;
+    assert.equal(warm.jevRequests, 0);
+    assert.equal((expandCycle(warm) as { jevRequests: unknown }).jevRequests, 0);
+    // Off: null.
+    h.clock.now = NOW + 2 * SLOT;
+    await h.store.put(MEME_BOARD_KEY, [memeStock(10)], TTL);
+    await runMemeMeasure(h.store, signal(), h.options);
+    assert.equal((await storedCycle(h.store, NOW + 2 * SLOT))!.jevRequests, null);
   });
 
   it("asks at most the per-cycle cap, with at most the concurrency in flight", async () => {
@@ -887,7 +1015,7 @@ describe("Jev text features", () => {
     assert.ok((await storedCycle(h.store, NOW))!.failures.some((f) => f.includes("6 unanswered, not asked")));
   });
 
-  it("sends only the symbols, names (capped), topic name, type and tags", async () => {
+  it("sends only the symbols and names (capped), topic name, type and tags", async () => {
     const h = await harness([
       memeStock(10),
       classify({
@@ -896,7 +1024,7 @@ describe("Jev text features", () => {
         quote: { kind: "bstock", symbol: "NVDAB" },
       }),
       classify({
-        rush: rush({ address: addr(12), symbol: "M12", name: null, quote: NVDAB, createdAt: NOW - HOUR }),
+        rush: rush({ address: addr(12), symbol: "S".repeat(60), name: null, quote: NVDAB, createdAt: NOW - HOUR }),
         activity: activity({ address: addr(12) }),
         quote: { kind: "bstock", symbol: "NVDAB" },
       }),
@@ -915,7 +1043,7 @@ describe("Jev text features", () => {
     assert.deepEqual(bodies.map((body) => body["state"]), [
       { meme: { symbol: "M10", name: "Meme" }, stock: { symbol: "NVDAB", company } },
       { meme: { symbol: "M11", name: "N".repeat(JEV_TEXT_MAX) }, stock: { symbol: "NVDAB", company } },
-      { meme: { symbol: "M12" }, stock: { symbol: "NVDAB", company } },
+      { meme: { symbol: "S".repeat(JEV_SYMBOL_MAX) }, stock: { symbol: "NVDAB", company } },
       { topic: topicState },
       { topic: topicState, token: { symbol: "TOK" } },
       { topic: topicState, token: { symbol: "TOK" } },

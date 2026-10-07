@@ -18,6 +18,13 @@ import { AdapterError, fetchJson, isRecord, sanitizeMessage, type FetchFn } from
 const SOURCE = "typesafe";
 const TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone";
 export const JEV_MODEL = "jev-latest";
+/**
+ * Version of the request body shape and of the answer parsers below. Callers
+ * fold it into their cache digests, so bumping it re-asks every cached and
+ * given-up item. Bump it by hand whenever `askJev`'s body or envelope check, or
+ * any `parse*Answer` rule, changes.
+ */
+export const JEV_SCHEMA_VERSION = 1;
 
 export interface JevQuestion {
   type: "score" | "noul" | "choice";
@@ -50,19 +57,24 @@ export function scrubKey(value: unknown, apiKey: string): string {
 }
 
 /**
- * One request. Throws {@link AdapterError} on a failed request or an envelope
- * without `model`/`answers` (status 200 for the latter: the response arrived
- * but is unreadable).
+ * One request. Throws {@link AdapterError}: without a status for a transport
+ * failure (including a body that could not be read to the end, or an abort);
+ * with the HTTP status for a non-2xx; with status 200 for a body that was read
+ * in full but is not JSON or has no `model`/`answers`.
  */
 export async function askJev(params: AskJevParams): Promise<JevResponse> {
   const fetchFn = params.fetchFn ?? globalThis.fetch;
   const payload = await fetchJson({
     source: SOURCE,
     url: TYPESAFE_URL,
-    // A transport error is scrubbed of the key before `fetchJson` sanitizes and truncates it.
+    // The body is read here, in full, so a read that fails or is aborted is a
+    // transport failure, not "invalid JSON"; the error is scrubbed of the key
+    // before `fetchJson` sanitizes and truncates it.
     fetchFn: async (input, init) => {
       try {
-        return await fetchFn(input, init);
+        const response = await fetchFn(input, init);
+        const text = await response.text();
+        return new Response(text === "" ? null : text, { status: response.status, headers: response.headers });
       } catch (error) {
         throw new Error(scrubKey(error, params.apiKey));
       }
