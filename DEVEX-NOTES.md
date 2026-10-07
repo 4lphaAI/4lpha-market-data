@@ -412,10 +412,59 @@ Operator-run, no money, `scripts/tradfi-simulate-probe.ts` in the execution repo
 - Ask: return the raw revert data (hex) next to `failReason`, as `eth_call` does.
 - No sign of a lagging simulator clock at 3 s of delay (the guard rejects `deadline > block.timestamp + 15`).
 
+## 2026-10-07 - Skills Hub (`binance/binance-skills-hub`), read while planning our own skills
+
+REMINDER for the report (operator writes it 2026-10-08/09): both entries below belong in "AI stack feedback" /
+"documentation gaps". The Agentic Wallet pitfalls themselves are NOT in this file yet; their sources are
+the exec repo `MD here/AGENTIC-WALLET-STEP0-RESULTS.md` and memory `binance-agentic-wallet-facts-2026-10-01`
+(swap id != list id, raw limit orders refused for bStocks, uiMultiplier, one session per wallet, 48 h
+inactivity with no definition of activity, `approveTxHash: null`, permit2 preview format, defiDailyLimit 5000).
+
+### DOC-33 · `binance-tokenized-securities-info` tells the agent bStocks do not exist; its own API lists 91 of them
+- Skill: `skills/binance-web3/binance-tokenized-securities-info/SKILL.md` (v1.1). The description says
+  "Query Ondo tokenized US stock data", and API 1's `type` parameter says "`1` = Ondo Finance (currently
+  the only supported tokenized stock provider) ... **Use `type=1` to retrieve only Ondo tokens.**"
+- Measured 2026-10-07, keyless, same endpoint (`.../rwa/stock/detail/list/ai`) with no `type`: 1,938 rows,
+  types 1:1366, 2:269, **3:91**, 4:4, 5:194, 9:1, 11:13. All 91 type-3 rows are BSC bStocks (MUB, CRCLB,
+  NVDAB, SNDKB, TSLAB, SPCXB...), including BNCB, COHRB, PYPLB, AAPLB, CRDOB, GMEB, HIMSB, DJTB, which
+  `/rwa/tokens` (46 rows) does not list. The fake COHRB `0xd001...27fb` is absent; genuine COHRB =
+  `0x5131859a059b2446abeefe0f5d313b3c54ff3d36`.
+- The per-address APIs in the same skill answer for bStocks too (checked with MUB `0xcdf2...2699`): RWA Meta
+  returns "Micron Technology (bStocks)" with a bStocks proof-of-collateral link, Asset Market Status
+  `openState: true, reasonCode: TRADING`, RWA Dynamic V2 a price with `sharesMultiplier`.
+- Impact: an agent that follows the skill text literally filters `type=1` and never sees Binance's own
+  bStocks. The data is there; the skill's wording is stale. Ask: document every `type` value, drop
+  "only supported provider", and say the per-address APIs serve bStocks.
+- Side effect for us: this list has 91 BSC bStocks against `/rwa/tokens`' 46 and `/rwa/platforms`' 87;
+  see the open item on QUIRK-9 below. Not adopted by the plane yet.
+
+### DOC-34 · `binance-onchain-copy-trader` builds TP/SL from `limit-order sell`, which Binance refuses for bStocks
+- Skill: `skills/binance-web3/binance-onchain-copy-trader/SKILL.md` (v0.6.0): `place_protection()` "places
+  limit-order sells", and the exit plan expresses a stop-loss as a `limit-order sell` with a trigger below
+  market.
+- Measured by us on 2026-10-04 with `baw` 1.10.0 (Agentic DCA, SKHYB), not through this skill: `limit-order
+  sell` of a bStock answers `SERVICE_ERROR` "Raw limit orders are not supported." twice, nothing created.
+- Impact: protection built by that skill on a bStock position would silently not exist. The skill does
+  not mention tokenized stocks at all. We moved to agent-side triggers + market sells for that reason.
+
+### PITFALL-35 · Flash quote `priceImpactPercent` is a fraction, and the aggregator routes a whole order into an 85 %-loss pool without a warning
+- Measured 2026-10-07 ~15:35 UTC (`scripts/issuer-compare-probe.ts`, exec repo
+  `MD here/ISSUER-COMPARE-STEP0-2026-10-07.md`): a 500 USDT buy quote for SPYon (Ondo SPY,
+  `0x6a70...331a`) via `quote-and-swap` (enableRFQ=true) returns `code 0`, a full `tx`, and
+  `routerResult.priceImpactPercent: "0.8525726545"`. The quote buys 0.0950 shares; the same 500 USDT
+  buys 0.6449 shares through SPYB. The real impact is 85 %: the field is a FRACTION despite its name.
+- Same pattern on Ondo QQQ / MU / AMD / TSLA at 500-5000 USDT (23 % to 98 % losses), each routed 100 %
+  into a thin Uniswap / Pancake pool. Nothing in the envelope flags it (no warning, `isHoneyPot:false`).
+- Impact: an AI agent that reads "priceImpactPercent 0.85" as 0.85 % and swaps loses most of the order.
+  `baw market-order swap` exposes only `--slippage`, which is relative to the quote, so it does not
+  protect against this either. Ask: rename or document the unit, add a price-impact threshold that
+  refuses or warns, and surface the impact in the CLI quote.
+- Also in the envelope: `tradeFee` (e.g. "0.02072341") and `estimateGasFee` ("450000", gas units).
+
 ## Open items to measure next
 - ~~Rate ceiling after the limit increase~~ measured 2026-10-01: ~1 200 requests / 60 s per key (PITFALL-6).
 - Whether the key's bucket is per key or per IP (needs a second key or a second host).
-- `/tokens` `tabId` semantics and the 77-vs-46 bstock discrepancy (QUIRK-9).
+- `/tokens` `tabId` semantics and the 77-vs-46 bstock discrepancy (QUIRK-9). New lead 2026-10-07 (DOC-33): the keyless `.../rwa/stock/detail/list/ai` lists 91 BSC bStocks.
 - ~~Market API candles for stock tokens~~ measured 2026-09-17 (QUIRK-17): exists, plane chain already serves stocks, not adopting now.
 - `/quote` read-only cross-check for Ondo (RFQ-only) vs bStock vs xStock routing.
 - ~~xStocks~~ measured 2026-09-17 (QUIRK-19): 808 BSC addresses, no liquidity — carry as an address map only.
