@@ -402,3 +402,135 @@ Target: fix commit `dbd1ff1` on top of `717d930`, branch `jev-text-features`.
 2. Fix N2 with a version constant in the digest, or write the prefix-bump rule into the runbook.
 3. Send one manual request with the exact wording and check it against the parsers, as the reply already advises.
 4. Optional and cheap: N3 (together with N1), the N4 tests, N7 (sort the tags, record the request count) and N8.
+
+## Re-check of 05773a6
+
+Reviewer: Opus 5.5 (independent; did not write the code). Scope: `git diff dbd1ff1 05773a6`, read against the builder's "Fix round 2" in `JEV-TEXT-FEATURES-REPLY-2026-10-07.md`. Line numbers refer to `05773a6`.
+
+### Verdict
+
+**SHIP. `MEME_JEV_ENABLED` may be turned on after the one manual live request the reply recommends, with the runbook line under R1 below.**
+- N1, N2, N3, N4, N5, N7 and N8 are closed in code. N6 is answered in the reply's new worst-case table, and my outage scenario confirms its "at most 6 per cycle" row.
+- No new defect blocks the flag. One MEDIUM residual (R1) remains: a global event that arrives as 400/413/422, or as an unreadable 2xx, still gives up every item it touches for good. Its cost is bounded (at most 3 tries per item and digest), it is measurement only and fail-open, and it can be recovered. A cheap expiry (below) would remove it.
+- Flag off: still zero requests and zero Jev cache reads.
+
+### Verification run
+
+- `node --import tsx --test test/memeMeasure.test.ts`: tests 43 / pass 43 / fail 0 / skipped 0.
+- `npm test` (full suite): tests 1003 / pass 1003 / fail 0 / skipped 0 (cancelled 0, todo 0).
+- `npx tsc --noEmit`: exit 0.
+- Mutants and scenario tests ran in a scratchpad COPY of `src/`, `test/`, `package.json` and `tsconfig.json`, joined to the worktree's `node_modules` by a junction.
+  - The file-level `globalThis.fetch` stub (`test/memeMeasure.test.ts:235-243`) was active in every run.
+  - The junction was removed as a link before the copy was deleted, and the real `node_modules` is intact.
+- The worktree was not edited. HEAD is `05773a6`. `git status` shows only the three untracked docs.
+
+### Closure of N1 to N8
+
+| Finding | Status | Evidence |
+| - | - | - |
+| N1 classification | Closed | `memeMeasure.ts:872-875`: only `invalid answer`, a 2xx, 400, 413 and 422 count against an item; everything else stops the cycle and writes no marker. Pinned by `test:804`, which runs 401, 402, 403, 404, 408, 429, 500, 529, transport and a body read failure. My 403 scenario (60 min, 8 items) sent 78 calls (13 cycles x 6), wrote no marker, and answered all 8 in the first healthy cycle. The scenario that voided the dataset in the last re-check is gone. Residual: R1. |
+| N2 schema version | Closed | `typesafe.ts:27` (`JEV_SCHEMA_VERSION`, with a bump rule in its comment), folded in at `memeMeasure.ts:652`. Pinned by `test:860`, with a control under the current version. |
+| N3 body read | Closed | `typesafe.ts:76-77` reads the whole body inside the transport wrapper, so a read error or an abort mid-body becomes an `AdapterError` with no status: it stops the cycle and counts nothing. A body read in full but not JSON stays a 200 (`http.ts:127`). Pinned by `test:804` ("body read failed" and the HTML case). |
+| N4 re-ask tests | Closed | `test:860` covers a name change, a wording change and a schema change. Last time's survivors A and B are now killed one by one (m12, m13 below), and so is G (m6). |
+| N5 bounded cold reads | Closed, no pin | `memeMeasure.ts:721-728` runs at most 6 items at a time. Measured: the peak of Jev store reads in flight was 12 (6 items x 2 keys) on a 40-item cold cycle. That is below the cold burst before and matches the claim. No test pins it (m4). |
+| N6 table | Answered (docs) | The reply's new table matches the code. The "at most 6 per cycle" row is confirmed by the 403 scenario above. |
+| N7 tags and count | Closed | Sorted tags at `:822`. `jevRequests` is declared at `:139`, written at `:475` and `:891`, and exported at `:929`. Pinned by `test:917` (reorder gives 0 requests; warm gives 0; flag off gives null). |
+| N8 symbol cap | Closed | `:803` (`JEV_SYMBOL_MAX` = 40, the same cap as `boardTuple`). Pinned at `test:1046`. Topic token symbols were already capped at 40 by the adapter (`binanceWeb3.ts:653`). |
+
+**`jevRequests` and export compatibility.**
+- The field is optional on `MeasureCycle`. It is null with the flag off, and 0 when the Jev step throws: it can only throw on the store reads made before any request, because everything after the first request sits inside a try.
+- `expandCycle` exports it as `?? null`. In my scenario, a stored cycle with the field deleted expanded with `jevRequests: null`.
+- `format=compact` returns the raw cycle, so old slots simply lack the key.
+- The one known consumer, `D:\4lpha-execution\scripts\jev-bench-pull.ts:29`, reads `slot` only and saves the rest verbatim. Unaffected.
+
+**Schema digest.**
+- The digest changed shape from round 1 (`{schema, state, questions}` instead of `{state, questions}`).
+- Every entry written by `dbd1ff1` is therefore re-asked once. That matters only if the flag was ever on with round 1, and it is harmless either way.
+
+**Flag off.**
+- `memeMeasure.ts:421` still gates the whole step, and `memeJev` is the only reader of `universe:rwa` for Jev, of any Jev key and of `JEV_MEMORY`.
+- The populated-cache read count is still pinned (`test:650`). m10 (a count where null is expected) is killed.
+
+**Loops at 60 per cycle.** None found.
+- A global stop-class failure sends at most 6 per cycle (measured).
+- A global item-class failure sends up to 60 per cycle only until every item has used its 3 tries. My scenario sent 24 calls for 8 items, then 0 at +2 h and 0 at +24 h.
+- Digest churn that would re-ask every cycle needs an input that flips back and forth. I checked the candidates:
+  - Topics are de-duplicated within a list (`binanceWeb3.ts:640`) and across latest/rising, with latest winning (`memeMeasure.ts:389-390`).
+  - A hot-only board row keeps its previous name (`memeBoard.ts` `seedFromHot`, which builds on `previous`).
+  - Extra `universe:rwa` rows always carry `underlyingName: null` (`binanceRwa.ts:430`), so a missed per-address read does not flip `company`.
+- Tags are cut to 10 before they are sorted (`binanceWeb3.ts:677`). A reorder of a topic with more than 10 tags can still change the set, but that is a one-off re-ask, not a loop.
+
+### Mutation pass (scratch copy, 16 mutants)
+
+- Killed (13):
+  - m1: 422 stops the cycle again;
+  - m5: no full body read;
+  - m6: schema dropped from the digest;
+  - m7: tags unsorted;
+  - m8: symbol uncapped;
+  - m9: 403 counted against the item;
+  - m10: `jevRequests` not null with the flag off;
+  - m11: request count never set;
+  - m12: memory retry ignores the digest (last time's A);
+  - m13: stored retry ignores the digest (last time's B);
+  - m14: 413 dropped from the item class;
+  - m15: invalid answer not counted;
+  - m16: cached answer ignores the digest.
+- Survived (3), all test gaps (R2):
+  - m2: the 2xx class narrowed to exactly 200;
+  - m3: `expandCycle` without `?? null`;
+  - m4: the cold-read pool unbounded.
+- The builder's 10 in-place mutants line up with m5 to m16, and none of mine contradicts their result.
+
+### Findings
+
+#### MEDIUM
+
+**R1. A global event delivered as 400, 413 or 422, or as an unreadable 2xx, still gives up every item it touches for good. The only cure also discards every valid answer.**
+- Evidence:
+  - `memeMeasure.ts:872-874` counts any 2xx failure and any 400/413/422 against the item, without stopping the cycle.
+  - `typesafe.ts:88` (`unexpected response shape`) and `http.ts:127` (`invalid JSON`) both carry status 200.
+  - A give-up never expires (`:670`).
+- Measured in the scratch copy: 8 items, each failure held for 60 minutes and then healthy.
+
+  | Failure | Calls | Re-asks at +2 h / +24 h | Given up |
+  | - | - | - | - |
+  | `400 {"error":"insufficient credits"}` | 24 | 0 / 0 | 8 of 8 |
+  | `200 <html>maintenance</html>` | 24 | 0 / 0 | 8 of 8 |
+  | `200 {"error":{"code":"quota"}}` | 24 | 0 / 0 | 8 of 8 |
+
+- These are plausible account-level shapes:
+  - Some LLM APIs answer an exhausted credit balance with a 400, and TypeSafe's status for that case is undocumented.
+  - A retired `jev-latest` alias would most likely come back as a 400 or 422 on every request.
+  - A maintenance or edge page is often a 200.
+- The cost is bounded (at most 3 tries per item and digest). But any such event that lasts 45 minutes or more, plus the cold-start spread, silently voids the measurement for every item it touches, and for every new item that arrives during it.
+- The cure the code offers is a `JEV_SCHEMA_VERSION` bump. That re-digests the answers as well as the give-up markers, so it re-asks the whole cache against `jev-latest`. If the model version moved in between, that puts a model seam into a benchmark mid-run.
+- This matches the classification I recommended last time. The optional give-up expiry I proposed then was not adopted, and that is the source of the residual. It is not a builder error.
+- Smallest fix (either one):
+  - Let a give-up expire, for example re-ask once after 24 h. This means one extra branch in `jevRetryDue`, plus a test.
+  - Or add a retry-only epoch to the retry marker's digest, so bumping it frees the given-up items while keeping the answers.
+- Until then, add this runbook line: if a cycle's `failures` shows `jev: N failed of N requests` with `upstream responded 400/413/422`, `unexpected response shape` or `invalid JSON`, `jevRequests` is above 0 and no Jev column fills in, turn the flag off. Fix the cause, then bump `JEV_SCHEMA_VERSION`, accepting the re-ask of every cached answer.
+- Not a blocker for the flag: the event is visible in every cycle record, it costs cents, and it is recoverable.
+
+#### LOW
+
+**R2. Three claims have no test pin (mutants m2, m3, m4).**
+- The code is right today: the old-slot null export and the 12-read peak were both measured above.
+- The schema test's comment at `test:899` says "a give-up marker and an answer written under the previous version are ignored", but it plants only a marker. Last time's m16 equivalent is killed elsewhere, so this is wording only.
+- Cheap fixes:
+  - assert `jevRequests: null` when expanding a cycle with the field removed;
+  - count peak Jev reads on a cold 40-item cycle;
+  - optionally add one 204 case.
+
+**R3. A request that reliably outlives the box is never counted against its item.**
+- This is a direct consequence of N3, which I asked for: an abort counts nothing.
+- If one item's request deterministically takes longer than the box (10 s, or the 12 s request deadline), it is asked again every cycle forever.
+- Each time the box fires it also aborts the other requests in flight. Those are asked again next cycle, not lost, but they may be billed.
+- Bounded at 6 requests per cycle, and visible as a `jev:` failures line every cycle while `jevRequests` stays above 0.
+- No change is needed for a fast model like Jev. Note it in the runbook beside R1.
+
+### Before the flag goes on
+
+1. Send the one manual live request with the exact wording, and check the response against the three parsers.
+2. Add the R1 runbook line, or add the 24 h give-up expiry (preferred; small).
+3. Optional: the R2 pins.
