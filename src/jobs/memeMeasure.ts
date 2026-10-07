@@ -32,16 +32,18 @@
  * Jev text features (JEV-TEXT-FEATURES-HANDOFF-2026-10-07), behind
  * `MEME_JEV_ENABLED` and `TYPESAFE_API_KEY`, both needed: a meme-stock row gets
  * a TypeSafe Jev Score of how strongly the meme is themed on its quote stock,
- * and a topic-token row a Noul (is the topic about the token) and a Choice (the
- * topic's tone). The inputs are symbols, names, the topic name, type and tags,
- * never post text. Each answer is asked once and cached forever, one store key
- * per token or pair, written only after a valid answer. A failed, rate-limited
- * or malformed answer leaves the columns `null` for that slot and is asked
- * again next cycle; it never fails the cycle. Off, nothing is sent and the
- * columns are `null`.
+ * and a topic-token row a Noul (is the topic about the token) plus its topic's
+ * tone (a Choice asked once per topic). The inputs are symbols, names, the
+ * topic name, type and tags, never post text. Each answer is cached for good
+ * under its own store key, written only after a valid answer and tied to a
+ * digest of the exact inputs and wording, so a changed input or question is
+ * asked again. A failed, rate-limited or malformed answer leaves the columns
+ * `null` for that slot and never fails the cycle; a key whose own answer keeps
+ * failing backs off and is given up after three tries. Off, nothing is sent,
+ * no Jev key is read and the columns are `null`.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { SnapshotStore } from "../core/store.js";
 import type { JobSpec } from "../core/types.js";
 import {
@@ -58,6 +60,7 @@ import {
   parseChoiceAnswer,
   parseNoulAnswer,
   parseScoreAnswer,
+  scrubKey,
   type JevChoice,
   type JevNoul,
   type JevQuestion,
@@ -102,7 +105,7 @@ export const TOPIC_TOKEN_COLUMNS = [
   "topic", "address", "symbol", "protocol", "migrated", "createdAt", "netInflowUsd", "netInflow1hUsd",
   "volume1hBuyUsd", "volume1hSellUsd", "marketCapUsd", "liquidityUsd", "priceChange24hPct",
   "uniqueTraders5m", "uniqueTraders1h", "count5m", "count1h", "holders", "smartMoneyHolders", "kolHolders",
-  "jevAboutToken", "jevTone", "jevToneProbabilities", "jevModel",
+  "jevAboutToken", "jevTone", "jevToneProbabilities", "jevModel", "jevToneModel",
 ] as const;
 export const INFLOW_COLUMNS = [
   "rank", "address", "name", "netInflowUsd", "traders", "count", "countBuy", "countSell", "volumeUsd",
@@ -114,7 +117,7 @@ export const BOARD_COLUMNS = [
   "priceUsd", "liquidityUsd", "marketCapUsd", "txs5m", "txs1h", "volume5mUsd", "volume1hUsd",
   "priceChange5mPct", "priceChange1hPct", "activityAgeS", "buys1h", "sells1h", "inflow1hUsd", "uniqueTraders1h",
   "smHolders", "kolHolders", "smSignals", "kolSignals", "whaleSignals", "onShortlist",
-  "jevStockScore", "jevStockProbabilities", "jevModel",
+  "jevStockScore", "jevStockProbabilities", "jevModel", "jevHasName", "jevHasCompany",
 ] as const;
 
 export interface MeasureSection {
@@ -154,7 +157,7 @@ export interface MeasureCycle {
 }
 
 /** Low-cardinality board columns, stored as indexes into the record's own `dict`. */
-export const BOARD_DICT_COLUMNS = ["launchpad", "stage", "status", "category", "quoteSymbol"] as const;
+export const BOARD_DICT_COLUMNS = ["launchpad", "stage", "status", "category", "quoteSymbol", "jevModel"] as const;
 
 /** Replaces string cells of `dictColumns` with their index in a per-record dictionary; `null` stays `null`. */
 export function dictEncode(
@@ -275,16 +278,18 @@ function probabilityCell(probabilities: Readonly<Record<string, number>>, keys: 
 }
 
 /** `topic` is the index of the token's topic in the same cycle's `topics.rows`. */
-function topicTokenTuples(topic: SocialTopic, index: number, jev: ReadonlyMap<string, JevTopicEntry>): Tuple[] {
+function topicTokenTuples(topic: SocialTopic, index: number, jev: JevAnswers): Tuple[] {
+  const tone = jev.tone.get(topic.topicId);
   return topic.tokens.map((t) => {
-    const j = jev.get(jevTopicKey(topic.topicId, t.address));
+    const about = jev.about.get(jevAboutKey(topic.topicId, t.address));
     return [
       index, t.address, t.symbol, t.protocol, t.migrated, t.createdAt, usd(t.netInflowUsd),
       usd(t.netInflow1hUsd), usd(t.volume1hBuyUsd), usd(t.volume1hSellUsd), usd(t.marketCapUsd), usd(t.liquidityUsd),
       pct(t.priceChange24hPct), t.uniqueTraders5m, t.uniqueTraders1h, t.count5m, t.count1h, t.holders,
       t.smartMoneyHolders, t.kolHolders,
-      j === undefined ? null : sig(j.about.noul, 4), j?.tone.choice ?? null,
-      j === undefined ? null : probabilityCell(j.tone.probabilities, JEV_TONES), j?.model ?? null,
+      about === undefined ? null : sig(about.answer.noul, 4), tone?.answer.choice ?? null,
+      tone === undefined ? null : probabilityCell(tone.answer.probabilities, JEV_TONES), about?.model ?? null,
+      tone?.model ?? null,
     ];
   });
 }
@@ -302,7 +307,7 @@ function inflowTuple(row: SmartInflowRow): Tuple {
  * carries it by construction. `activityAgeS` is how old OKX's activity reading
  * was at the cycle (it is reused from the previous board cycle when OKX fails).
  */
-export function boardTuple(row: MemeBoardRow, onShortlist: boolean, cycleTs: number, jev?: JevStockEntry): Tuple {
+export function boardTuple(row: MemeBoardRow, onShortlist: boolean, cycleTs: number, jev?: JevStockAnswer): Tuple {
   const a = row.activity;
   const f = row.flow1h;
   const sm = row.smartMoney;
@@ -317,9 +322,9 @@ export function boardTuple(row: MemeBoardRow, onShortlist: boolean, cycleTs: num
     f?.buys ?? null, f?.sells ?? null, usd(f?.inflowUsd), f?.uniqueTraders ?? null,
     sm.holders, sm.kolHolders, sm.signals.smart_money ?? 0, sm.signals.kol ?? 0, sm.signals.whale ?? 0,
     onShortlist,
-    jev === undefined ? null : sig(jev.answer.score, 4),
-    jev === undefined ? null : probabilityCell(jev.answer.probabilities, JEV_STOCK_LEVEL_KEYS),
-    jev?.model ?? null,
+    jev === undefined ? null : sig(jev.entry.answer.score, 4),
+    jev === undefined ? null : probabilityCell(jev.entry.answer.probabilities, JEV_STOCK_LEVEL_KEYS),
+    jev?.entry.model ?? null, jev?.hasName ?? null, jev?.hasCompany ?? null,
   ];
 }
 
@@ -408,12 +413,18 @@ export async function runMemeMeasure(
   }
 
   // Jev answers, cached or asked now. A failure here is a note, never a failed cycle.
-  let jev: JevAnswers = { stock: new Map(), topic: new Map() };
+  let jev: JevAnswers = { stock: new Map(), about: new Map(), tone: new Map() };
   if (options.jevApiKey) {
     try {
-      jev = await memeJev(store, signal, fresh?.memeStocks ?? [], allTopics, options.jevApiKey, options.jevFetch, failures);
+      jev = await memeJev(store, signal, fresh?.memeStocks ?? [], allTopics, {
+        apiKey: options.jevApiKey,
+        fetchFn: options.jevFetch,
+        now,
+        deadline: started + JEV_DEADLINE_MS,
+        failures,
+      });
     } catch (error) {
-      failures.push(`jev: ${sanitizeMessage(error)}`);
+      failures.push(`jev: ${scrubKey(error, options.jevApiKey)}`);
     }
   }
 
@@ -424,7 +435,7 @@ export async function runMemeMeasure(
         topics: { columns: TOPIC_COLUMNS, rows: allTopics.map(topicTuple) },
         tokens: {
           columns: TOPIC_TOKEN_COLUMNS,
-          rows: allTopics.flatMap((topic, index) => topicTokenTuples(topic, index, jev.topic)),
+          rows: allTopics.flatMap((topic, index) => topicTokenTuples(topic, index, jev)),
         },
       };
 
@@ -506,11 +517,16 @@ export async function runMemeMeasure(
 
 // ─── Jev text features ───────────────────────────────────────────────────────
 
-/** Cache key prefixes; one key per meme-stock token and per (topicId, token) pair. */
-export const JEV_STOCK_KEY_PREFIX = "memes:jev:v1:stock:";
-export const JEV_TOPIC_KEY_PREFIX = "memes:jev:v1:topic:";
+/**
+ * Store keys. An answer lives at `memes:jev:v1:<item>` and is written only after
+ * a valid response; a key whose own answer keeps failing has a retry marker at
+ * `memes:jev:v1:retry:<item>`. Items: `stock:<address>`, `tone:<topicId>`,
+ * `about:<topicId>:<address>`.
+ */
+export const JEV_KEY_PREFIX = "memes:jev:v1:";
+export const JEV_RETRY_PREFIX = "memes:jev:v1:retry:";
 const JEV_SOURCE = "typesafe-jev";
-/** The inputs never change, so an answer is kept for good (same horizon as `quotes:kind`). */
+/** An answer is kept for good while its inputs and wording are unchanged (same horizon as `quotes:kind`). */
 const JEV_FOREVER_MS = 100 * 365 * 24 * 3_600_000;
 /**
  * Requests per cycle. A cold start (a few hundred meme stocks and pairs) is
@@ -518,34 +534,49 @@ const JEV_FOREVER_MS = 100 * 365 * 24 * 3_600_000;
  */
 export const JEV_MAX_REQUESTS = 60;
 /** Requests in flight at once, far under TypeSafe's 80 requests/s. */
-const JEV_CONCURRENCY = 6;
-/** The whole Jev step's deadline inside the 45 s job timeout. */
+export const JEV_CONCURRENCY = 6;
+/** Longest the Jev requests may take in one cycle. */
 const JEV_BOX_MS = 10_000;
+/** Jev requests end this long after the cycle started, leaving the slot writes 15 s of the 45 s job timeout. */
+export const JEV_DEADLINE_MS = 30_000;
+/** With less time than this left, nothing is asked this cycle (cached answers are still recorded). */
+const JEV_MIN_BOX_MS = 2_000;
+/**
+ * A key whose own request or answer fails (an invalid answer, or a 4xx other
+ * than 401/429) is retried after 15 then 30 minutes and given up after the
+ * third failure, until its inputs or wording change.
+ */
+export const JEV_MAX_TRIES = 3;
+const JEV_RETRY_MS = 15 * 60_000;
+/** Longest meme name or topic name sent. */
+export const JEV_TEXT_MAX = 80;
 
 /** Score levels of the meme-to-stock relevance; the stored probabilities follow this order. */
 const JEV_STOCK_LEVELS = [
-  "Unrelated: nothing in the meme's symbol or name refers to this company, its people or its products",
-  "Loosely related: a generic finance, stock-market or trading joke that is not specific to this company",
-  "Clearly about this company, its people (founders, executives) or its products",
+  "Unrelated: nothing in the meme's symbol or name refers to this company or fund, its ticker, people, products or brand; " +
+    "this includes generic crypto or meme-culture names with no finance theme",
+  "Loosely related: a generic finance, stock-market, trading or sector joke that is not specific to this company or fund",
+  "Clearly about this company or fund: its ticker, brand, people (founders, executives), products, or for a fund its index",
 ] as const;
 const JEV_STOCK_LEVEL_KEYS = JEV_STOCK_LEVELS.map((_, i) => String(i));
 /** Topic tones; the stored probabilities follow this order. */
 export const JEV_TONES = ["hype", "neutral", "warning"] as const;
 type JevTone = (typeof JEV_TONES)[number];
 
-/** Idea 3, asked over `{ meme: { symbol, name? }, stock: { symbol, company? } }`. */
+/** Idea 3, asked per meme stock over `{ meme: { symbol, name? }, stock: { symbol, company? } }`. */
 export const JEV_STOCK_QUESTIONS: Record<string, JevQuestion> = {
   relevance: {
     type: "score",
     instructions:
-      "How strongly is the meme token `meme` themed on the stock `stock`? `stock.symbol` is a tokenized stock: " +
-      "the company's ticker followed by B (for example NVDAB is NVIDIA).",
+      "How strongly is the meme token `meme` themed on the asset behind the tokenized stock `stock`? " +
+      "`stock.symbol` is the underlying ticker with the letter B appended. " +
+      "`stock.company`, when present, names the underlying company or fund.",
     criteria: JEV_STOCK_LEVELS,
   },
 };
 
-/** Idea 4, asked over `{ topic: { name, type, tags }, token: { symbol } }`. */
-export const JEV_TOPIC_QUESTIONS: Record<string, JevQuestion> = {
+/** Idea 4, asked per (topic, token) pair over `{ topic: { name, type, tags }, token: { symbol } }`. */
+export const JEV_ABOUT_QUESTIONS: Record<string, JevQuestion> = {
   about: {
     type: "noul",
     instructions:
@@ -556,6 +587,10 @@ export const JEV_TOPIC_QUESTIONS: Record<string, JevQuestion> = {
       false: "The topic is about something else; the token is only associated with it",
     },
   },
+};
+
+/** Idea 4, asked once per topic over `{ topic: { name, type, tags } }`: the tone does not depend on the token. */
+export const JEV_TONE_QUESTIONS: Record<string, JevQuestion> = {
   tone: {
     type: "choice",
     instructions: "What is the tone of the social-media topic `topic`?",
@@ -567,119 +602,274 @@ export const JEV_TOPIC_QUESTIONS: Record<string, JevQuestion> = {
   },
 };
 
-interface JevStockEntry { model: string; answer: JevScore }
-interface JevTopicEntry { model: string; about: JevNoul; tone: JevChoice<JevTone> }
-interface JevAnswers { stock: Map<string, JevStockEntry>; topic: Map<string, JevTopicEntry> }
+interface JevEntry<A> {
+  /** {@link jevDigest} of the request the answer came from. */
+  digest: string;
+  model: string;
+  answer: A;
+}
+/** The stock answer plus which optional inputs it was asked with. */
+interface JevStockAnswer { entry: JevEntry<JevScore>; hasName: boolean; hasCompany: boolean }
+interface JevAnswers {
+  /** By meme address. */
+  stock: Map<string, JevStockAnswer>;
+  /** By {@link jevAboutKey}. */
+  about: Map<string, JevEntry<JevNoul>>;
+  /** By topicId. */
+  tone: Map<string, JevEntry<JevChoice<JevTone>>>;
+}
+interface JevRetry { digest: string; tries: number; nextAt: number }
 
-function jevTopicKey(topicId: string, address: string): string {
-  return `${topicId}:${address}`;
+/**
+ * Per store, the answers and retry markers of the last cycle's items. A warm
+ * cycle finds every item here and reads no per-item key; anything not in the
+ * cycle is dropped, so it holds at most one cycle's items.
+ */
+interface JevMemory { answers: Map<string, JevEntry<unknown>>; retries: Map<string, JevRetry> }
+const JEV_MEMORY = new WeakMap<SnapshotStore, JevMemory>();
+
+function jevAboutKey(topicId: string, address: string): string {
+  return `about:${topicId}:${address}`;
 }
 
-/** A cached entry is re-checked with the answer parsers, never trusted. */
-function cachedStock(value: unknown): JevStockEntry | null {
-  if (!isRecord(value) || typeof value["model"] !== "string" || value["model"] === "") return null;
-  const answer = parseScoreAnswer(value["answer"], JEV_STOCK_LEVELS.length);
-  return answer === null ? null : { model: value["model"], answer };
+/** Short digest of the exact state and question wording; a cached answer counts only while it matches. */
+function jevDigest(state: unknown, questions: Record<string, JevQuestion>): string {
+  return createHash("sha256").update(JSON.stringify({ state, questions })).digest("hex").slice(0, 16);
 }
 
-function cachedTopic(value: unknown): JevTopicEntry | null {
-  if (!isRecord(value) || typeof value["model"] !== "string" || value["model"] === "") return null;
-  const about = parseNoulAnswer(value["about"]);
-  const tone = parseChoiceAnswer(value["tone"], JEV_TONES);
-  return about === null || tone === null ? null : { model: value["model"], about, tone };
+/** A stored entry is re-checked with the answer parser, never trusted. */
+function parseEntry<A>(value: unknown, digest: string, parse: (answer: unknown) => A | null): JevEntry<A> | null {
+  if (!isRecord(value) || value["digest"] !== digest || typeof value["model"] !== "string" || value["model"] === "") return null;
+  const answer = parse(value["answer"]);
+  return answer === null ? null : { digest, model: value["model"], answer };
+}
+
+function parseRetry(value: unknown, digest: string): JevRetry | null {
+  if (!isRecord(value) || value["digest"] !== digest) return null;
+  const { tries, nextAt } = value;
+  return typeof tries === "number" && Number.isInteger(tries) && tries > 0 && typeof nextAt === "number" && Number.isFinite(nextAt)
+    ? { digest, tries, nextAt }
+    : null;
+}
+
+const jevRetryDue = (retry: JevRetry, now: number): boolean => retry.tries < JEV_MAX_TRIES && retry.nextAt <= now;
+
+/** One question over one state; `id` keys the answer in `out`, `key` in the store. */
+interface JevItem<A> {
+  key: string;
+  id: string;
+  state: unknown;
+  questions: Record<string, JevQuestion>;
+  parse: (answer: unknown) => A | null;
+  out: Map<string, JevEntry<A>>;
+}
+
+interface JevDue { key: string; digest: string; tries: number; run: (signal: AbortSignal) => Promise<void> }
+
+interface JevContext {
+  store: SnapshotStore;
+  apiKey: string;
+  fetchFn: FetchFn | undefined;
+  now: () => number;
+  memory: JevMemory;
+  next: JevMemory;
+  /** Sanitized failure notes of this cycle. */
+  failed: string[];
 }
 
 /**
- * Looks up every meme-stock token and topic pair of the cycle, asks Jev for
- * the unanswered ones (at most {@link JEV_MAX_REQUESTS}, one request per token
- * or pair), and caches each valid answer. Failed requests are summed into one
- * `failures` line; a 429 stops the rest of the cycle's requests.
+ * Resolves each item from memory, then from the store, and returns the ones
+ * still to ask (not answered with the same digest, not backing off, not given up).
+ */
+async function jevLookup<A>(items: readonly JevItem<A>[], ctx: JevContext): Promise<JevDue[]> {
+  const record = (item: JevItem<A>, entry: JevEntry<A>): void => {
+    item.out.set(item.id, entry);
+    ctx.next.answers.set(item.key, entry);
+  };
+  const pending: Array<{ item: JevItem<A>; digest: string }> = [];
+  for (const item of items) {
+    const digest = jevDigest(item.state, item.questions);
+    const known = parseEntry(ctx.memory.answers.get(item.key), digest, item.parse);
+    if (known !== null) {
+      record(item, known);
+      continue;
+    }
+    const retry = ctx.memory.retries.get(item.key);
+    if (retry !== undefined && retry.digest === digest && !jevRetryDue(retry, ctx.now())) {
+      ctx.next.retries.set(item.key, retry);
+      continue;
+    }
+    pending.push({ item, digest });
+  }
+  const stored = await Promise.all(
+    pending.map(({ item }) =>
+      Promise.all([ctx.store.get<unknown>(JEV_KEY_PREFIX + item.key), ctx.store.get<unknown>(JEV_RETRY_PREFIX + item.key)]),
+    ),
+  );
+  const due: JevDue[] = [];
+  pending.forEach(({ item, digest }, i) => {
+    const [answerRecord, retryRecord] = stored[i]!;
+    const cached = parseEntry(answerRecord?.data, digest, item.parse);
+    if (cached !== null) {
+      record(item, cached);
+      return;
+    }
+    const retry = parseRetry(retryRecord?.data, digest);
+    if (retry !== null) {
+      ctx.next.retries.set(item.key, retry);
+      if (!jevRetryDue(retry, ctx.now())) return;
+    }
+    const questionId = Object.keys(item.questions)[0] ?? "";
+    due.push({
+      key: item.key,
+      digest,
+      tries: retry?.tries ?? 0,
+      run: async (signal) => {
+        const response = await askJev({ apiKey: ctx.apiKey, state: item.state, questions: item.questions, fetchFn: ctx.fetchFn, signal });
+        const answer = item.parse(response.answers[questionId]);
+        if (answer === null) throw new Error("invalid answer");
+        const entry: JevEntry<A> = { digest, model: response.model, answer };
+        record(item, entry);
+        ctx.next.retries.delete(item.key);
+        try {
+          await ctx.store.put(JEV_KEY_PREFIX + item.key, entry, { source: JEV_SOURCE, freshForMs: JEV_FOREVER_MS, deadAfterMs: JEV_FOREVER_MS });
+        } catch (error) {
+          ctx.failed.push(`cache write: ${sanitizeMessage(error)}`);
+        }
+      },
+    });
+  });
+  return due;
+}
+
+/**
+ * Builds the cycle's Jev items (one Score per meme stock, one tone Choice per
+ * topic, one Noul per topic-token pair), resolves them from memory or the
+ * store, and asks for the rest: at most {@link JEV_MAX_REQUESTS},
+ * {@link JEV_CONCURRENCY} at a time, inside a box that ends by
+ * {@link JEV_DEADLINE_MS} into the cycle. A failure that is not the key's own
+ * (401, 429, 5xx, timeout, network) or a 422 stops the cycle's remaining
+ * requests; a key's own failure backs it off. Failures are summed into one
+ * `failures` line.
  */
 async function memeJev(
   store: SnapshotStore,
   signal: AbortSignal,
   memeStocks: readonly MemeBoardRow[],
   topics: readonly SocialTopic[],
-  apiKey: string,
-  fetchFn: FetchFn | undefined,
-  failures: string[],
+  options: { apiKey: string; fetchFn: FetchFn | undefined; now: () => number; deadline: number; failures: string[] },
 ): Promise<JevAnswers> {
-  const out: JevAnswers = { stock: new Map(), topic: new Map() };
-  const pairs = topics.flatMap((topic) => topic.tokens.map((token) => ({ topic, token })));
-  if (memeStocks.length === 0 && pairs.length === 0) return out;
+  const out: JevAnswers = { stock: new Map(), about: new Map(), tone: new Map() };
+  if (memeStocks.length === 0 && !topics.some((topic) => topic.tokens.length > 0)) return out;
+  const { apiKey, now } = options;
+  const ctx: JevContext = {
+    store,
+    apiKey,
+    fetchFn: options.fetchFn,
+    now,
+    memory: JEV_MEMORY.get(store) ?? { answers: new Map(), retries: new Map() },
+    next: { answers: new Map(), retries: new Map() },
+    failed: [],
+  };
 
-  const [stockRecords, topicRecords, rwa] = await Promise.all([
-    Promise.all(memeStocks.map((row) => store.get<unknown>(JEV_STOCK_KEY_PREFIX + row.address))),
-    Promise.all(pairs.map(({ topic, token }) => store.get<unknown>(JEV_TOPIC_KEY_PREFIX + jevTopicKey(topic.topicId, token.address)))),
-    store.get<unknown>(RWA_UNIVERSE_KEY),
-  ]);
-  const rwaRows = rwaRowsByAddress(rwa?.data);
-  const box = AbortSignal.any([signal, AbortSignal.timeout(JEV_BOX_MS)]);
-  const asks: Array<() => Promise<void>> = [];
-
-  memeStocks.forEach((row, i) => {
-    const cached = cachedStock(stockRecords[i]?.data);
-    if (cached !== null) {
-      out.stock.set(row.address, cached);
-      return;
-    }
-    if (row.quote.symbol === null) return;
+  const rwaRows = rwaRowsByAddress((await store.get<unknown>(RWA_UNIVERSE_KEY))?.data);
+  const stockAnswers = new Map<string, JevEntry<JevScore>>();
+  const stockInputs = new Map<string, { hasName: boolean; hasCompany: boolean }>();
+  const stockItems: Array<JevItem<JevScore>> = [];
+  for (const row of memeStocks) {
+    if (row.quote.symbol === null) continue;
+    const name = row.name === null ? null : row.name.slice(0, JEV_TEXT_MAX);
     const company = row.quote.address === null ? null : (rwaRows.get(row.quote.address)?.underlyingName ?? null);
-    const state = {
-      meme: row.name === null ? { symbol: row.symbol } : { symbol: row.symbol, name: row.name },
-      stock: company === null ? { symbol: row.quote.symbol } : { symbol: row.quote.symbol, company },
-    };
-    asks.push(async () => {
-      const response = await askJev({ apiKey, state, questions: JEV_STOCK_QUESTIONS, fetchFn, signal: box });
-      const answer = parseScoreAnswer(response.answers["relevance"], JEV_STOCK_LEVELS.length);
-      if (answer === null) throw new Error("invalid answer");
-      const entry: JevStockEntry = { model: response.model, answer };
-      out.stock.set(row.address, entry);
-      await store.put(JEV_STOCK_KEY_PREFIX + row.address, entry, { source: JEV_SOURCE, freshForMs: JEV_FOREVER_MS, deadAfterMs: JEV_FOREVER_MS });
+    stockInputs.set(row.address, { hasName: name !== null, hasCompany: company !== null });
+    stockItems.push({
+      key: `stock:${row.address}`,
+      id: row.address,
+      state: {
+        meme: name === null ? { symbol: row.symbol } : { symbol: row.symbol, name },
+        stock: company === null ? { symbol: row.quote.symbol } : { symbol: row.quote.symbol, company },
+      },
+      questions: JEV_STOCK_QUESTIONS,
+      parse: (answer) => parseScoreAnswer(answer, JEV_STOCK_LEVELS.length),
+      out: stockAnswers,
     });
-  });
-
-  pairs.forEach(({ topic, token }, i) => {
-    const key = jevTopicKey(topic.topicId, token.address);
-    const cached = cachedTopic(topicRecords[i]?.data);
-    if (cached !== null) {
-      out.topic.set(key, cached);
-      return;
+  }
+  const toneItems: Array<JevItem<JevChoice<JevTone>>> = [];
+  const aboutItems: Array<JevItem<JevNoul>> = [];
+  for (const topic of topics) {
+    if (topic.nameEn === null || topic.tokens.length === 0) continue;
+    const t = { name: topic.nameEn.slice(0, JEV_TEXT_MAX), type: topic.type, tags: topic.tags };
+    toneItems.push({
+      key: `tone:${topic.topicId}`,
+      id: topic.topicId,
+      state: { topic: t },
+      questions: JEV_TONE_QUESTIONS,
+      parse: (answer) => parseChoiceAnswer(answer, JEV_TONES),
+      out: out.tone,
+    });
+    for (const token of topic.tokens) {
+      if (token.symbol === null) continue;
+      const key = jevAboutKey(topic.topicId, token.address);
+      aboutItems.push({
+        key,
+        id: key,
+        state: { topic: t, token: { symbol: token.symbol } },
+        questions: JEV_ABOUT_QUESTIONS,
+        parse: parseNoulAnswer,
+        out: out.about,
+      });
     }
-    if (topic.nameEn === null || token.symbol === null) return;
-    const state = { topic: { name: topic.nameEn, type: topic.type, tags: topic.tags }, token: { symbol: token.symbol } };
-    asks.push(async () => {
-      const response = await askJev({ apiKey, state, questions: JEV_TOPIC_QUESTIONS, fetchFn, signal: box });
-      const about = parseNoulAnswer(response.answers["about"]);
-      const tone = parseChoiceAnswer(response.answers["tone"], JEV_TONES);
-      if (about === null || tone === null) throw new Error("invalid answer");
-      const entry: JevTopicEntry = { model: response.model, about, tone };
-      out.topic.set(key, entry);
-      await store.put(JEV_TOPIC_KEY_PREFIX + key, entry, { source: JEV_SOURCE, freshForMs: JEV_FOREVER_MS, deadAfterMs: JEV_FOREVER_MS });
-    });
-  });
+  }
 
-  const queue = asks.slice(0, JEV_MAX_REQUESTS);
-  const failed: string[] = [];
+  const due = [
+    ...await jevLookup(stockItems, ctx),
+    ...await jevLookup(toneItems, ctx),
+    ...await jevLookup(aboutItems, ctx),
+  ];
+  const left = options.deadline - now();
   let asked = 0;
   let stopped = false;
-  const worker = async (): Promise<void> => {
-    while (!stopped) {
-      const ask = queue.shift();
-      if (ask === undefined) return;
-      asked += 1;
-      try {
-        await ask();
-      } catch (error) {
-        // The key is scrubbed by value too: `sanitizeMessage` only redacts long opaque tokens.
-        failed.push(sanitizeMessage(error).split(apiKey).join("[redacted]"));
-        if (error instanceof AdapterError && error.status === 429) stopped = true;
+  if (due.length > 0 && left < JEV_MIN_BOX_MS) {
+    ctx.failed.push(`${due.length} unanswered, not asked: ${Math.max(0, left)} ms left in the cycle`);
+  } else if (due.length > 0) {
+    const box = AbortSignal.any([signal, AbortSignal.timeout(Math.min(JEV_BOX_MS, left))]);
+    const queue = due.slice(0, JEV_MAX_REQUESTS);
+    const worker = async (): Promise<void> => {
+      while (!stopped) {
+        const item = queue.shift();
+        if (item === undefined) return;
+        asked += 1;
+        try {
+          await item.run(box);
+        } catch (error) {
+          ctx.failed.push(scrubKey(error, apiKey));
+          const status = error instanceof AdapterError ? error.status : undefined;
+          // The key's own fault: an invalid answer, an unreadable 2xx, or a 4xx other than 401/429.
+          const keyFault = !(error instanceof AdapterError) || (status !== undefined && status < 500 && status !== 401 && status !== 429);
+          if (!keyFault || status === 422) stopped = true;
+          if (keyFault) {
+            const retry: JevRetry = { digest: item.digest, tries: item.tries + 1, nextAt: now() + JEV_RETRY_MS * 2 ** item.tries };
+            ctx.next.retries.set(item.key, retry);
+            try {
+              await store.put(JEV_RETRY_PREFIX + item.key, retry, { source: JEV_SOURCE, freshForMs: JEV_FOREVER_MS, deadAfterMs: JEV_FOREVER_MS });
+            } catch (writeError) {
+              ctx.failed.push(`retry write: ${sanitizeMessage(writeError)}`);
+            }
+          }
+        }
       }
-    }
-  };
-  await Promise.all(Array.from({ length: JEV_CONCURRENCY }, worker));
-  if (failed.length > 0) {
-    failures.push(`jev: ${failed.length} of ${asked} requests failed${stopped ? ", rest stopped after 429" : ""} (${failed[0]})`);
+    };
+    await Promise.all(Array.from({ length: JEV_CONCURRENCY }, worker));
+  }
+  JEV_MEMORY.set(store, ctx.next);
+  if (ctx.failed.length > 0) {
+    options.failures.push(
+      `jev: ${ctx.failed.length} failed of ${asked} requests${stopped ? ", rest of the cycle stopped" : ""} (${ctx.failed[0]})`,
+    );
+  }
+
+  for (const [address, inputs] of stockInputs) {
+    const entry = stockAnswers.get(address);
+    if (entry !== undefined) out.stock.set(address, { entry, ...inputs });
   }
   return out;
 }
@@ -807,7 +997,7 @@ export function memeMeasureJob(store: SnapshotStore): JobSpec {
     intervalMs: enabled ? TICK_MS : 60 * TICK_MS,
     jitterMs: 5_000,
     // Four Binance calls behind the shared semaphore, two store reads, two writes;
-    // with Jev on, at most JEV_BOX_MS more of TypeSafe requests.
+    // with Jev on, TypeSafe requests end by JEV_DEADLINE_MS into the cycle.
     timeoutMs: 45_000,
     run: async (signal) => {
       if (!enabled) return;
