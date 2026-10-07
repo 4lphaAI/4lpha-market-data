@@ -207,9 +207,13 @@ export interface SmartInflow {
  */
 export interface MemeVenueInfo {
   venue: LaunchpadVenue | null;
-  /** Token tax per direction in bps; Flap only (the Four.Meme helper does not report one). */
+  /**
+   * Token tax per direction in bps. Flap from its lens, at every stage. Four.Meme
+   * from the token itself, only once graduated and only for a template proven on
+   * chain (`query/fourmemeTax.ts`); a curve row or an unproven template is `null`.
+   */
   tax: { buyBps: number; sellBps: number } | null;
-  /** Graduated PancakeSwap V2 pair; Flap only. */
+  /** Graduated PancakeSwap V2 pair: Flap from its lens, Four.Meme from a tax token's own `pair()`. */
   pool: string | null;
   nativeToQuoteSwapEnabled: boolean | null;
   /** Flap tax-token dividend: reward token (zero address = BNB) and share of tax routed to it; `bps: 0` = no automatic payout. */

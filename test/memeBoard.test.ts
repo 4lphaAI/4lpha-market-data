@@ -18,6 +18,7 @@ import { RWA_UNIVERSE_KEY } from "../src/universe.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import { MEME_BOARD_KEY, MEME_STATE_KEY, runMemeBoard } from "../src/jobs/memeBoard.js";
+import type { FourMemeCode, FourMemeTaxRead } from "../src/query/fourmemeTax.js";
 import { MEME_VENUES_KEY } from "../src/jobs/memeVenues.js";
 import {
   MEME_RULES,
@@ -361,6 +362,8 @@ function fakeUpstreams(lists: Partial<Record<MemeRushStage, MemeRushRow[] | Erro
     readStates: async () => new Map<string, LaunchpadState>(),
     readIssuer: async () => new Map<string, QuoteInfo>(),
     readDividends: async () => new Map<string, FlapDividend>(),
+    readFourMemeCodes: async () => new Map<string, FourMemeCode>(),
+    readFourMemeTaxes: async () => new Map<string, FourMemeTaxRead>(),
   };
 }
 
@@ -400,6 +403,8 @@ describe("runMemeBoard", () => {
       readStates: async () => new Map<string, LaunchpadState>(),
       readIssuer: async () => new Map<string, QuoteInfo>(),
     readDividends: async () => new Map<string, FlapDividend>(),
+    readFourMemeCodes: async () => new Map<string, FourMemeCode>(),
+    readFourMemeTaxes: async () => new Map<string, FourMemeTaxRead>(),
     };
     const run = (t: number, listed: number[], txs1h: Record<number, number>) =>
       runMemeBoard(store, AbortSignal.timeout(5_000), {

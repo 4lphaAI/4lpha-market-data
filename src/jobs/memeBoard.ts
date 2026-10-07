@@ -46,7 +46,14 @@ import {
 import { readLaunchpadStates, type LaunchpadState, type LaunchpadStateReader } from "../query/launchpadState.js";
 import { MEME_RULES, classifyMeme, findClones, type MemeBoardRow, type SmartInflow } from "../query/memeClassify.js";
 import { resolveQuotes, type IssuerReader } from "../query/quoteKind.js";
-import { readDividendsOnchain, refreshVenues, type CachedVenue, type DividendReader } from "./memeVenues.js";
+import {
+  fourMemeReadersOnchain,
+  readDividendsOnchain,
+  refreshVenues,
+  type CachedVenue,
+  type DividendReader,
+} from "./memeVenues.js";
+import type { FourMemeCodeReader, FourMemeTaxReader } from "../query/fourmemeTax.js";
 
 export const MEME_BOARD_JOB = "meme-board";
 /** Public board, served by `GET /memes`. */
@@ -113,6 +120,8 @@ export interface RunMemeBoardOptions {
   fetchInflow?: ((window: InflowWindow, signal: AbortSignal) => Promise<SmartInflowRow[]>) | undefined;
   readStates?: LaunchpadStateReader | undefined;
   readDividends?: DividendReader | undefined;
+  readFourMemeCodes?: FourMemeCodeReader | undefined;
+  readFourMemeTaxes?: FourMemeTaxReader | undefined;
   readIssuer?: IssuerReader | undefined;
   now?: (() => number) | undefined;
 }
@@ -133,6 +142,8 @@ export async function runMemeBoard(
   const fetchInflow = options.fetchInflow ?? ((window, s) => fetchSmartMoneyInflow({ period: window, signal: s }));
   const readStates = options.readStates ?? readLaunchpadStates;
   const readDividends = options.readDividends ?? readDividendsOnchain;
+  const readFourMemeCodes = options.readFourMemeCodes ?? fourMemeReadersOnchain.readFourMemeCodes;
+  const readFourMemeTaxes = options.readFourMemeTaxes ?? fourMemeReadersOnchain.readFourMemeTaxes;
   const failures: string[] = [];
 
   // 1. Discovery, from two sources that see different tokens. Meme Rush is the
@@ -222,7 +233,7 @@ export async function runMemeBoard(
         status: previousBoard.get(token.rush.address)?.status,
       })),
       states,
-      { readStates, readDividends, now, signal },
+      { readStates, readDividends, readFourMemeCodes, readFourMemeTaxes, now, signal },
     );
     venues = refreshed.venues;
     failures.push(...refreshed.failures);

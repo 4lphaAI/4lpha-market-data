@@ -6,6 +6,7 @@ import { MemoryStore } from "../src/core/store.js";
 import { MEME_VENUES_KEY, refreshVenues, type VenueCandidate } from "../src/jobs/memeVenues.js";
 import { fromFlapState, type LaunchpadState } from "../src/query/launchpadState.js";
 import type { MemeStatus } from "../src/query/memeClassify.js";
+import { FOURMEME_TEMPLATES, type FourMemeCode, type FourMemeTaxRead } from "../src/query/fourmemeTax.js";
 
 const NOW = 1_791_120_000_000;
 const MIN = 60_000;
@@ -47,6 +48,10 @@ interface Harness {
   dividendReads: string[][];
   states: Map<string, LaunchpadState>;
   dividends: Map<string, FlapDividend> | Error;
+  codeReads: string[][];
+  taxReads: string[][];
+  codes: Map<string, FourMemeCode> | Error;
+  taxes: Map<string, FourMemeTaxRead> | Error;
   run: (now: number, candidates: VenueCandidate[], known?: Map<string, LaunchpadState>) => ReturnType<typeof refreshVenues>;
 }
 
@@ -57,6 +62,10 @@ function harness(): Harness {
     dividendReads: [],
     states: new Map(),
     dividends: new Map(),
+    codeReads: [],
+    taxReads: [],
+    codes: new Map(),
+    taxes: new Map(),
     run: (now, candidates, known = new Map()) =>
       refreshVenues(h.store, candidates, known, {
         now,
@@ -72,6 +81,18 @@ function harness(): Harness {
           h.dividendReads.push([...addresses]);
           if (h.dividends instanceof Error) throw h.dividends;
           return h.dividends;
+        },
+        readFourMemeCodes: async (addresses) => {
+          h.codeReads.push([...addresses]);
+          if (h.codes instanceof Error) throw h.codes;
+          const codes = h.codes;
+          return new Map(addresses.flatMap((a) => (codes.has(a) ? [[a, codes.get(a)!] as const] : [])));
+        },
+        readFourMemeTaxes: async (items) => {
+          h.taxReads.push(items.map((item) => item.address));
+          if (h.taxes instanceof Error) throw h.taxes;
+          const taxes = h.taxes;
+          return new Map(items.flatMap((item) => (taxes.has(item.address) ? [[item.address, taxes.get(item.address)!] as const] : [])));
         },
       }),
   };
@@ -162,5 +183,136 @@ describe("refreshVenues", () => {
     assert.deepEqual(h.stateReads.length, 1, "no read: the only candidate was already known");
     assert.equal(venues.get(addr(1))?.venue, "pancake-v2");
     assert.equal(venues.has(addr(2)), false);
+  });
+
+  describe("Four.Meme tax (FOURMEME-TAX-SPEC.md)", () => {
+    const template = (id: string) => FOURMEME_TEMPLATES.find((t) => t.id === id)!;
+    const proven = (id: string): FourMemeCode => ({ code: template(id).code, creatorType: template(id).creatorType });
+    const PAIR = "0xf712b9d6c2ca0e3323be4cf2d24e12c4d88ba4ec";
+
+    it("fills tax and pool on a graduated proven template, stamped with the venue read", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.codes = new Map([[addr(1), proven("tax9-7330")]]);
+      h.taxes = new Map([[addr(1), { tax: { buyBps: 100, sellBps: 100 }, pool: PAIR }]]);
+      const { venues } = await h.run(NOW, [candidate(1, "fourmeme", "active")]);
+      const entry = venues.get(addr(1))!;
+      assert.equal(entry.venue, "pancake-v2");
+      assert.deepEqual(entry.tax, { buyBps: 100, sellBps: 100 });
+      assert.equal(entry.pool, PAIR);
+      assert.equal(entry.checkedAt, NOW);
+      assert.deepEqual(entry.fourmemeCode, proven("tax9-7330"));
+    });
+
+    it("leaves a curve row null and never reads its code or rates", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(false));
+      h.codes = new Map([[addr(1), proven("tax9-7330")]]);
+      const { venues } = await h.run(NOW, [candidate(1, "fourmeme", "active")]);
+      assert.equal(venues.get(addr(1))?.venue, "fourmeme-bonding");
+      assert.equal(venues.get(addr(1))?.tax, null);
+      assert.deepEqual(h.codeReads, []);
+      assert.deepEqual(h.taxReads, []);
+    });
+
+    it("reads the code identity once, ever, and re-reads the rates with the venue", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.codes = new Map([[addr(1), proven("tax8-13584")]]);
+      h.taxes = new Map([[addr(1), { tax: { buyBps: 100, sellBps: 500 }, pool: PAIR }]]);
+      await h.run(NOW, [candidate(1, "fourmeme", "active")]);
+      await h.run(NOW + 30 * MIN, [candidate(1, "fourmeme", "active")]);
+      assert.deepEqual(h.codeReads, [[addr(1)]], "identity is permanent");
+      assert.deepEqual(h.taxReads, [[addr(1)], [addr(1)]], "rates follow the 30 minute graduated cadence");
+      const cached = (await h.store.get<Record<string, { fourmemeCode?: FourMemeCode }>>(MEME_VENUES_KEY))!.data;
+      assert.deepEqual(cached[addr(1)]?.fourmemeCode, proven("tax8-13584"), "the identity survives the cache round trip");
+    });
+
+    it("never stores a failed identity read and retries it next cycle", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.codes = new Error("rpc 429");
+      const first = await h.run(NOW, [candidate(1, "fourmeme", "active")]);
+      assert.ok(first.failures.some((f) => f.startsWith("fourmeme code:")));
+      assert.equal(first.venues.get(addr(1))?.tax, null);
+      assert.equal(first.venues.get(addr(1))?.fourmemeCode, undefined);
+      assert.deepEqual(h.taxReads, [], "no template, no rate read");
+      h.codes = new Map([[addr(1), proven("tax9-7330")]]);
+      h.taxes = new Map([[addr(1), { tax: { buyBps: 300, sellBps: 300 }, pool: PAIR }]]);
+      const second = await h.run(NOW + MIN, [candidate(1, "fourmeme", "active")]);
+      assert.deepEqual(second.venues.get(addr(1))?.tax, { buyBps: 300, sellBps: 300 }, "due next cycle, not in 30 minutes");
+    });
+
+    it("turns a failed rate read into null with the new stamp, then retries next cycle", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.codes = new Map([[addr(1), proven("tax9-7330")]]);
+      h.taxes = new Map([[addr(1), { tax: { buyBps: 100, sellBps: 100 }, pool: PAIR }]]);
+      await h.run(NOW, [candidate(1, "fourmeme", "active")]);
+      h.taxes = new Error("timeout");
+      const failed = await h.run(NOW + 30 * MIN, [candidate(1, "fourmeme", "active")]);
+      assert.ok(failed.failures.some((f) => f.startsWith("fourmeme tax:")));
+      assert.equal(failed.venues.get(addr(1))?.tax, null, "a timeout is unknown, never the previous rate under a new stamp");
+      assert.equal(failed.venues.get(addr(1))?.pool, null);
+      assert.equal(failed.venues.get(addr(1))?.checkedAt, NOW + 30 * MIN);
+      h.taxes = new Map([[addr(1), { tax: { buyBps: 100, sellBps: 100 }, pool: PAIR }]]);
+      const retried = await h.run(NOW + 31 * MIN, [candidate(1, "fourmeme", "active")]);
+      assert.deepEqual(retried.venues.get(addr(1))?.tax, { buyBps: 100, sellBps: 100 });
+    });
+
+    it("keeps an unrecognised template null without re-reading it every cycle", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.codes = new Map([[addr(1), { code: "proxy:0x1111111111111111111111111111111111111111", creatorType: 9 }]]);
+      const first = await h.run(NOW, [candidate(1, "fourmeme", "active")]);
+      assert.equal(first.venues.get(addr(1))?.tax, null);
+      assert.deepEqual(h.taxReads, []);
+      await h.run(NOW + MIN, [candidate(1, "fourmeme", "active")]);
+      assert.equal(h.stateReads.length, 1, "graduated and unrecognised: back on the 30 minute cadence");
+    });
+
+    it("reads a hot-only token's tax from the state the board already read", async () => {
+      const h = harness();
+      h.codes = new Map([[addr(1), proven("plain-3822")]]);
+      h.taxes = new Map([[addr(1), { tax: { buyBps: 0, sellBps: 0 }, pool: null }]]);
+      const { venues } = await h.run(NOW, [candidate(1, "fourmeme", undefined)], new Map([[addr(1), fourMeme(true)]]));
+      assert.deepEqual(h.stateReads, []);
+      assert.deepEqual(venues.get(addr(1))?.tax, { buyBps: 0, sellBps: 0 });
+    });
+
+    it("reports a rate out of range and does not re-read it every cycle (audit L2)", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.codes = new Map([[addr(1), proven("tax9-7330")]]);
+      h.taxes = new Map([[addr(1), { tax: null, pool: PAIR }]]);
+      const first = await h.run(NOW, [candidate(1, "fourmeme", "active")]);
+      assert.equal(first.venues.get(addr(1))?.tax, null);
+      assert.ok(first.failures.some((f) => f.includes("out of range")));
+      await h.run(NOW + MIN, [candidate(1, "fourmeme", "active")]);
+      assert.equal(h.stateReads.length, 1, "an answered null waits for the 30 minute cadence");
+    });
+
+    it("keeps an unanswered token pending while its neighbour is answered", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.states.set(addr(2), fourMeme(true));
+      h.codes = new Map([[addr(1), proven("tax9-7330")], [addr(2), proven("tax9-7330")]]);
+      h.taxes = new Map([[addr(1), { tax: { buyBps: 100, sellBps: 100 }, pool: PAIR }]]);
+      const first = await h.run(NOW, [candidate(1, "fourmeme", "active"), candidate(2, "fourmeme", "active")]);
+      assert.equal(first.venues.get(addr(2))?.tax, null);
+      assert.ok(first.failures.includes("fourmeme tax: 1 of 2 unread"));
+      await h.run(NOW + MIN, [candidate(1, "fourmeme", "active"), candidate(2, "fourmeme", "active")]);
+      assert.deepEqual(h.stateReads.at(-1), [addr(2)], "only the unanswered one is due again");
+    });
+
+    it("leaves Flap rows to the lens", async () => {
+      const h = harness();
+      h.states.set(addr(1), fromFlapState(lens({ status: 4, pool: POOL })));
+      const { venues } = await h.run(NOW, [candidate(1, "flap", "active")]);
+      assert.deepEqual(venues.get(addr(1))?.tax, { buyBps: 300, sellBps: 200 });
+      assert.equal(venues.get(addr(1))?.pool, POOL);
+      assert.deepEqual(h.codeReads, []);
+      assert.deepEqual(h.taxReads, []);
+    });
   });
 });

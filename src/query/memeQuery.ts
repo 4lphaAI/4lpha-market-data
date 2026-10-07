@@ -413,7 +413,7 @@ export interface MemeShortlistRow {
   smartInflow1h: SmartInflow | null;
   /** Where a buy executes now, from the launchpad on chain; `null` = not read yet. */
   venue: MemeBoardRow["venue"];
-  /** Token tax per direction in bps (Flap); `null` = unknown, not zero. */
+  /** Token tax per direction in bps (Flap; graduated Four.Meme on a proven template); `null` = unknown, not zero. */
   tax: MemeBoardRow["tax"];
   pool: MemeBoardRow["pool"];
   nativeToQuoteSwapEnabled: MemeBoardRow["nativeToQuoteSwapEnabled"];
