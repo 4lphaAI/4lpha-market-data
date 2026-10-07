@@ -6,7 +6,7 @@ import type { TokenActivity } from "../src/adapters/onchainos.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore, PostgresStore } from "../src/core/store.js";
 import { FakePg } from "./fakePg.js";
-import { BOARD_PHASE_MS, BOARD_WRITE_DEADLINE_MS, MEME_BOARD_KEY, boardWriteSignal, memeBoardJob, msUntilBoardRun } from "../src/jobs/memeBoard.js";
+import { BOARD_PHASE_MS, BOARD_HELD_WRITE_MS, BOARD_WRITE_DEADLINE_MS, MEME_BOARD_KEY, holdOutsideReadWindow, memeBoardJob, msUntilBoardRun } from "../src/jobs/memeBoard.js";
 import { buildShortlist, parseShortlistQuery } from "../src/query/memeQuery.js";
 import { loadStockInfo } from "../src/query/memeStocks.js";
 import {
@@ -552,27 +552,31 @@ describe("bars retry and board phase (2026-10-07)", () => {
     assert.equal(h.asked.length, asked, "no re-ask while backing off");
   });
 
-  it("runs the board at :08 and lets it write only until :19, before the bars selection (:20)", () => {
+  it("runs the board at :08; a write is never between :19 and :26, and a held one lands before the next :20", () => {
     const spec = memeBoardJob(new MemoryStore());
     assert.equal(spec.nextDelayMs, msUntilBoardRun);
     for (let at = NOW; at < NOW + 2 * MIN; at += 250) assert.equal((at + msUntilBoardRun(at)) % MIN, BOARD_PHASE_MS);
-    assert.ok(BOARD_PHASE_MS < BOARD_WRITE_DEADLINE_MS && BOARD_WRITE_DEADLINE_MS < SETTLE_MS);
+    assert.ok(BOARD_PHASE_MS < BOARD_WRITE_DEADLINE_MS && BOARD_WRITE_DEADLINE_MS < SETTLE_MS, "an on-time write lands before the bars selection");
+    assert.ok(BOARD_HELD_WRITE_MS > 25_000, "a held write lands after the execution plane's :25 read");
+    assert.ok(BOARD_PHASE_MS + spec.timeoutMs < MIN + SETTLE_MS, "and, inside the timeout, before the next bars selection");
   });
 
-  it("cuts a run off at :19 of the minute it started in, at once for an off-phase start past :19 (restart)", () => {
+  it("holds a write that is ready between :19 and :26 until :26, and lets every other one through at once", async () => {
     mock.timers.enable({ apis: ["setTimeout"] });
     try {
       for (let offset = 0; offset < MIN; offset += 250) {
-        const write = boardWriteSignal(new AbortController().signal, NOW + offset);
-        if (offset >= BOARD_WRITE_DEADLINE_MS) {
-          assert.equal(write.aborted, true, `a run starting at +${offset} ms may not write`);
+        let settled: boolean | null = null;
+        const hold = holdOutsideReadWindow(NOW + offset, new AbortController().signal).then((held) => (settled = held));
+        await new Promise((resolve) => setImmediate(resolve));
+        if (offset < BOARD_WRITE_DEADLINE_MS || offset >= BOARD_HELD_WRITE_MS) {
+          assert.equal(settled, false, `ready at +${offset} ms: written at once`);
           continue;
         }
-        assert.equal(write.aborted, false);
-        mock.timers.tick(BOARD_WRITE_DEADLINE_MS - offset - 1);
-        assert.equal(write.aborted, false, `still writable just before :19 (start +${offset} ms)`);
+        mock.timers.tick(BOARD_HELD_WRITE_MS - offset - 1);
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(settled, null, `ready at +${offset} ms: still held 1 ms before :26`);
         mock.timers.tick(1);
-        assert.equal(write.aborted, true, `cut off at :19 (start +${offset} ms)`);
+        assert.equal(await hold, true, `ready at +${offset} ms: written at :26`);
       }
     } finally {
       mock.timers.reset();

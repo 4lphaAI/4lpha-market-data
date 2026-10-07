@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { normalizeMemeRush, type MemeLaunchpad, type MemeRushRow, type MemeRushStage, type SmartInflowRow } from "../src/adapters/binanceWeb3.js";
 import {
   normalizeActivityRows,
@@ -17,7 +17,7 @@ import { QUOTE_STOCKS_KEY } from "../src/jobs/binanceRwa.js";
 import { RWA_UNIVERSE_KEY } from "../src/universe.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
-import { BOARD_WRITE_DEADLINE_MS, MEME_BOARD_KEY, MEME_STATE_KEY, boardWriteSignal, runMemeBoard } from "../src/jobs/memeBoard.js";
+import { BOARD_HELD_WRITE_MS, BOARD_PHASE_MS, MEME_BOARD_KEY, MEME_STATE_KEY, memeBoardJob, runMemeBoard } from "../src/jobs/memeBoard.js";
 import type { FourMemeCode, FourMemeTaxRead } from "../src/query/fourmemeTax.js";
 import { MEME_VENUES_KEY } from "../src/jobs/memeVenues.js";
 import {
@@ -391,21 +391,93 @@ describe("runMemeBoard", () => {
     assert.equal(await store.get(MEME_STATE_KEY), null);
   });
 
-  it("writes nothing when it runs past the :19 write deadline (here an off-phase start after a restart)", async () => {
-    const store = new MemoryStore();
-    for (const startOffset of [BOARD_WRITE_DEADLINE_MS, 25_000, 59_000]) {
-      await assert.rejects(
-        runMemeBoard(store, boardWriteSignal(new AbortController().signal, NOW + startOffset), {
-          ...fakeUpstreams({ finalizing: [rush()] }),
-          fetchActivity: async () => new Map([[addr(1), activity()]]),
-          fetchSignals: async () => [],
-          now: () => NOW + startOffset,
-        }),
-        /deadline/,
-      );
+  describe("meme-board job write window (fix round 2026-10-07)", () => {
+    const flush = async () => {
+      for (let i = 0; i < 50; i++) await new Promise((resolve) => setImmediate(resolve));
+    };
+    function job(clock: { now: number }, lists: Parameters<typeof fakeUpstreams>[0], readyAt?: number) {
+      const store = new MemoryStore(() => clock.now);
+      const spec = memeBoardJob(store, {
+        ...fakeUpstreams(lists),
+        fetchActivity: async () => new Map([[addr(1), activity()]]),
+        fetchSignals: async () => {
+          if (readyAt !== undefined) clock.now = readyAt; // the run's slow part ends here
+          return [];
+        },
+        now: () => clock.now,
+      });
+      return { store, spec };
     }
-    assert.equal(await store.get(MEME_BOARD_KEY), null);
-    assert.equal(await store.get(MEME_STATE_KEY), null);
+
+    it("an on-time run writes at once, before :19", async () => {
+      const clock = { now: NOW + BOARD_PHASE_MS };
+      const { store, spec } = job(clock, { finalizing: [rush()] }, NOW + 12_000);
+      await spec.run(new AbortController().signal);
+      assert.equal((await store.get(MEME_BOARD_KEY))?.asOf, NOW + 12_000);
+      assert.notEqual(await store.get(MEME_STATE_KEY), null);
+    });
+
+    it("a run ready at :21 writes at :26, not before, and succeeds", async () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      try {
+        const clock = { now: NOW + BOARD_PHASE_MS };
+        const { store, spec } = job(clock, { finalizing: [rush()] }, NOW + 21_000);
+        let done = false;
+        const run = spec.run(new AbortController().signal).then(() => (done = true));
+        await flush();
+        assert.equal(await store.get(MEME_BOARD_KEY), null, "held at :21");
+        mock.timers.tick(BOARD_HELD_WRITE_MS - 21_000 - 1);
+        await flush();
+        assert.equal(done, false);
+        assert.equal(await store.get(MEME_BOARD_KEY), null, "still held 1 ms before :26");
+        clock.now = NOW + BOARD_HELD_WRITE_MS;
+        mock.timers.tick(1);
+        await run;
+        assert.equal((await store.get(MEME_BOARD_KEY))?.asOf, NOW + BOARD_HELD_WRITE_MS);
+      } finally {
+        mock.timers.reset();
+      }
+    });
+
+    it("a timeout while held writes nothing and fails the run at once", async () => {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      try {
+        const clock = { now: NOW + BOARD_PHASE_MS };
+        const { store, spec } = job(clock, { finalizing: [rush()] }, NOW + 21_000);
+        const controller = new AbortController();
+        const run = spec.run(controller.signal);
+        await flush();
+        let outcome: unknown = "pending";
+        run.then(() => (outcome = "ok"), (error: unknown) => (outcome = error));
+        controller.abort(new Error("timed out"));
+        await flush();
+        assert.ok(outcome instanceof Error && /timed out/.test(outcome.message), "rejects without waiting for :26");
+        mock.timers.tick(BOARD_HELD_WRITE_MS);
+        await flush();
+        assert.equal(await store.get(MEME_BOARD_KEY), null);
+        assert.equal(await store.get(MEME_STATE_KEY), null);
+      } finally {
+        mock.timers.reset();
+      }
+    });
+
+    it("a real failure fails the run, on time or late", async () => {
+      for (const readyAt of [NOW + 12_000, NOW + 21_000]) {
+        const clock = { now: NOW + BOARD_PHASE_MS };
+        const down = new Error("down");
+        const { store, spec } = job(clock, { new: down, finalizing: down, migrated: down }, readyAt);
+        await assert.rejects(spec.run(new AbortController().signal), /no discovery source/);
+        assert.equal(await store.get(MEME_BOARD_KEY), null);
+      }
+    });
+
+    it("/status shows the board's own freshness", async () => {
+      const store = new MemoryStore();
+      await store.put(MEME_BOARD_KEY, [], { source: "test", freshForMs: 3 * MIN, deadAfterMs: 30 * MIN });
+      const server = createServer({ scheduler: createScheduler(store), store });
+      const body = (await (await server.request("/status")).json()) as { data: { snapshots: Array<{ key: string; staleness?: string }> } };
+      assert.equal(body.data.snapshots.find((s) => s.key === MEME_BOARD_KEY)?.staleness, "fresh");
+    });
   });
 
   it("publishes a partial cycle and refuses to restamp when every list failed", async () => {
