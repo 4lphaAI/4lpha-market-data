@@ -280,6 +280,31 @@ describe("refreshVenues", () => {
       assert.deepEqual(venues.get(addr(1))?.tax, { buyBps: 0, sellBps: 0 });
     });
 
+    it("reports a rate out of range and does not re-read it every cycle (audit L2)", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.codes = new Map([[addr(1), proven("tax9-7330")]]);
+      h.taxes = new Map([[addr(1), { tax: null, pool: PAIR }]]);
+      const first = await h.run(NOW, [candidate(1, "fourmeme", "active")]);
+      assert.equal(first.venues.get(addr(1))?.tax, null);
+      assert.ok(first.failures.some((f) => f.includes("out of range")));
+      await h.run(NOW + MIN, [candidate(1, "fourmeme", "active")]);
+      assert.equal(h.stateReads.length, 1, "an answered null waits for the 30 minute cadence");
+    });
+
+    it("keeps an unanswered token pending while its neighbour is answered", async () => {
+      const h = harness();
+      h.states.set(addr(1), fourMeme(true));
+      h.states.set(addr(2), fourMeme(true));
+      h.codes = new Map([[addr(1), proven("tax9-7330")], [addr(2), proven("tax9-7330")]]);
+      h.taxes = new Map([[addr(1), { tax: { buyBps: 100, sellBps: 100 }, pool: PAIR }]]);
+      const first = await h.run(NOW, [candidate(1, "fourmeme", "active"), candidate(2, "fourmeme", "active")]);
+      assert.equal(first.venues.get(addr(2))?.tax, null);
+      assert.ok(first.failures.includes("fourmeme tax: 1 of 2 unread"));
+      await h.run(NOW + MIN, [candidate(1, "fourmeme", "active"), candidate(2, "fourmeme", "active")]);
+      assert.deepEqual(h.stateReads.at(-1), [addr(2)], "only the unanswered one is due again");
+    });
+
     it("leaves Flap rows to the lens", async () => {
       const h = harness();
       h.states.set(addr(1), fromFlapState(lens({ status: 4, pool: POOL })));

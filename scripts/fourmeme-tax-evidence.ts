@@ -8,7 +8,9 @@
  *   node --import tsx scripts/fourmeme-tax-evidence.ts swaps-notax <token> [blocks]
  *
  * `census`: TokenManager2 `_tokenInfos(token).template` creator type
- * (`(template >> 10) & 0x3F`) against the bytecode shape and the fee views.
+ * (`(template >> 10) & 0x3F`) against the code identity (clone target, or size
+ * and keccak prefix), which fee views exist, `owner()` (TokenManager2, zero or
+ * other) and `_mode` (1 on the curve, 0 after graduation).
  *
  * The other modes take candidate transactions (OKX's recent trades, or a
  * trailing `eth_getLogs` scan) and judge each one from its receipt until one buy
@@ -18,7 +20,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { decodeEventLog, parseAbi, parseAbiItem } from "viem";
+import { decodeEventLog, keccak256, parseAbi, parseAbiItem } from "viem";
 import { createSignature } from "../src/adapters/onchainos.js";
 import { readLogRpcUrls, withBscClient } from "../src/chain/rpc.js";
 
@@ -35,6 +37,7 @@ const tokenAbi = parseAbi([
   "function feeRateSell() view returns (uint256)",
   "function pair() view returns (address)",
   "function _mode() view returns (uint256)",
+  "function owner() view returns (address)",
 ]);
 const PANCAKE_V2_FACTORY = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73" as const;
 const WBNB = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c" as const;
@@ -58,19 +61,24 @@ async function census(file: string): Promise<void> {
       Promise.all(
         chunk.map(async (address) => {
           const code = (await client.getCode({ address })) ?? "0x";
-          const kind = proxyTarget(code) ?? `non-proxy:${code.length / 2 - 1}B`;
-          const [info, fee, buy, sell] = await client.multicall({
+          const kind = proxyTarget(code) ?? `non-proxy:${code.length / 2 - 1}B:${keccak256(code as `0x${string}`).slice(0, 10)}`;
+          const [info, fee, buy, sell, owner, mode] = await client.multicall({
             contracts: [
               { address: TM2, abi: tm2Abi, functionName: "_tokenInfos", args: [address] },
               { address, abi: tokenAbi, functionName: "feeRate" },
               { address, abi: tokenAbi, functionName: "feeRateBuy" },
               { address, abi: tokenAbi, functionName: "feeRateSell" },
+              { address, abi: tokenAbi, functionName: "owner" },
+              { address, abi: tokenAbi, functionName: "_mode" },
             ],
           });
           const template = info.status === "success" ? info.result.template : null;
           const creatorType = template === null ? "revert" : String((template >> 10n) & 0x3fn);
           const views = [fee, buy, sell].map((r) => (r.status === "success" ? "y" : "n")).join("");
-          return { address, key: `type=${creatorType} ${kind} views(fee,buy,sell)=${views}` };
+          const ownerKind =
+            owner.status !== "success" ? "revert" : owner.result.toLowerCase() === TM2.toLowerCase() ? "TM2" : BigInt(owner.result) === 0n ? "zero" : "other";
+          const modeValue = mode.status === "success" ? String(mode.result) : "revert";
+          return { address, key: `type=${creatorType} ${kind} views(fee,buy,sell)=${views} owner=${ownerKind} mode=${modeValue}` };
         }),
       ),
     );

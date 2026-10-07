@@ -21,7 +21,7 @@
  */
 
 import { keccak256, parseAbi } from "viem";
-import { isContractLevelFailure, withBscClient } from "../chain/rpc.js";
+import { withBscClient } from "../chain/rpc.js";
 import { FOURMEME_TOKEN_MANAGER2 } from "./eligibility.js";
 
 /** Permanent facts about a token's contract; read once and cached. */
@@ -138,14 +138,23 @@ export type FourMemeTaxReader = (
 ) => Promise<Map<string, FourMemeTaxRead>>;
 
 /**
- * Code identity and creator type for each address. A token whose reads failed
- * is absent (never cached as an answer); a TokenManager2 revert is an answer
- * (`creatorType: null`), a transport failure is not.
+ * Code identity and creator type for each address. Only a complete answer is
+ * returned: a token whose reads failed, or whose code read came back empty, is
+ * absent and asked again next cycle, because the caller caches the answer
+ * forever. Every TokenManager2 error is treated as a failure, not as an answer:
+ * TokenManager2 answers a token it does not hold with a zero struct (measured),
+ * so a revert is never the honest negative, and viem reports an overloaded
+ * node's JSON-RPC -32603 as a revert.
  */
-export const readFourMemeCodes: FourMemeCodeReader = async (addresses, signal) => {
+export const readFourMemeCodes = async (
+  addresses: readonly string[],
+  signal?: AbortSignal,
+  rpcUrls?: string[],
+): Promise<Map<string, FourMemeCode>> => {
   const out = new Map<string, FourMemeCode>();
   // Small chunks: eth_getCode is one request per address and public endpoints throttle bursts.
   for (let i = 0; i < addresses.length; i += 20) {
+    if (signal?.aborted === true) break;
     const chunk = addresses.slice(i, i + 20);
     try {
       const rows = await withBscClient(
@@ -155,59 +164,71 @@ export const readFourMemeCodes: FourMemeCodeReader = async (addresses, signal) =
               const token = address as `0x${string}`;
               const [code, info] = await Promise.all([
                 client.getCode({ address: token }),
-                client
-                  .readContract({ address: FOURMEME_TOKEN_MANAGER2, abi: tm2Abi, functionName: "_tokenInfos", args: [token] })
-                  .catch((error: unknown) => {
-                    if (isContractLevelFailure(error)) return null;
-                    throw error;
-                  }),
+                client.readContract({ address: FOURMEME_TOKEN_MANAGER2, abi: tm2Abi, functionName: "_tokenInfos", args: [token] }),
               ]);
-              return [address, { code: codeIdentity(code), creatorType: info === null ? null : creatorTypeOf(address, info) }] as const;
+              return [address, { code: codeIdentity(code), creatorType: creatorTypeOf(address, info) }] as const;
             }),
           ),
-        signal === undefined ? {} : { signal },
+        { signal, rpcUrls },
       );
-      for (const [address, identity] of rows) out.set(address, identity);
+      // A graduated token always has code; "none" is a lagging node, not a fact to keep.
+      for (const [address, identity] of rows) if (identity.code !== "none") out.set(address, identity);
     } catch {
       // the chunk stays unread and is asked again next cycle
-      if (signal?.aborted === true) break;
     }
   }
   return out;
 };
 
 /**
- * Rate views for tokens whose template is already recognised, in one callback so
- * viem folds them into multicalls. Throws on a transport failure (the caller
- * then reports `null` for every token in the batch); a reverted view is a
- * `null` rate, which `taxFromRates` turns into a `null` tax.
+ * Rate views and `pair()` for tokens whose template is already recognised, in
+ * one callback so viem folds them into multicalls. A recognised template has
+ * these views (proven), so any error on a token is a failed read, not a
+ * missing view: that token is left out of the result (the caller reports it
+ * `null` and retries next cycle) and never answers with a partial row. When
+ * every token that needed a view failed, the read throws so the next endpoint
+ * gets a turn. A returned `tax: null` means the views answered with a rate this
+ * plane will not publish (out of range).
  */
-export const readFourMemeTaxes: FourMemeTaxReader = async (items, signal) =>
+export const readFourMemeTaxes = async (
+  items: readonly { address: string; template: FourMemeTemplate }[],
+  signal?: AbortSignal,
+  rpcUrls?: string[],
+): Promise<Map<string, FourMemeTaxRead>> =>
   withBscClient(
     async (client) => {
-      const view = (address: `0x${string}`, functionName: "feeRate" | "feeRateBuy" | "feeRateSell") =>
-        client.readContract({ address, abi: taxAbi, functionName }).catch((error: unknown) => {
-          if (isContractLevelFailure(error)) return null;
-          throw error;
-        });
-      const rows = await Promise.all(
-        items.map(async ({ address, template }) => {
+      const settled = await Promise.allSettled(
+        items.map(async ({ address, template }): Promise<FourMemeTaxRead> => {
           const token = address as `0x${string}`;
-          if (template.rates === "none") return [address, { tax: taxFromRates(template, { feeRate: null, feeRateBuy: null, feeRateSell: null }), pool: null }] as const;
+          if (template.rates === "none") return { tax: taxFromRates(template, { feeRate: null, feeRateBuy: null, feeRateSell: null }), pool: null };
+          const read = (functionName: "feeRate" | "feeRateBuy" | "feeRateSell") =>
+            client.readContract({ address: token, abi: taxAbi, functionName });
           const [feeRate, feeRateBuy, feeRateSell, pair] = await Promise.all([
-            template.rates === "bps-single" ? view(token, "feeRate") : null,
-            template.rates === "percent-buy-sell" ? view(token, "feeRateBuy") : null,
-            template.rates === "percent-buy-sell" ? view(token, "feeRateSell") : null,
-            client.readContract({ address: token, abi: taxAbi, functionName: "pair" }).catch((error: unknown) => {
-              if (isContractLevelFailure(error)) return null;
-              throw error;
-            }),
+            template.rates === "bps-single" ? read("feeRate") : null,
+            template.rates === "percent-buy-sell" ? read("feeRateBuy") : null,
+            template.rates === "percent-buy-sell" ? read("feeRateSell") : null,
+            client.readContract({ address: token, abi: taxAbi, functionName: "pair" }),
           ]);
-          const pool = pair === null || pair === ZERO ? null : pair.toLowerCase();
-          return [address, { tax: taxFromRates(template, { feeRate, feeRateBuy, feeRateSell }), pool }] as const;
+          return { tax: taxFromRates(template, { feeRate, feeRateBuy, feeRateSell }), pool: pair === ZERO ? null : pair.toLowerCase() };
         }),
       );
-      return new Map<string, FourMemeTaxRead>(rows);
+      const out = new Map<string, FourMemeTaxRead>();
+      let firstError: unknown = null;
+      let needed = 0;
+      let answered = 0;
+      settled.forEach((result, index) => {
+        const item = items[index]!;
+        const readsViews = item.template.rates !== "none";
+        if (readsViews) needed += 1;
+        if (result.status === "fulfilled") {
+          out.set(item.address, result.value);
+          if (readsViews) answered += 1;
+        } else {
+          firstError ??= result.reason;
+        }
+      });
+      if (needed > 0 && answered === 0) throw firstError;
+      return out;
     },
-    signal === undefined ? {} : { signal },
+    { signal, rpcUrls },
   );

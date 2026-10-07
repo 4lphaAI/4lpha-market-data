@@ -71,18 +71,23 @@ venue state and the stamp is that cycle's. Cadence is the existing one: a
 graduated row every 30 min, a hot-only row every cycle. A graduated Four.Meme
 row whose tax is `null` for a reason that can clear (code identity not read
 yet, rate read failed) is due again next cycle instead of in 30 min. A row
-whose template is known to be unrecognised keeps the 30 min cadence.
+whose template is known to be unrecognised, or whose rates answered out of range (logged), keeps the 30 min cadence.
 
 ## 5. Cost and caching
 
 - Creator type and code identity never change for a contract, so both are read
   once per token and kept on the venue cache entry (`memes:venues`). A failed
-  read is never written. At most 100 identity reads per cycle (one `eth_getCode`
+  read is never written. Every TokenManager2 error is a failed read, not an
+  answer: TokenManager2 answers a token it does not hold with a zero struct, and
+  viem reports a node's JSON-RPC -32603 as a revert (audit M1). An empty code
+  read is not kept either. Identity reads are time-boxed at 10 s per cycle. At most 100 identity reads per cycle (one `eth_getCode`
   each plus a multicalled `_tokenInfos`), so a cold start converges over a few
   cycles. Matching runs on every read, so adding a template later recognises
   cached tokens without a migration.
 - Rate views are read in one `withBscClient` callback (viem multicall) for the
-  graduated Four.Meme rows read this cycle.
+  graduated Four.Meme rows read this cycle. A token with any failed read is left
+  out (reported `null`, retried next cycle), never answered partially; if nothing
+  answered, the read throws so the next endpoint is tried.
 
 ## 6. Out of scope
 

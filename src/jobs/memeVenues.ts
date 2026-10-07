@@ -55,6 +55,8 @@ export const VENUE_READS_PER_CYCLE = 400;
 export const DIVIDEND_READS_PER_CYCLE = 200;
 /** Ceiling on Four.Meme code-identity reads (one `eth_getCode` each) per cycle. */
 export const CODE_READS_PER_CYCLE = 100;
+/** Time box for the identity reads, so a slow RPC day cannot spend the whole board cycle on them. */
+const CODE_PHASE_MS = 10_000;
 
 export interface CachedVenue extends MemeVenueInfo {
   launchpad: MemeLaunchpad;
@@ -62,6 +64,12 @@ export interface CachedVenue extends MemeVenueInfo {
   dividendCheckedAt?: number;
   /** Four.Meme only: code identity and creator type, permanent once read; absent until then. */
   fourmemeCode?: FourMemeCode;
+  /**
+   * Four.Meme only: the `checkedAt` of the last cycle whose rate read answered
+   * (even with a rate this plane will not publish). Equal to `checkedAt` means
+   * a `null` tax is an answer, not a failed read, so it is not retried every cycle.
+   */
+  fourmemeTaxReadAt?: number;
 }
 
 export type DividendReader = (addresses: readonly string[], signal?: AbortSignal) => Promise<Map<string, FlapDividend>>;
@@ -82,12 +90,14 @@ export function refreshAfterMs(entry: CachedVenue, status: MemeStatus | undefine
 
 /**
  * A graduated Four.Meme entry whose missing tax can still be answered: its
- * identity is unread, or it is a recognised template whose rate read failed. An
- * unrecognised template is not retried every cycle.
+ * identity is unread, or it is a recognised template whose rate read failed in
+ * its last venue cycle. An unrecognised template, or one whose rates answered
+ * out of range, is not retried every cycle.
  */
 function fourMemeTaxPending(entry: CachedVenue): boolean {
   if (entry.launchpad !== "fourmeme" || entry.venue !== "pancake-v2" || entry.tax !== null) return false;
-  return entry.fourmemeCode === undefined || matchFourMemeTemplate(entry.fourmemeCode) !== null;
+  if (entry.fourmemeCode === undefined) return true;
+  return matchFourMemeTemplate(entry.fourmemeCode) !== null && entry.fourmemeTaxReadAt !== entry.checkedAt;
 }
 
 export function venueFromState(state: LaunchpadState, now: number, previous: CachedVenue | undefined): MemeVenueInfo {
@@ -201,12 +211,13 @@ async function applyFourMemeTax(
   const unread = graduated.filter((address) => next.get(address)!.fourmemeCode === undefined).slice(0, CODE_READS_PER_CYCLE);
   if (unread.length > 0) {
     try {
-      const codes = await options.readFourMemeCodes(unread, options.signal);
+      const codes = await options.readFourMemeCodes(unread, AbortSignal.any([options.signal, AbortSignal.timeout(CODE_PHASE_MS)]));
       for (const address of unread) {
         const entry = next.get(address);
         const fourmemeCode = codes.get(address);
         if (entry !== undefined && fourmemeCode !== undefined) next.set(address, { ...entry, fourmemeCode });
       }
+      if (codes.size < unread.length) failures.push(`fourmeme code: ${unread.length - codes.size} of ${unread.length} unread`);
     } catch (error) {
       failures.push(`fourmeme code: ${sanitizeMessage(error)}`);
     }
@@ -225,10 +236,17 @@ async function applyFourMemeTax(
       failures.push(`fourmeme tax: ${sanitizeMessage(error)}`);
     }
   }
+  const unanswered = items.filter((item) => !taxes.has(item.address)).length;
+  if (unanswered > 0 && unanswered < items.length) failures.push(`fourmeme tax: ${unanswered} of ${items.length} unread`);
   for (const address of graduated) {
     const entry = next.get(address)!;
     const read = taxes.get(address);
-    next.set(address, { ...entry, tax: read?.tax ?? null, pool: read?.pool ?? null });
+    if (read === undefined) {
+      next.set(address, { ...entry, tax: null, pool: null });
+      continue;
+    }
+    if (read.tax === null) failures.push(`fourmeme tax: rate out of range on ${address}`);
+    next.set(address, { ...entry, tax: read.tax, pool: read.pool, fourmemeTaxReadAt: entry.checkedAt });
   }
   return failures;
 }
@@ -256,6 +274,7 @@ async function readVenueCache(store: SnapshotStore): Promise<Map<string, CachedV
       checkedAt: entry.checkedAt,
       ...(typeof entry.dividendCheckedAt === "number" ? { dividendCheckedAt: entry.dividendCheckedAt } : {}),
       ...(isFourMemeCode(entry.fourmemeCode) ? { fourmemeCode: entry.fourmemeCode } : {}),
+      ...(typeof entry.fourmemeTaxReadAt === "number" ? { fourmemeTaxReadAt: entry.fourmemeTaxReadAt } : {}),
     });
   }
   return out;

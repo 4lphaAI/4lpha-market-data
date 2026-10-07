@@ -94,11 +94,11 @@ Rounding: the fee is floored, so the measured ratio reads 99.99 bps on most 1% t
 
 ## 3. Can the owner change the rate after launch? (question 4)
 
-No setter was found, and after graduation there is no owner to call one.
+Short answer: no rate setter was found, and after graduation the owner is the zero address, so no `Ownable` setter could be called. That is strong evidence, not a proof: four selectors stay unnamed (below). Treat the rate as re-readable, not as immutable.
 
-- **No rate setter in any template.** Four.meme's published ABIs (`abi/TaxToken*.lite.json`) list one owner-only write, `setMode(uint256)`. I resolved the function selectors in every template's bytecode against those ABIs and the public signature database. The owner-gated writes on the `0x7330` implementation are `setMode`, `setMigratedPool(address,bool)` and `setMigratedPools(address[],bool)` (each answers "Ownable: caller is not the owner" to a stranger); `sendFee`, `postMigrate` and friends answer "Not allowed". Nothing named like a rate setter exists. Four.meme's tax docs: "All parameters are locked at creation".
-- **The owner is TokenManager2 on the curve and the zero address after graduation.** Across the board census every graduated tax token (mode 0, `pair()` set) read `owner() == 0x0000...0000`, and every curve token (mode 1) read `owner() == 0x5c95...762b`.
-- **Not fully closed:** two selectors exist only on the `0x2812` and `0xe506` implementations (`0x38fee856`, `0x66004614`) and two on `0x7330` (`0x3aa67de4` answers a value of 0, `0x1d54d277` reverts with no data on empty arguments). I could not name them. Four.meme's docs also mention "tax expiration" for one launch mode (Universal Subscription). So the plane re-reads the rates rather than caching them: every 30 minutes for a graduated token, every cycle while it is on OKX's hot list. `venueCheckedAt` tells you how old the reading is.
+- **No rate setter found in any template.** Four.meme's published ABIs (`abi/TaxToken*.lite.json`) list one owner-only write, `setMode(uint256)`. I resolved the function selectors in every template's bytecode against those ABIs and the public signature database. The owner-gated writes on the `0x7330` implementation are `setMode`, `setMigratedPool(address,bool)` and `setMigratedPools(address[],bool)` (each answers "Ownable: caller is not the owner" to a stranger); `sendFee`, `postMigrate` and friends answer "Not allowed". Nothing named like a rate setter exists. Four.meme's tax docs: "All parameters are locked at creation".
+- **The owner is TokenManager2 on the curve and the zero address after graduation.** Board census 2026-10-07 (`node --import tsx scripts/fourmeme-tax-evidence.ts census <board.json>`, which groups by creator type, code identity, `owner()` and `_mode`): all 31 tax tokens in mode 0 (graduated) read `owner() == 0x0`; all 161 tax tokens in mode 1 (on the curve) read `owner() == 0x5c95...762b`. The same census shows one bytecode hash per non-proxy group. Ownership after graduation only rules out `Ownable` setters, not a setter gated some other way.
+- **What stays open:** two selectors exist only on the `0x2812` and `0xe506` implementations (`0x38fee856`, `0x66004614`) and two on `0x7330` (`0x3aa67de4` answers a value of 0, `0x1d54d277` reverts with no data on empty arguments). I could not name them. Four.meme's docs also mention "tax expiration" for one launch mode (Universal Subscription). So the plane re-reads the rates rather than caching them: every 30 minutes for a graduated token, every cycle while it is on OKX's hot list. `venueCheckedAt` tells you how old the reading is.
 
 ## 4. What the rows carry now
 
@@ -111,21 +111,36 @@ On `/memes`, `/memes/:address` and every `/memes/shortlist` segment, for a Four.
 | `pool` | `null` | the token's `pair()` for tax templates (the pair the tax is charged on); `null` for plain templates | `null` |
 | `venueCheckedAt` | time of the venue read | time of the read that produced venue, tax and pool together | same |
 
-Fail-closed rules, all tested:
+Fail-closed rules (each pinned by a test; the readers are tested against a local JSON-RPC stub):
 
 - An unknown code identity, a creator-type mismatch, or a token TokenManager2 does not hold: `null`.
 - A reverted rate view, or a rate out of range (above 10% for types 8 and 9, above 1000 bps for type 5): `null`. `feeRate()` is never used in place of the buy and sell rates.
 - A timeout or transport failure on the rate read: `null` **with that cycle's stamp**, never the previous rate under a new stamp. The token is retried next cycle rather than in 30 minutes.
-- The code identity and creator type are read once per token and kept (they cannot change); a failed identity read is never stored.
+- The code identity and creator type are read once per token and kept (they cannot change); a failed identity read is never stored. Any TokenManager2 error counts as a failed read, because viem reports an overloaded node's JSON-RPC -32603 as a contract revert, and TokenManager2 answers a token it does not hold with a zero struct rather than a revert (found in the audit, see section 6).
+- A recognised template whose rates answer out of range is `null` and logged, and waits for the 30 minute cadence instead of being re-read every cycle.
 
 **Curve rows stay `null` on purpose.** Four.meme documents that types 8 and 9 also charge their tax on the bonding curve, but as a quote-side fee taken inside TokenManager2, not as a token transfer fee, and an anti-sniper fee can be added in the first blocks. I did not prove either on chain, and you only take graduated Four.meme rows, so a curve row says "unknown". Ask if you want this, and it gets its own proof.
 
 Notes for your cost rule:
 
 - The tax is charged on transfers to and from the token's own V2 pair (`pair()`, now in `pool`). Every proof transaction swapped on that pair. A route through some other pool for the same token is outside what was measured.
+- `venueCheckedAt` is the age of the tax reading. Because a rate change cannot be ruled out completely (section 3), and a Four.meme launch mode documents a "tax expiration", please honour that age in your screen; a graduated row is re-read every 30 minutes, a hot one every cycle. If a tax expired between reads, the published tax is too high, so the error makes a trade look dearer, not cheaper.
+- The token has `setMigratedPool(s)`, so other pools could be flagged as taxed pairs. Routes through any pool other than `pair()` were not measured.
 - Several sells went through an aggregator (`0x07964f13...45000000`, `0xb300000b...19c7028d`). The tax was still taken on the hop into the pair, at the same rate.
 
 ## 5. Not changed
 
 - Flap rows, `/eligibility`.
 - The `/memes` and shortlist shapes: `tax` and `pool` were already on the rows and are now filled for Four.meme. No new fields.
+
+## 6. Process
+
+Spec `FOURMEME-TAX-SPEC.md`, build on branch `fourmeme-tax`, independent audit (Opus 5.5), fix round.
+
+- Audit verdict: **SHIP WITH RESIDUALS**. It found no path to a wrong non-null tax. It re-derived from chain, independently: the identity of `0x48d8...ffff` (type 9, clone of `0x7330...`), the plain hash of `0xeccb...4444`, the TokenManager2 struct layout (13 words; an unknown token answers all zeros), and the units from the `0xa87e` and `0xb29d` receipts.
+- **M1 (fixed):** a JSON-RPC -32603 from an overloaded node reached the identity reader as a "revert" and would have been cached forever as "TokenManager2 does not hold this token", leaving that token `null` while tracked. Every TokenManager2 error is now a failed read, an empty code read is not kept, and a reader test reproduces the -32603 case (it fails against the old code).
+- **L1 (fixed):** the rate reader now drops a token whose reads failed, rather than answering a tax with `pool: null`. It throws when nothing answered, so the next endpoint gets a turn.
+- **L2 (fixed):** a rate answered out of range is logged and not re-read every cycle.
+- **L3 (fixed):** identity reads are time-boxed at 10 s per cycle.
+- **L4 (fixed):** reader tests added: -32603, empty code, partial failure, nothing answered, plain template.
+- Open, outside this change: the shared `isContractLevelFailure` in `src/chain/rpc.ts` has the same -32603 blind spot for other callers (for example the Flap lane). Tracked separately.
