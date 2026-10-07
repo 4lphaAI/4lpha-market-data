@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { normalizeSintralMinuteBars, type MemeRushRow, type SintralMinuteBar } from "../src/adapters/binanceWeb3.js";
 import { AdapterError } from "../src/adapters/http.js";
 import type { TokenActivity } from "../src/adapters/onchainos.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore, PostgresStore } from "../src/core/store.js";
 import { FakePg } from "./fakePg.js";
-import { MEME_BOARD_KEY } from "../src/jobs/memeBoard.js";
+import { BOARD_PHASE_MS, BOARD_HELD_WRITE_MS, BOARD_WRITE_DEADLINE_MS, MEME_BOARD_KEY, holdOutsideReadWindow, memeBoardJob, msUntilBoardRun } from "../src/jobs/memeBoard.js";
+import { buildShortlist, parseShortlistQuery } from "../src/query/memeQuery.js";
+import { loadStockInfo } from "../src/query/memeStocks.js";
 import {
   LEAVE_AFTER_MS,
   MEME_BARS_CAP,
@@ -14,6 +16,7 @@ import {
   MEME_BARS_KEEP,
   MEME_BARS_LEASE,
   SETTLE_MS,
+  SHORTLIST_RETRY_MS,
   BARS_DEAD_MS,
   UNKNOWN_RETRY_MS,
   backoffMs,
@@ -223,6 +226,11 @@ async function series(store: MemoryStore, address: string): Promise<BarSeries | 
   return (await store.get<BarSeries>(memeBarsKey(address)))?.data ?? null;
 }
 
+/** The quote stock reads closed: its meme stocks stay live on the board but leave the memestock shortlist. */
+async function closeQuote(store: MemoryStore): Promise<void> {
+  await store.put(RWA_UNIVERSE_KEY, { rows: [{ address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", tokenPriceUsd: 235, openState: false }] }, TTL);
+}
+
 describe("runMemeBars", () => {
   it("backfills each live meme stock on entry, closed minutes only, then reads incrementally", async () => {
     const h = await harness();
@@ -390,8 +398,9 @@ describe("bars audit round", () => {
     assert.equal(await series(h.store, addr(1)), null, "the key is gone");
   });
 
-  it("asks Sintral about a token it does not know only every 10 minutes", async () => {
+  it("asks Sintral about a token it does not know only every 10 minutes when it is not shortlisted", async () => {
     const h = await harness([row(7)]);
+    await closeQuote(h.store); // live on the board, off the memestock shortlist
     await h.run();
     await h.run(); // same minute: up to date
     h.clock.now += MIN;
@@ -485,5 +494,113 @@ describe("bars latency (MEME-BARS-LATENCY-HANDOFF)", () => {
     assert.equal(countCorrections(previous, later.bars), 2);
     assert.equal(countCorrections(previous, previous.bars), 0);
     assert.equal(countCorrections(null, later.bars), 0);
+  });
+});
+
+describe("bars retry and board phase (2026-10-07)", () => {
+  it("re-asks a shortlisted token every cycle while Sintral answers nothing, and serves its bars the minute they appear", async () => {
+    const h = await harness([row(7)]); // shortlisted; Sintral knows nothing yet
+    await h.run();
+    assert.equal(h.asked.length, 1);
+    assert.deepEqual((await series(h.store, addr(7)))!.bars, []);
+    h.clock.now += MIN;
+    await h.store.put(MEME_BOARD_KEY, [row(7)], TTL);
+    await h.run();
+    assert.equal(h.asked.length, 2, "asked again one minute later, not ten");
+    h.upstream.set(addr(7), [bar(NOW, 2), bar(NOW + MIN, 3)]);
+    h.clock.now += MIN;
+    await h.store.put(MEME_BOARD_KEY, [row(7)], TTL);
+    await h.run();
+    assert.equal(h.asked.length, 3);
+    assert.deepEqual((await series(h.store, addr(7)))!.bars.map((b) => [b[4], b[7]]), [[2, 0], [3, 0], [3, 1]]);
+  });
+
+  it("keeps re-asking for 15 minutes after the token leaves the shortlist, then falls back to every 10 minutes", async () => {
+    const h = await harness([row(7)]);
+    const shortlistedAt = h.clock.now;
+    await h.run();
+    await closeQuote(h.store); // still live on the board, off the shortlist from here on
+    const minute = async () => {
+      h.clock.now += MIN;
+      await h.store.put(MEME_BOARD_KEY, [row(7)], TTL);
+      await h.run();
+    };
+    while (h.clock.now - shortlistedAt < SHORTLIST_RETRY_MS) await minute();
+    assert.equal(h.asked.length, 16, "every minute through the 15-minute tail");
+    const index = (await h.store.get<BarsIndex>(MEME_BARS_INDEX_KEY))!.data;
+    assert.equal(index.tokens[addr(7)]?.shortlistedAt, shortlistedAt, "the shortlist time survives the index round trip");
+    for (let i = 0; i < 9; i++) await minute();
+    assert.equal(h.asked.length, 16, "past the tail: the 10-minute retry");
+    await minute();
+    assert.equal(h.asked.length, 17);
+  });
+
+  it("still backs the whole job off when a re-asked shortlisted token hits a 429", async () => {
+    const h = await harness([row(7)]);
+    await h.run();
+    h.clock.now += MIN;
+    await h.store.put(MEME_BOARD_KEY, [row(7)], TTL);
+    h.failWith(() => new AdapterError("binance", "upstream responded 429", 429));
+    await assert.rejects(h.run());
+    const index = (await h.store.get<BarsIndex>(MEME_BARS_INDEX_KEY))!.data;
+    assert.equal(index.backoff?.streak, 1);
+    const asked = h.asked.length;
+    h.failWith(() => null);
+    h.clock.now += MIN;
+    await h.store.put(MEME_BOARD_KEY, [row(7)], TTL);
+    assert.equal((await h.run()).skipped, "backoff");
+    assert.equal(h.asked.length, asked, "no re-ask while backing off");
+  });
+
+  it("runs the board at :08; a write is never between :19 and :26, and a held one lands before the next :20", () => {
+    const spec = memeBoardJob(new MemoryStore());
+    assert.equal(spec.nextDelayMs, msUntilBoardRun);
+    for (let at = NOW; at < NOW + 2 * MIN; at += 250) assert.equal((at + msUntilBoardRun(at)) % MIN, BOARD_PHASE_MS);
+    assert.ok(BOARD_PHASE_MS < BOARD_WRITE_DEADLINE_MS && BOARD_WRITE_DEADLINE_MS < SETTLE_MS, "an on-time write lands before the bars selection");
+    assert.ok(BOARD_HELD_WRITE_MS > 25_000, "a held write lands after the execution plane's :25 read");
+    assert.ok(BOARD_PHASE_MS + spec.timeoutMs < MIN + SETTLE_MS, "and, inside the timeout, before the next bars selection");
+  });
+
+  it("holds a write that is ready between :19 and :26 until :26, and lets every other one through at once", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      for (let offset = 0; offset < MIN; offset += 250) {
+        let settled: boolean | null = null;
+        const hold = holdOutsideReadWindow(NOW + offset, new AbortController().signal).then((held) => (settled = held));
+        await new Promise((resolve) => setImmediate(resolve));
+        if (offset < BOARD_WRITE_DEADLINE_MS || offset >= BOARD_HELD_WRITE_MS) {
+          assert.equal(settled, false, `ready at +${offset} ms: written at once`);
+          continue;
+        }
+        mock.timers.tick(BOARD_HELD_WRITE_MS - offset - 1);
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(settled, null, `ready at +${offset} ms: still held 1 ms before :26`);
+        mock.timers.tick(1);
+        assert.equal(await hold, true, `ready at +${offset} ms: written at :26`);
+      }
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  it("serves bars at the :25 read for a token the board admitted at the latest possible write (:19)", async () => {
+    const h = await harness([row(1)]);
+    const minute = NOW + MIN;
+    h.clock.now = minute - MIN + SETTLE_MS; // the previous bars selection
+    await h.run();
+    assert.equal(await series(h.store, addr(1)) !== null, true);
+    h.clock.now = minute + BOARD_WRITE_DEADLINE_MS - 1; // the board admits addr(8) just before its deadline
+    await h.store.put(MEME_BOARD_KEY, [row(1), row(8)], TTL);
+    h.upstream.set(addr(8), [bar(NOW, 4)]);
+    h.clock.now = minute + SETTLE_MS; // this minute's bars selection
+    await h.run();
+    h.clock.now = minute + 25_000; // the execution plane reads the shortlist, then the bars
+    const board = (await h.store.get<MemeBoardRow[]>(MEME_BOARD_KEY))!.data;
+    const shortlist = buildShortlist(board, parseShortlistQuery((name) => (name === "segment" ? "memestock" : undefined)), h.clock.now, await loadStockInfo(h.store));
+    assert.ok(shortlist.rows.some((r) => r.address === addr(8)), "on the lane's shortlist");
+    const view = await readMemeBars(h.store, addr(8), 60, await readTrackedSet(h.store));
+    assert.equal(view.tracked, true);
+    assert.equal(view.staleness, "fresh");
+    assert.deepEqual(view.bars.map((b) => b.close), [4]);
   });
 });

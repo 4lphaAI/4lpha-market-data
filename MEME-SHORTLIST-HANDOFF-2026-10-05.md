@@ -16,7 +16,7 @@ Measured from a residential IP 2026-10-05: 283–322 ms, 15.0–15.1 KB.
 
 ## How fresh it is
 
-- The board behind it is rebuilt **every ~60 s** (the `meme-board` job: 60 s ± 5 s jitter, ~2–5 s per cycle). The shortlist itself is computed **at request time** from the latest board. Two calls in the same minute return the same list; the next minute may differ.
+- The board behind it is rebuilt **every ~60 s** (the `meme-board` job: starts at second 8 of every minute, ~2–7 s per cycle, and never writes between second 19 and second 26: a run not ready by :19 writes at :26; changed 2026-10-07). The shortlist itself is computed **at request time** from the latest board. Two calls in the same minute return the same list; the next minute may differ.
 - `meta.asOf` = when the board was built (epoch ms). `meta.staleness` = `fresh` under 3 min, `stale` 3–30 min (the job is failing), `dead` past 30 min.
 - **Refuse to trade unless `meta.staleness === "fresh"`.** The shortlist still answers when the board is old and only says so in `meta`; it does not empty itself.
 - Each row's `observedAt` is when OKX observed that token's trade numbers.

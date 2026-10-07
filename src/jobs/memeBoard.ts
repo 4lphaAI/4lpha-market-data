@@ -124,6 +124,8 @@ export interface RunMemeBoardOptions {
   readFourMemeTaxes?: FourMemeTaxReader | undefined;
   readIssuer?: IssuerReader | undefined;
   now?: (() => number) | undefined;
+  /** Awaited right before the board and its state are written (the job's write window). */
+  holdWrite?: ((signal: AbortSignal) => Promise<void>) | undefined;
 }
 
 export async function runMemeBoard(
@@ -341,6 +343,11 @@ export async function runMemeBoard(
   }
   state.tracked = nextTracked;
 
+  // The job holds a late write past the execution plane's read (see BOARD_PHASE_MS).
+  if (options.holdWrite !== undefined) await options.holdWrite(signal);
+  // A run past its timeout writes neither the board nor its state (the venue and
+  // quote-kind caches written above are kept: they let a slow backlog drain).
+  signal.throwIfAborted();
   await store.put(MEME_STATE_KEY, state, {
     source: MEME_BOARD_JOB,
     freshForMs: BOARD_FRESH_MS,
@@ -512,19 +519,80 @@ async function readBoard(store: SnapshotStore): Promise<Map<string, MemeBoardRow
   return out;
 }
 
-/** Job registration for the scheduler. */
-export function memeBoardJob(store: SnapshotStore): JobSpec {
+/**
+ * The board run starts this long after every minute boundary. A board is never
+ * written between {@link BOARD_WRITE_DEADLINE_MS} and {@link BOARD_HELD_WRITE_MS}
+ * of a minute: a run ready by second 19 writes at once (about :10-:15, before the
+ * `meme-bars` selection at :20); a later one holds its write until second 26,
+ * after the execution plane's shortlist and bars reads at :25, and the next :20
+ * selection picks it up. Either way a token the lane sees on the shortlist was on
+ * the board the bars job selected from (2026-10-07).
+ */
+export const BOARD_PHASE_MS = 8_000;
+/** From this offset of a minute a board write is held ... */
+export const BOARD_WRITE_DEADLINE_MS = 19_000;
+/** ... until this offset, after the execution plane's :25 read. */
+export const BOARD_HELD_WRITE_MS = 26_000;
+
+/** Delay from `now` to the next board run: {@link BOARD_PHASE_MS} after the next minute boundary. */
+export function msUntilBoardRun(now: number): number {
+  let target = Math.floor(now / 60_000) * 60_000 + BOARD_PHASE_MS;
+  // Half a second of slack so a run that fires a little early does not schedule itself again at once.
+  if (target <= now + 500) target += 60_000;
+  return target - now;
+}
+
+/**
+ * Exported for tests: resolves `false` at once when `now` is outside
+ * [{@link BOARD_WRITE_DEADLINE_MS}, {@link BOARD_HELD_WRITE_MS}) of its minute,
+ * else `true` at {@link BOARD_HELD_WRITE_MS}; rejects when `signal` aborts first.
+ */
+export function holdOutsideReadWindow(now: number, signal: AbortSignal): Promise<boolean> {
+  const offset = now % 60_000;
+  if (offset < BOARD_WRITE_DEADLINE_MS || offset >= BOARD_HELD_WRITE_MS) return Promise.resolve(false);
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve(true);
+    }, BOARD_HELD_WRITE_MS - offset);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Job registration for the scheduler. `options` is a test seam; production passes none. */
+export function memeBoardJob(store: SnapshotStore, options: RunMemeBoardOptions = {}): JobSpec {
+  const clock = options.now ?? Date.now;
   return {
     name: MEME_BOARD_JOB,
     intervalMs: 60_000,
+    // First run only; after that the board runs on its phase.
     jitterMs: 5_000,
+    nextDelayMs: msUntilBoardRun,
     // Six Meme Rush lists, four hot rankings, up to eight 100-token price-info batches,
     // one signal call, two smart-money inflow ranks,
     // and at most one batched issuer read for quote tokens never seen before.
     timeoutMs: 45_000,
     run: async (signal) => {
-      await runMemeBoard(store, signal);
+      const startedAt = clock();
+      let readyMs = 0;
+      let held = false;
+      const result = await runMemeBoard(store, signal, {
+        ...options,
+        holdWrite: async (s) => {
+          readyMs = clock() - startedAt;
+          held = await holdOutsideReadWindow(clock(), s);
+        },
+      });
+      // Every cycle, so the time a run needs (and how often it misses :19) is measured.
+      console.log(`[${MEME_BOARD_JOB}] rows=${result.rows} readyMs=${readyMs}${held ? " held_to=:26" : ""}`);
     },
   };
 }
-
