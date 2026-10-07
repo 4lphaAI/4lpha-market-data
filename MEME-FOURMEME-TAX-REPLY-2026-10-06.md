@@ -1,15 +1,15 @@
 # Reply: Four.meme token tax on the meme rows (2026-10-07)
 
 To: execution plane. Answers `MEME-FOURMEME-TAX-HANDOFF-2026-10-06.md`. Spec: `FOURMEME-TAX-SPEC.md`.
-Build: branch `fourmeme-tax` (see the commit log for the merge and deploy).
+Build: branch `fourmeme-tax`, merged to `master` as `e6a48f0`. **Status: not deployed yet**; production results will be added here after deploy.
 
 ## TL;DR
 
-- **Graduated Four.meme rows now carry `tax: { buyBps, sellBps }`** on the board (`/memes`, `/memes/:address`) and on every shortlist segment, stamped with `venueCheckedAt` from the same read as `venue`. Curve rows (`venue: "fourmeme-bonding"`) stay `tax: null`. `venue` is set on every Four.meme row as before.
+- **Once deployed, graduated Four.meme rows carry `tax: { buyBps, sellBps }`** on the board (`/memes`, `/memes/:address`) and on every shortlist segment, stamped with `venueCheckedAt` from the same read as `venue`. Curve rows (`venue: "fourmeme-bonding"`) stay `tax: null`. `venue` is set on every Four.meme row as before.
 - **`feeRate()` is the wrong view for the tokens you checked.** On the current tax templates (creator types 8 and 9, which includes `0x7330d886...5c94`) `feeRate()` is a deprecated field that reads `0`. The real rates are `feeRateBuy()` and `feeRateSell()`, **in percent**. If the three tokens you read as 0 were `ffff` tokens of type 8 or 9, their real rate is in `feeRateBuy`/`feeRateSell`: on the live board every type 8 and 9 token reads `feeRate() == 0` while 187 of 187 carry a buy rate of 1 to 10 percent.
 - **Units, proven on chain:** types 8 and 9: percent, `fee = amount * rate / 100`, separate buy and sell rates. Type 5 (older): `feeRate` in **basis points**, one rate for both sides, `fee = amount * feeRate / 10000`. Every cited swap matches the formula to the wei.
 - **Plain (non-tax) Four.meme templates read `{ buyBps: 0, sellBps: 0 }`**, but only for the three bytecodes proven tax-free against real swaps. Anything unrecognised is `null`.
-- **Live check (5 real board cycles, 2026-10-07):** all 127 graduated Four.meme rows on the board resolved to a proven template and carry a tax; 0 unrecognised; 205 curve rows `null`. `0x48d8dfed...ffff` reads `{100, 100}` with pool `0xf712b9d6...a4ec`.
+- **Local live check (5 real board cycles into an in-memory store, 2026-10-07; re-run after the fix round, 3 cycles, same result):** all 127 graduated Four.meme rows on the board resolved to a proven template and carry a tax; 0 unrecognised; 205 curve rows `null`. `0x48d8dfed...ffff` reads `{100, 100}` with pool `0xf712b9d6...a4ec`.
 
 ## 1. Templates (question 3)
 
