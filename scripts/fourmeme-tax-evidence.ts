@@ -6,6 +6,7 @@
  *   node --import tsx scripts/fourmeme-tax-evidence.ts okx-notax <token>
  *   node --import tsx scripts/fourmeme-tax-evidence.ts swaps <token> [blocks]   (hashes from a log scan)
  *   node --import tsx scripts/fourmeme-tax-evidence.ts swaps-notax <token> [blocks]
+ *   node --import tsx scripts/fourmeme-tax-evidence.ts curve <token> [blocks | txhash...]   (trades on the bonding curve)
  *
  * `census`: TokenManager2 `_tokenInfos(token).template` creator type
  * (`(template >> 10) & 0x3F`) against the code identity (clone target, or size
@@ -17,6 +18,16 @@
  * and one sell are proven: the token's Transfer legs, the fee legs (sent to the
  * token contract), the pair's own Swap amounts, and the fee the views predict.
  * `-notax` looks for plain swaps with no fee leg at all instead.
+ *
+ * `curve` judges trades on the bonding curve (FOURMEME-CURVE-PAPER-SPEC 5.1),
+ * where TokenManager2 is the counterparty and the tax is paid in the quote token:
+ * a transaction counts only when it carries exactly one TokenManager2
+ * `TokenPurchase`/`TokenSale` for the token, its `fee` is `floor(cost / 100)`,
+ * the quote Transfer from TokenManager2 to the token is `floor(cost x rate / 100)`
+ * (no such Transfer at all when the token has no rate views), and the whole quote
+ * movement adds up to the wei: on a buy `cost + fee + tax` into TokenManager2
+ * and `fee + tax` out of it; on a sell nothing in, `cost` out, of which
+ * `cost - fee - tax` to the seller. An unaccounted fee shows as a shortfall.
  */
 
 import { readFileSync } from "node:fs";
@@ -209,6 +220,100 @@ async function prove(facts: TokenFacts, hashes: Iterable<string>, expectZero: bo
   console.log(`   proven: buy=${found.buy} sell=${found.sell} (${tried} transactions judged)`);
 }
 
+const curveTradeAbi = parseAbi([
+  "event TokenPurchase(address token, address account, uint256 price, uint256 amount, uint256 cost, uint256 fee, uint256 offers, uint256 funds)",
+  "event TokenSale(address token, address account, uint256 price, uint256 amount, uint256 cost, uint256 fee, uint256 offers, uint256 funds)",
+]);
+
+interface CurveFacts {
+  token: `0x${string}`;
+  quote: string;
+  /** `feeRateBuy` / `feeRateSell` in percent; `null` when the view reverts (no-tax template). */
+  rateBuy: bigint | null;
+  rateSell: bigint | null;
+}
+
+async function readCurveFacts(token: `0x${string}`): Promise<CurveFacts> {
+  return withBscClient(async (client) => {
+    const [info, code, buy, sell] = await Promise.all([
+      client.readContract({ address: TM2, abi: tm2Abi, functionName: "_tokenInfos", args: [token] }),
+      client.getCode({ address: token }),
+      client.readContract({ address: token, abi: tokenAbi, functionName: "feeRateBuy" }).catch(() => null),
+      client.readContract({ address: token, abi: tokenAbi, functionName: "feeRateSell" }).catch(() => null),
+    ]);
+    const creatorType = info.base.toLowerCase() === token.toLowerCase() ? String((info.template >> 10n) & 0x3fn) : "not held";
+    const identity = proxyTarget(code ?? "0x") ?? `hash:${keccak256((code ?? "0x") as `0x${string}`)}`;
+    console.log(`token ${token} creatorType=${creatorType} code=${identity} quote=${info.quote.toLowerCase()} feeRateBuy=${buy ?? "revert"} feeRateSell=${sell ?? "revert"}`);
+    return { token, quote: info.quote.toLowerCase(), rateBuy: buy, rateSell: sell };
+  });
+}
+
+/** One curve trade, judged from its receipt (see the header). Returns the side it proved, or null. */
+async function judgeCurve(facts: CurveFacts, hash: `0x${string}`): Promise<"buy" | "sell" | null> {
+  const tokenLc = facts.token.toLowerCase();
+  const tm2 = TM2.toLowerCase();
+  const receipt = await withBscClient((client) => client.getTransactionReceipt({ hash }));
+  if (receipt.status !== "success") return null;
+  const trades: { side: "buy" | "sell"; token: string; account: string; cost: bigint; fee: bigint }[] = [];
+  const legs: Leg[] = [];
+  for (const log of receipt.logs) {
+    const address = log.address.toLowerCase();
+    if (address === tm2) {
+      try {
+        const { eventName, args } = decodeEventLog({ abi: curveTradeAbi, data: log.data, topics: log.topics });
+        trades.push({ side: eventName === "TokenPurchase" ? "buy" : "sell", token: args.token.toLowerCase(), account: args.account.toLowerCase(), cost: args.cost, fee: args.fee });
+      } catch {
+        // another TokenManager2 event
+      }
+    } else if (address === facts.quote && log.topics[0] === TRANSFER_TOPIC) {
+      const { args } = decodeEventLog({ abi: [transferEvent], data: log.data, topics: log.topics });
+      legs.push({ from: args.from.toLowerCase(), to: args.to.toLowerCase(), value: args.value });
+    }
+  }
+  if (trades.length !== 1 || trades[0]!.token !== tokenLc) return null; // single curve trades only
+  const { side, account, cost, fee } = trades[0]!;
+  const rate = side === "buy" ? facts.rateBuy : facts.rateSell;
+  const sum = (list: Leg[]) => list.reduce((s, l) => s + l.value, 0n);
+  const taxLegs = legs.filter((l) => l.from === tm2 && l.to === tokenLc);
+  const tax = sum(taxLegs);
+  const quoteIn = sum(legs.filter((l) => l.to === tm2 && l.from !== tm2));
+  const quoteOut = sum(legs.filter((l) => l.from === tm2 && l.to !== tm2));
+  const toSeller = sum(legs.filter((l) => l.from === tm2 && l.to === account));
+  const expectedTax = rate === null ? 0n : (cost * rate) / 100n;
+  const taxOk = rate === null ? taxLegs.length === 0 : tax === expectedTax;
+  const feeOk = fee === cost / 100n;
+  const movementOk =
+    side === "buy"
+      ? quoteIn === cost + fee + tax && quoteOut === fee + tax
+      : quoteIn === 0n && quoteOut === cost && toSeller === cost - fee - tax;
+  console.log(`${side} tx ${hash} block ${receipt.blockNumber}`);
+  for (const l of legs) console.log(`   quote Transfer ${l.from} -> ${l.to} ${l.value}`);
+  console.log(`   TokenManager2 ${side === "buy" ? "TokenPurchase" : "TokenSale"} account ${account} cost ${cost} fee ${fee} (${feeOk ? "= floor(cost / 100)" : "NOT floor(cost / 100)"})`);
+  console.log(`   tax leg ${tax} in ${taxLegs.length} Transfer(s); expected ${rate === null ? "no leg (no rate views)" : expectedTax}: ${taxOk ? "EXACT" : "MISMATCH"}`);
+  console.log(
+    side === "buy"
+      ? `   into TokenManager2 ${quoteIn} vs cost + fee + tax ${cost + fee + tax}; out ${quoteOut} vs fee + tax ${fee + tax}: ${movementOk ? "EXACT" : "MISMATCH"}`
+      : `   into TokenManager2 ${quoteIn} vs 0; out ${quoteOut} vs cost ${cost}; to seller ${toSeller} vs cost - fee - tax ${cost - fee - tax}: ${movementOk ? "EXACT" : "MISMATCH"}`,
+  );
+  return feeOk && taxOk && movementOk ? side : null;
+}
+
+async function proveCurve(facts: CurveFacts, hashes: Iterable<string>): Promise<void> {
+  const found = { buy: false, sell: false };
+  let tried = 0;
+  for (const hash of hashes) {
+    if (found.buy && found.sell) break;
+    tried += 1;
+    try {
+      const side = await judgeCurve(facts, hash as `0x${string}`);
+      if (side !== null && !found[side]) found[side] = true;
+    } catch {
+      // a receipt no endpoint served: try the next hash
+    }
+  }
+  console.log(`   proven: buy=${found.buy} sell=${found.sell} (${tried} transactions judged)`);
+}
+
 /** Candidate hashes from a trailing `eth_getLogs` scan over the token's Transfer logs. */
 async function scanHashes(token: `0x${string}`, maxBack: number): Promise<string[]> {
   const head = await withBscLogClient((client) => client.getBlockNumber());
@@ -253,6 +358,12 @@ async function okxHashes(token: string): Promise<string[]> {
 const [mode, arg, back] = process.argv.slice(2);
 if (mode === "census") {
   await census(arg!);
+} else if (mode === "curve" && arg !== undefined) {
+  const token = arg as `0x${string}`;
+  const rest = process.argv.slice(4);
+  const facts = await readCurveFacts(token);
+  if (facts.quote === "0x0000000000000000000000000000000000000000") console.log("   native quote: not judged");
+  else await proveCurve(facts, rest.length > 0 && rest.every((h) => /^0x[0-9a-fA-F]{64}$/.test(h)) ? rest : await scanHashes(token, Number(back ?? 2000)));
 } else if (mode !== undefined && arg !== undefined) {
   const token = arg as `0x${string}`;
   const expectZero = mode.endsWith("-notax");

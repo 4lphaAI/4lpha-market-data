@@ -209,8 +209,10 @@ export interface MemeVenueInfo {
   venue: LaunchpadVenue | null;
   /**
    * Token tax per direction in bps. Flap from its lens, at every stage. Four.Meme
-   * from the token itself, only once graduated and only for a template proven on
-   * chain (`query/fourmemeTax.ts`); a curve row or an unproven template is `null`.
+   * from the token itself, only for a template proven on chain
+   * (`query/fourmemeTax.ts`); a curve row carries a tax only for a template
+   * proven on the curve, and that tax can be up to 10 minutes older than
+   * `venueCheckedAt` (`jobs/memeVenues.ts`); an unproven template is `null`.
    */
   tax: { buyBps: number; sellBps: number } | null;
   /** Graduated PancakeSwap V2 pair: Flap from its lens, Four.Meme from a tax token's own `pair()`. */

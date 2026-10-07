@@ -98,7 +98,7 @@ export const PANCAKE_V2_ROUTER = "0x10ED43C718714eb63d5aA57B78B54704E256024E" as
 const SUPPORTED_TOKEN_MANAGER_VERSION = 2;
 
 /**
- * `getTokenInfo` returns a 12-field tuple. Only four fields are read, but the
+ * `getTokenInfo` returns a 12-field tuple. Only seven fields are read, but the
  * whole shape is declared because viem decodes positionally — a short ABI would
  * silently misalign every field after the first omission.
  */
@@ -189,6 +189,13 @@ export interface FourMemeState {
   launchTime: number;
   /** True once the curve has graduated and liquidity moved to PancakeSwap. */
   liquidityAdded: boolean;
+  /**
+   * Quote raised on the curve so far and the curve's graduation target, in
+   * quote-token atomic units, as decimal strings (uint256, JSON-safe like Flap's
+   * `progress`): words 9 and 10 of the same `getTokenInfo` answer.
+   */
+  funds: string;
+  maxFunds: string;
 }
 
 /**
@@ -334,8 +341,8 @@ export interface ChainOutcomes {
   flap: FlapOutcome;
 }
 
-/** Reads Four.Meme state for one token, folding a revert into a definite "absent". */
-async function readFourMemeOn(client: BscClient, address: string): Promise<HelperOutcome> {
+/** Reads Four.Meme state for one token, folding a revert into a definite "absent". Exported for tests. */
+export async function readFourMemeOn(client: BscClient, address: string): Promise<HelperOutcome> {
   try {
     const info = await client.readContract({
       address: FOURMEME_HELPER,
@@ -351,6 +358,8 @@ async function readFourMemeOn(client: BscClient, address: string): Promise<Helpe
         quote: info[2].toLowerCase(),
         launchTime: Number(info[6]),
         liquidityAdded: info[11],
+        funds: info[9].toString(),
+        maxFunds: info[10].toString(),
       },
     };
   } catch (error) {
