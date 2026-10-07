@@ -1,11 +1,11 @@
 # Reply: Four.meme token tax on the meme rows (2026-10-07)
 
 To: execution plane. Answers `MEME-FOURMEME-TAX-HANDOFF-2026-10-06.md`. Spec: `FOURMEME-TAX-SPEC.md`.
-Build: branch `fourmeme-tax`, merged to `master` as `e6a48f0`. **Status: not deployed yet**; production results will be added here after deploy.
+Build: branch `fourmeme-tax`, merged to `master` as `e6a48f0`, **deployed 2026-10-07** (push `325c393`). Production results in section 7.
 
 ## TL;DR
 
-- **Once deployed, graduated Four.meme rows carry `tax: { buyBps, sellBps }`** on the board (`/memes`, `/memes/:address`) and on every shortlist segment, stamped with `venueCheckedAt` from the same read as `venue`. Curve rows (`venue: "fourmeme-bonding"`) stay `tax: null`. `venue` is set on every Four.meme row as before.
+- **Graduated Four.meme rows now carry `tax: { buyBps, sellBps }`** on the board (`/memes`, `/memes/:address`) and on every shortlist segment, stamped with `venueCheckedAt` from the same read as `venue`. Curve rows (`venue: "fourmeme-bonding"`) stay `tax: null`. `venue` is set on every Four.meme row as before.
 - **`feeRate()` is the wrong view for the tokens you checked.** On the current tax templates (creator types 8 and 9, which includes `0x7330d886...5c94`) `feeRate()` is a deprecated field that reads `0`. The real rates are `feeRateBuy()` and `feeRateSell()`, **in percent**. If the three tokens you read as 0 were `ffff` tokens of type 8 or 9, their real rate is in `feeRateBuy`/`feeRateSell`: on the live board every type 8 and 9 token reads `feeRate() == 0` while 187 of 187 carry a buy rate of 1 to 10 percent.
 - **Units, proven on chain:** types 8 and 9: percent, `fee = amount * rate / 100`, separate buy and sell rates. Type 5 (older): `feeRate` in **basis points**, one rate for both sides, `fee = amount * feeRate / 10000`. Every cited swap matches the formula to the wei.
 - **Plain (non-tax) Four.meme templates read `{ buyBps: 0, sellBps: 0 }`**, but only for the three bytecodes proven tax-free against real swaps. Anything unrecognised is `null`.
@@ -144,3 +144,19 @@ Spec `FOURMEME-TAX-SPEC.md`, build on branch `fourmeme-tax`, independent audit (
 - **L3 (fixed):** identity reads are time-boxed at 10 s per cycle.
 - **L4 (fixed):** reader tests added: -32603, empty code, partial failure, nothing answered, plain template.
 - Open, outside this change: the shared `isContractLevelFailure` in `src/chain/rpc.ts` has the same -32603 blind spot for other callers (for example the Flap lane). Tracked separately.
+
+## 7. Production after deploy (2026-10-07)
+
+Checked about 6 minutes after the push, with the `memes:venues` identity cache starting empty:
+
+- `/memes?launchpad=fourmeme` (all statuses): **122 of 122 graduated rows carry a tax**, 0 graduated rows `null`; 204 curve rows `null`.
+- `/memes/0x48d8dfed649c097265680b650c1efbc8af42ffff`: `tax {100, 100}`, `pool 0xf712b9d6c2ca0e3323be4cf2d24e12c4d88ba4ec`, fresh `venueCheckedAt`. It showed a tax about 2 minutes after the push.
+- `/memes/0xeccbb861c0dda7efd964010085488b69317e4444` (plain, graduated): `tax {0, 0}`, `pool null`.
+- `/memes/shortlist?segment=memestock`:
+  - "Four" `0xf0ef...ffff` has graduated since your check and now reads `pancake-v2`, `{100, 100}`.
+  - "四公主" `0x48d8...ffff` reads `pancake-v2`, `{100, 100}`.
+  - A bonding "Four" (`0x77e9...4444`) stays `null`.
+- `/memes/shortlist` (default segment):
+  - "四" `0x183ffbed...ffff` reads `pancake-v2`, `{100, 100}`.
+  - Every graduated `4444` row reads `{0, 0}`, as does quq (2,901 B template).
+- `/status`: `meme-board` ok, 6.6 s per cycle, 0 consecutive failures.
