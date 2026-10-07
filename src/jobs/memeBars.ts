@@ -35,8 +35,12 @@
  * backs the job off across cycles — 2, 4, 8, then 10 minutes while the host keeps
  * throttling — so a throttled host is not hit again at full width a minute later
  * (the skipped tokens age toward stale; nothing is invented). A token Sintral
- * does not know is asked again only every 10 minutes. Every cycle logs its call
- * count, failures and whether it was throttled.
+ * does not know is asked again only every 10 minutes, unless it is on the
+ * memestock shortlist or was within {@link SHORTLIST_RETRY_MS}: then it is asked
+ * every cycle, because the execution plane reads its bars every minute and
+ * Sintral's first answer for a new token can stay empty for minutes while the
+ * trades already exist (measured 2026-10-07). Every cycle logs its call count,
+ * failures and whether it was throttled.
  *
  * A token that leaves the tracked set keeps its series for {@link BARS_DEAD_MS}
  * (it reads `tracked: false`, its staleness ageing), then its key is deleted, so
@@ -93,6 +97,8 @@ export function backoffMs(streak: number): number {
 }
 /** A tracked token Sintral answered with no bar at all is asked again after this long. */
 export const UNKNOWN_RETRY_MS = 10 * MINUTE;
+/** A token with no bar yet that is shortlisted, or was this recently, is asked every cycle instead. */
+export const SHORTLIST_RETRY_MS = 15 * MINUTE;
 
 export const memeBarsKey = (address: string): string => `memes:bars:v1:${address.toLowerCase()}`;
 
@@ -123,6 +129,8 @@ interface IndexEntry {
   symbol: string;
   enteredAt: number;
   lastLiveAt: number;
+  /** When the token was last on the memestock shortlist, if it was while tracked. */
+  shortlistedAt?: number;
 }
 
 export interface BarsIndex {
@@ -297,7 +305,13 @@ export function selectTracked(
   const kept = ordered.slice(0, MEME_BARS_CAP);
   const tokens: Record<string, IndexEntry> = {};
   for (const c of kept) {
-    tokens[c.address] = { symbol: c.symbol, enteredAt: index.tokens[c.address]?.enteredAt ?? now, lastLiveAt: c.lastLiveAt };
+    const shortlistedAt = c.shortlisted ? now : index.tokens[c.address]?.shortlistedAt;
+    tokens[c.address] = {
+      symbol: c.symbol,
+      enteredAt: index.tokens[c.address]?.enteredAt ?? now,
+      lastLiveAt: c.lastLiveAt,
+      ...(shortlistedAt !== undefined ? { shortlistedAt } : {}),
+    };
   }
   return { tokens, candidates: ordered.length, capped: ordered.length > MEME_BARS_CAP };
 }
@@ -350,8 +364,10 @@ export async function runMemeBars(
       try {
         const previous = await readSeries(store, address);
         if (previous !== null && previous.lastClosedStartMs >= lastClosed && previous.bars.length > 0) continue;
-        // Sintral has never had a bar for it: ask again only now and then.
-        if (previous !== null && previous.bars.length === 0 && now - (previous.checkedAt ?? 0) < UNKNOWN_RETRY_MS) continue;
+        // Sintral has never had a bar for it: ask again only now and then, but
+        // every cycle while the execution plane may be reading it (shortlisted).
+        const recentlyShortlisted = entry.shortlistedAt !== undefined && now - entry.shortlistedAt <= SHORTLIST_RETRY_MS;
+        if (previous !== null && previous.bars.length === 0 && !recentlyShortlisted && now - (previous.checkedAt ?? 0) < UNKNOWN_RETRY_MS) continue;
         calls += 1;
         const fetched = await fetchBars(address, fetchLimit(previous, lastClosed), signal);
         const rebuilt = rebuildSeries(previous, fetched, lastClosed);
@@ -423,7 +439,9 @@ async function readIndex(store: SnapshotStore): Promise<BarsIndex> {
   if (typeof data?.tokens === "object" && data.tokens !== null) {
     for (const [address, value] of Object.entries(data.tokens)) {
       if (typeof value?.lastLiveAt === "number" && typeof value.enteredAt === "number") {
-        tokens[address] = { symbol: typeof value.symbol === "string" ? value.symbol : "", enteredAt: value.enteredAt, lastLiveAt: value.lastLiveAt };
+        const entry: IndexEntry = { symbol: typeof value.symbol === "string" ? value.symbol : "", enteredAt: value.enteredAt, lastLiveAt: value.lastLiveAt };
+        if (typeof value.shortlistedAt === "number") entry.shortlistedAt = value.shortlistedAt;
+        tokens[address] = entry;
       }
     }
   }

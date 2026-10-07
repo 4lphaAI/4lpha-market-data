@@ -372,6 +372,25 @@ async function board(store: MemoryStore): Promise<MemeBoardRow[]> {
 }
 
 describe("runMemeBoard", () => {
+  it("writes nothing once its run has timed out, even though each source failure is tolerated", async () => {
+    const store = new MemoryStore();
+    const controller = new AbortController();
+    await assert.rejects(
+      runMemeBoard(store, controller.signal, {
+        ...fakeUpstreams({ finalizing: [rush()] }),
+        fetchActivity: async () => new Map([[addr(1), activity()]]),
+        fetchSignals: async () => {
+          controller.abort(new Error("timed out"));
+          throw new Error("aborted");
+        },
+        now: () => NOW,
+      }),
+      /timed out/,
+    );
+    assert.equal(await store.get(MEME_BOARD_KEY), null);
+    assert.equal(await store.get(MEME_STATE_KEY), null);
+  });
+
   it("publishes a partial cycle and refuses to restamp when every list failed", async () => {
     const store = new MemoryStore();
     const result = await runMemeBoard(store, AbortSignal.timeout(5_000), {

@@ -341,6 +341,9 @@ export async function runMemeBoard(
   }
   state.tracked = nextTracked;
 
+  // A run past its timeout writes nothing, so a board write never lands outside
+  // the window its phase allows (see BOARD_PHASE_MS).
+  signal.throwIfAborted();
   await store.put(MEME_STATE_KEY, state, {
     source: MEME_BOARD_JOB,
     freshForMs: BOARD_FRESH_MS,
@@ -512,12 +515,31 @@ async function readBoard(store: SnapshotStore): Promise<Map<string, MemeBoardRow
   return out;
 }
 
+/**
+ * The board run starts this long after every minute boundary. With the 45 s
+ * timeout its write lands between second 30 and second 15 of the next minute,
+ * never between the `meme-bars` selection (second 20) and the execution plane's
+ * shortlist and bars reads (second 25), so a token the lane sees on the
+ * shortlist was on the board the bars job selected from (2026-10-07).
+ */
+export const BOARD_PHASE_MS = 30_000;
+
+/** Delay from `now` to the next board run: {@link BOARD_PHASE_MS} after the next minute boundary. */
+export function msUntilBoardRun(now: number): number {
+  let target = Math.floor(now / 60_000) * 60_000 + BOARD_PHASE_MS;
+  // Half a second of slack so a run that fires a little early does not schedule itself again at once.
+  if (target <= now + 500) target += 60_000;
+  return target - now;
+}
+
 /** Job registration for the scheduler. */
 export function memeBoardJob(store: SnapshotStore): JobSpec {
   return {
     name: MEME_BOARD_JOB,
     intervalMs: 60_000,
+    // First run only; after that the board runs on its phase.
     jitterMs: 5_000,
+    nextDelayMs: msUntilBoardRun,
     // Six Meme Rush lists, four hot rankings, up to eight 100-token price-info batches,
     // one signal call, two smart-money inflow ranks,
     // and at most one batched issuer read for quote tokens never seen before.
