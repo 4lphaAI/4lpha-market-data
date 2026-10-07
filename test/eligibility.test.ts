@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { decodeFunctionResult, encodeFunctionResult } from "viem";
+import type { BscClient } from "../src/chain/rpc.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import { createServer } from "../src/server.js";
@@ -12,6 +14,8 @@ import {
   FOURMEME_TOKEN_MANAGER2,
   decideEligibility,
   eligibilityKey,
+  helperAbi,
+  readFourMemeOn,
   isEligible,
   isEligibleBatch,
   loadAllowlist,
@@ -44,6 +48,8 @@ function fourMeme(state: Partial<FourMemeState> = {}): HelperOutcome {
       quote: "0x0000000000000000000000000000000000000000",
       launchTime: 1_738_872_868,
       liquidityAdded: false,
+      funds: "0",
+      maxFunds: "24000000000000000000",
       ...state,
     },
   };
@@ -127,6 +133,34 @@ describe("decideEligibility", () => {
     assert.equal(result.venue, "fourmeme-bonding");
     assert.equal(result.fourmeme?.launchTime, 1_738_872_868);
     assert.equal(result.flap, null);
+  });
+
+  it("carries funds and maxFunds as the decimal strings of words 9 and 10 (FOURMEME-CURVE-PAPER-SPEC 5.2)", async () => {
+    // A BNCB curve: maxFunds 2 000e18 and funds 1 599 999 999 999 999 999 999, both above 2^53.
+    const words = [
+      2n, FOURMEME_TOKEN_MANAGER2, "0x4902c5ebc598265ed2212b559b042de8a5eeec3f", 7_656_912n, 100n, 0n,
+      1_791_120_000n, 706_179_189_516_668_754n, 800_000_000_000_000_000_000_000_000n,
+      1_599_999_999_999_999_999_999n, 2_000_000_000_000_000_000_000n, false,
+    ] as const;
+    const client = {
+      readContract: async () =>
+        decodeFunctionResult({
+          abi: helperAbi,
+          functionName: "getTokenInfo",
+          data: encodeFunctionResult({ abi: helperAbi, functionName: "getTokenInfo", result: words }),
+        }),
+    } as unknown as BscClient;
+    const outcome = await readFourMemeOn(client, MEME);
+    assert.equal(outcome.kind, "answered");
+    assert.deepEqual(outcome.kind === "answered" ? outcome.state : null, {
+      version: 2,
+      tokenManager: FOURMEME_TOKEN_MANAGER2.toLowerCase(),
+      quote: "0x4902c5ebc598265ed2212b559b042de8a5eeec3f",
+      launchTime: 1_791_120_000,
+      liquidityAdded: false,
+      funds: "1599999999999999999999",
+      maxFunds: "2000000000000000000000",
+    });
   });
 
   it("routes a graduated Four.Meme token to PancakeSwap", () => {

@@ -50,6 +50,10 @@ describe("matchFourMemeTemplate", () => {
     assert.equal(matchFourMemeTemplate({ code: "none", creatorType: 0 }), null);
   });
 
+  it("marks curve-proven exactly the templates whose curve proof passed (G0a, G0b)", () => {
+    assert.deepEqual(FOURMEME_TEMPLATES.filter((t) => t.curve).map((t) => t.id), ["tax9-7330", "plain-4686"]);
+  });
+
   it("lists each proven identity once", () => {
     const codes = FOURMEME_TEMPLATES.map((t) => t.code);
     assert.equal(new Set(codes).size, codes.length);

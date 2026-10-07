@@ -39,23 +39,26 @@ export interface FourMemeTemplate {
   creatorType: number;
   code: string;
   rates: RateModel;
+  /** Proven on the bonding curve too (FOURMEME-CURVE-PAPER-SPEC 5.1, curve proof hashes in its reply). */
+  curve: boolean;
 }
 
 /**
  * Every entry is proven by a buy and a sell on chain (tx hashes in the reply).
  * An identity not listed here, including a new implementation Four.Meme ships
- * later, reads `tax: null` until it is proven and added.
+ * later, reads `tax: null` until it is proven and added. On the curve a token
+ * carries a tax only when its template is also proven there (`curve: true`).
  */
 export const FOURMEME_TEMPLATES: readonly FourMemeTemplate[] = [
-  { id: "tax9-7330", creatorType: 9, code: "proxy:0x7330d8865f4b6800b72bdd73e2007833a5d45c94", rates: "percent-buy-sell" },
-  { id: "tax9-2812", creatorType: 9, code: "proxy:0x28129943b5f12826b7b190e2443c3fc223ad740c", rates: "percent-buy-sell" },
-  { id: "tax9-e506", creatorType: 9, code: "proxy:0xe506cd33886785816895dbfb2bc8927696c0c8ec", rates: "percent-buy-sell" },
-  { id: "tax8-13584", creatorType: 8, code: "hash:0xd8c7d12fc883a477ca8feda0f19d672cb37b1330cdd80287114bfb7680fa2bb9", rates: "percent-buy-sell" },
-  { id: "tax8-13762", creatorType: 8, code: "hash:0x760eda3e4fa91e876396e6f761aae6df27c558ee016b9bcbcdd633b8b5bfc904", rates: "percent-buy-sell" },
-  { id: "tax5-10456", creatorType: 5, code: "hash:0xf522baa0235a3c393cf4831f44a74d928bcde8e79f6ad8f0f0af2be115d36b24", rates: "bps-single" },
-  { id: "plain-3822", creatorType: 0, code: "hash:0x1210dbadb4a9a84de0a99de0b17d70f917aa61bfc53711787d0ac0bf12d716ea", rates: "none" },
-  { id: "plain-4686", creatorType: 0, code: "proxy:0x46862924e2a229170ebd065e24a0da72af58a986", rates: "none" },
-  { id: "plain-2901", creatorType: 0, code: "hash:0x3e6b67a73f451cce26e65eae0ae3a07f9bce8542aa1fb25e95c7199f83d3579f", rates: "none" },
+  { id: "tax9-7330", creatorType: 9, code: "proxy:0x7330d8865f4b6800b72bdd73e2007833a5d45c94", rates: "percent-buy-sell", curve: true },
+  { id: "tax9-2812", creatorType: 9, code: "proxy:0x28129943b5f12826b7b190e2443c3fc223ad740c", rates: "percent-buy-sell", curve: false },
+  { id: "tax9-e506", creatorType: 9, code: "proxy:0xe506cd33886785816895dbfb2bc8927696c0c8ec", rates: "percent-buy-sell", curve: false },
+  { id: "tax8-13584", creatorType: 8, code: "hash:0xd8c7d12fc883a477ca8feda0f19d672cb37b1330cdd80287114bfb7680fa2bb9", rates: "percent-buy-sell", curve: false },
+  { id: "tax8-13762", creatorType: 8, code: "hash:0x760eda3e4fa91e876396e6f761aae6df27c558ee016b9bcbcdd633b8b5bfc904", rates: "percent-buy-sell", curve: false },
+  { id: "tax5-10456", creatorType: 5, code: "hash:0xf522baa0235a3c393cf4831f44a74d928bcde8e79f6ad8f0f0af2be115d36b24", rates: "bps-single", curve: false },
+  { id: "plain-3822", creatorType: 0, code: "hash:0x1210dbadb4a9a84de0a99de0b17d70f917aa61bfc53711787d0ac0bf12d716ea", rates: "none", curve: false },
+  { id: "plain-4686", creatorType: 0, code: "proxy:0x46862924e2a229170ebd065e24a0da72af58a986", rates: "none", curve: true },
+  { id: "plain-2901", creatorType: 0, code: "hash:0x3e6b67a73f451cce26e65eae0ae3a07f9bce8542aa1fb25e95c7199f83d3579f", rates: "none", curve: false },
 ];
 
 /** Documented ceiling for types 8/9: a rate of at most 10 percent. */
