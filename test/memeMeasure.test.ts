@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { after, before, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { AdapterError } from "../src/adapters/http.js";
 import { JEV_SCHEMA_VERSION, askJev, parseChoiceAnswer, parseNoulAnswer, parseScoreAnswer, scrubKey } from "../src/adapters/typesafe.js";
 import {
@@ -18,6 +18,7 @@ import { MEME_BOARD_KEY } from "../src/jobs/memeBoard.js";
 import {
   BOARD_COLUMNS,
   JEV_CONCURRENCY,
+  JEV_DEMAND_WINDOW_MS,
   JEV_KEY_PREFIX,
   JEV_MAX_REQUESTS,
   JEV_RETRY_PREFIX,
@@ -34,6 +35,7 @@ import {
   jevDigest,
   memeJevApiKey,
   memeMeasureSlotKey,
+  noteMemestockShortlistRead,
   readMeasurePage,
   runMemeMeasure,
   sig,
@@ -214,6 +216,8 @@ async function harness(board: MemeBoardRow[] = [memeStock(10), memeStock(11), de
     options: {
       now: () => clock.now,
       holder: "test-holder",
+      // A meme agent read the memestock shortlist this very moment; the demand gate tests replace this.
+      jevDemandAt: () => clock.now,
       fetchTopics: async (rank) => {
         calls.push(`topics:${rank}`);
         return topicsLatest();
@@ -646,12 +650,12 @@ describe("Jev text features", () => {
     const h = await harness();
     const fake = fakeFetch(jevAnswer);
     await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
-    assert.equal(fake.calls.length, 6);
+    assert.equal(fake.calls.length, 5);
     const reads = countJevReads(h.store);
     h.clock.now = NOW + SLOT;
     await h.store.put(MEME_BOARD_KEY, [memeStock(10), memeStock(11), deadMemeStock(12)], TTL);
     await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: null, jevFetch: fake.fetch });
-    assert.equal(fake.calls.length, 6);
+    assert.equal(fake.calls.length, 5);
     assert.deepEqual(reads, []);
     const { board, tokens } = expandedRows((await storedCycle(h.store, NOW + SLOT))!);
     for (const row of board) {
@@ -673,8 +677,9 @@ describe("Jev text features", () => {
     const fake = fakeFetch(jevAnswer);
     const options = { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch };
     await runMemeMeasure(h.store, signal(), options);
-    // Three meme stocks (the BNB meme is not one), one tone for topic-1 (topic-2 has no token), two pairs.
-    assert.deepEqual(fake.calls.map(asked), ["relevance", "relevance", "relevance", "tone", "about", "about"]);
+    // Three meme stocks (the BNB meme is not one), one tone for topic-1 (topic-2 has no token), and one pair:
+    // topic-1's other token (addr 99) is not a meme stock, so it is never asked about.
+    assert.deepEqual(fake.calls.map(asked), ["relevance", "relevance", "relevance", "tone", "about"]);
     for (const call of fake.calls) {
       assert.equal(call.url, "https://api.typesafe.ai/v1/systemone");
       assert.equal(call.method, "POST");
@@ -698,19 +703,20 @@ describe("Jev text features", () => {
       tokens.map((r) => [r["jevAboutToken"], r["jevTone"], r["jevToneProbabilities"], r["jevModel"], r["jevToneModel"]]),
       [
         [0.7, "hype", "0.8|0.15|0.05", "jev-1.13.0", "jev-1.13.0"],
-        [0.7, "hype", "0.8|0.15|0.05", "jev-1.13.0", "jev-1.13.0"],
+        [null, "hype", "0.8|0.15|0.05", null, "jev-1.13.0"],
       ],
     );
     assert.ok(await h.store.get(`${JEV_KEY_PREFIX}stock:${addr(10)}`));
     assert.ok(await h.store.get(`${JEV_KEY_PREFIX}tone:topic-1`));
-    assert.ok(await h.store.get(`${JEV_KEY_PREFIX}about:topic-1:${addr(99)}`));
+    assert.ok(await h.store.get(`${JEV_KEY_PREFIX}about:topic-1:${addr(10)}`));
+    assert.equal(await h.store.get(`${JEV_KEY_PREFIX}about:topic-1:${addr(99)}`), null);
 
     // Next slot: every answer comes from the in-process memory; no Jev key is read.
     const reads = countJevReads(h.store);
     h.clock.now = NOW + SLOT;
     await h.store.put(MEME_BOARD_KEY, [memeStock(10), memeStock(11), deadMemeStock(12)], TTL);
     await runMemeMeasure(h.store, signal(), options);
-    assert.equal(fake.calls.length, 6);
+    assert.equal(fake.calls.length, 5);
     assert.deepEqual(reads, []);
     const again = expandedRows((await storedCycle(h.store, NOW + SLOT))!);
     assert.equal(again.board[0]?.["jevStockScore"], 1.9);
@@ -733,7 +739,7 @@ describe("Jev text features", () => {
     h.clock.now = NOW + SLOT;
     await h.store.put(MEME_BOARD_KEY, [memeStock(10), memeStock(11), deadMemeStock(12)], TTL);
     await runMemeMeasure(fresh, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
-    assert.deepEqual(fake.calls.slice(6).map(asked), ["relevance", "relevance"], "only the two planted entries are asked again");
+    assert.deepEqual(fake.calls.slice(5).map(asked), ["relevance", "relevance"], "only the two planted entries are asked again");
   });
 
   it("asks again when an optional input appears, and records which inputs were sent", async () => {
@@ -788,10 +794,10 @@ describe("Jev text features", () => {
       const fake = fakeFetch(respond);
       const result = await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
       assert.equal(result.recorded, true, `case ${k}`);
-      assert.equal(fake.calls.length, 6, `case ${k}`);
+      assert.equal(fake.calls.length, 5, `case ${k}`);
       const cycle = (await storedCycle(h.store, NOW))!;
       assert.equal(cycle.board?.rows.length, 3);
-      assert.ok(cycle.failures.some((f) => f.startsWith("jev: 6 failed of 6 requests")), `case ${k}: ${cycle.failures.join("; ")}`);
+      assert.ok(cycle.failures.some((f) => f.startsWith("jev: 5 failed of 5 requests")), `case ${k}: ${cycle.failures.join("; ")}`);
       assert.equal(JSON.stringify(cycle).includes(JEV_KEY), false, "the key never reaches the record");
       const { board, tokens } = expandedRows(cycle);
       assert.ok(board.every((r) => r["jevStockScore"] === null && r["jevModel"] === null));
@@ -924,13 +930,13 @@ describe("Jev text features", () => {
     await runMemeMeasure(h.store, signal(), options);
     const tone = fake.calls.find((call) => asked(call) === "tone")!;
     assert.deepEqual((JSON.parse(tone.body!) as { state: { topic: { tags: string[] } } }).state.topic.tags, ["CN Culture", "Douyin"]);
-    assert.equal((await storedCycle(h.store, NOW))!.jevRequests, 6);
+    assert.equal((await storedCycle(h.store, NOW))!.jevRequests, 5);
     // The upstream reorders the tags: nothing is asked again, and the count says so.
     h.options.fetchTopics = listed(["CN Culture", "Douyin"]);
     h.clock.now = NOW + SLOT;
     await h.store.put(MEME_BOARD_KEY, [memeStock(10), memeStock(11), deadMemeStock(12)], TTL);
     await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
-    assert.equal(fake.calls.length, 6);
+    assert.equal(fake.calls.length, 5);
     const warm = (await storedCycle(h.store, NOW + SLOT))!;
     assert.equal(warm.jevRequests, 0);
     assert.equal((expandCycle(warm) as { jevRequests: unknown }).jevRequests, 0);
@@ -1012,7 +1018,7 @@ describe("Jev text features", () => {
     const result = await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
     assert.equal(result.recorded, true);
     assert.equal(fake.calls.length, 0);
-    assert.ok((await storedCycle(h.store, NOW))!.failures.some((f) => f.includes("6 unanswered, not asked")));
+    assert.ok((await storedCycle(h.store, NOW))!.failures.some((f) => f.includes("5 unanswered, not asked")));
   });
 
   it("sends only the symbols and names (capped), topic name, type and tags", async () => {
@@ -1045,7 +1051,6 @@ describe("Jev text features", () => {
       { meme: { symbol: "M11", name: "N".repeat(JEV_TEXT_MAX) }, stock: { symbol: "NVDAB", company } },
       { meme: { symbol: "S".repeat(JEV_SYMBOL_MAX) }, stock: { symbol: "NVDAB", company } },
       { topic: topicState },
-      { topic: topicState, token: { symbol: "TOK" } },
       { topic: topicState, token: { symbol: "TOK" } },
     ]);
     for (const call of fake.calls) {
@@ -1087,6 +1092,118 @@ describe("Jev text features", () => {
     assert.equal(tokens[0]?.["topicId"], "topic-1");
     assert.equal(tokens[0]?.["holders"], 2);
     assert.equal("jevTone" in tokens[0]!, false);
+  });
+});
+
+describe("Jev demand gate and pair scope", () => {
+  // These tests read the process-wide shortlist timestamp the route sets, not the harness seam.
+  beforeEach(() => noteMemestockShortlistRead(null));
+  afterEach(() => noteMemestockShortlistRead(null));
+
+  async function gated(): Promise<Harness> {
+    const h = await harness();
+    delete h.options.jevDemandAt;
+    return h;
+  }
+
+  async function assertIdle(h: Harness, ts: number): Promise<void> {
+    const fake = fakeFetch(jevAnswer);
+    const reads = countJevReads(h.store);
+    await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+    assert.equal(fake.calls.length, 0);
+    assert.deepEqual(reads, []);
+    const cycle = (await storedCycle(h.store, ts))!;
+    assert.equal(cycle.jevRequests, 0);
+    assert.equal(cycle.jevIdle, true);
+    assert.deepEqual(cycle.failures, []);
+    assert.equal((expandCycle(cycle) as { jevIdle: unknown }).jevIdle, true);
+    const { board, tokens } = expandedRows(cycle);
+    assert.ok(board.length > 0 && board.every((r) => r["jevStockScore"] === null && r["jevModel"] === null));
+    assert.ok(tokens.length > 0 && tokens.every((r) => r["jevAboutToken"] === null && r["jevTone"] === null));
+  }
+
+  it("with no memestock shortlist read, sends nothing, reads no Jev key and records jevIdle", async () => {
+    await assertIdle(await gated(), NOW);
+  });
+
+  it("with Jev off, records jevRequests null and no jevIdle whatever the demand", async () => {
+    const h = await gated();
+    noteMemestockShortlistRead(NOW);
+    await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: null });
+    const cycle = (await storedCycle(h.store, NOW))!;
+    assert.equal(cycle.jevRequests, null);
+    assert.equal("jevIdle" in cycle, false);
+    assert.equal((expandCycle(cycle) as { jevIdle: unknown }).jevIdle, false);
+  });
+
+  it("asks after a memestock shortlist read 9 minutes ago, and idles after one 11 minutes ago", async () => {
+    assert.equal(JEV_DEMAND_WINDOW_MS, 10 * MIN);
+    const h = await gated();
+    noteMemestockShortlistRead(NOW - 9 * MIN);
+    const fake = fakeFetch(jevAnswer);
+    await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+    assert.equal(fake.calls.length, 5);
+    const cycle = (await storedCycle(h.store, NOW))!;
+    assert.equal(cycle.jevRequests, 5);
+    assert.equal("jevIdle" in cycle, false);
+    assert.equal((expandCycle(cycle) as { jevIdle: unknown }).jevIdle, false);
+
+    const late = await gated();
+    noteMemestockShortlistRead(NOW - 11 * MIN);
+    await assertIdle(late, NOW);
+  });
+
+  it("counts a served /memes/shortlist?segment=memestock and nothing else", async () => {
+    for (const [path, demand] of [
+      ["/memes/shortlist?segment=memestock", true],
+      ["/memes/shortlist", false],
+      ["/memes/shortlist?segment=all", false],
+      ["/memes/shortlist?segment=memestock&size=0", false],
+    ] as const) {
+      noteMemestockShortlistRead(null);
+      const h = await gated();
+      const server = createServer({ scheduler: createScheduler(h.store), store: h.store });
+      const response = await server.request(path);
+      assert.equal(response.status, path.endsWith("size=0") ? 400 : 200, path);
+      // The cycle starts just after the read, on the board as it stands then.
+      h.clock.now = Date.now() + MIN;
+      await h.store.put(MEME_BOARD_KEY, [memeStock(10), memeStock(11), deadMemeStock(12), bnbMeme(13)], TTL);
+      await h.store.put(RWA_UNIVERSE_KEY, { rows: [{ address: NVDAB, symbol: "NVDAB", underlyingTicker: "NVDA", tokenPriceUsd: 235, openState: true }] }, TTL);
+      if (demand) {
+        const fake = fakeFetch(jevAnswer);
+        await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+        assert.equal(fake.calls.length, 5, path);
+        assert.equal((await storedCycle(h.store, h.clock.now))!.jevIdle, undefined, path);
+      } else {
+        await assertIdle(h, h.clock.now);
+      }
+    }
+  });
+
+  it("asks about a pair only when its token is a meme stock, and a tone only for a topic with such a pair", async () => {
+    const h = await harness();
+    // topic-1: no meme stock (99 is off the board, 13 is BNB-quoted); topic-2: a dead meme stock and a BNB meme.
+    h.options.fetchTopics = async () =>
+      normalizeSocialRush({ code: "000000", data: [topic(1, [addr(99), addr(13)]), topic(2, [addr(12), addr(13)])] });
+    const fake = fakeFetch(jevAnswer);
+    await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+    assert.deepEqual(fake.calls.map(asked), ["relevance", "relevance", "relevance", "tone", "about"]);
+    assert.equal(await h.store.get(`${JEV_KEY_PREFIX}tone:topic-1`), null);
+    assert.ok(await h.store.get(`${JEV_KEY_PREFIX}tone:topic-2`));
+    assert.ok(await h.store.get(`${JEV_KEY_PREFIX}about:topic-2:${addr(12)}`));
+    for (const key of [`about:topic-1:${addr(99)}`, `about:topic-1:${addr(13)}`, `about:topic-2:${addr(13)}`]) {
+      assert.equal(await h.store.get(JEV_KEY_PREFIX + key), null, key);
+    }
+    const { tokens } = expandedRows((await storedCycle(h.store, NOW))!);
+    assert.deepEqual(
+      tokens.map((r) => [r["topicId"], r["address"], r["jevAboutToken"], r["jevTone"], r["jevModel"], r["jevToneModel"]]),
+      [
+        ["topic-1", addr(99), null, null, null, null],
+        ["topic-1", addr(13), null, null, null, null],
+        ["topic-2", addr(12), 0.7, "hype", "jev-1.13.0", "jev-1.13.0"],
+        ["topic-2", addr(13), null, "hype", null, "jev-1.13.0"],
+      ],
+    );
   });
 });
 

@@ -33,8 +33,9 @@
  * `MEME_JEV_ENABLED` and `TYPESAFE_API_KEY`, both needed: a meme-stock row gets
  * a TypeSafe Jev Score of how strongly the meme is themed on its quote stock,
  * and a topic-token row a Noul (is the topic about the token) plus its topic's
- * tone (a Choice asked once per topic). The inputs are symbols, names, the
- * topic name, type and tags, never post text. Each answer is cached for good
+ * tone (a Choice asked once per topic), only for tokens that are such meme
+ * stocks and only while a meme agent reads the memestock shortlist. The inputs
+ * are symbols, names, the topic name, type and tags, never post text. Each answer is cached for good
  * under its own store key, written only after a valid answer and tied to a
  * digest of the exact inputs and wording, so a changed input or question is
  * asked again. A failed, rate-limited or malformed answer leaves the columns
@@ -137,6 +138,8 @@ export interface MeasureCycle {
   failures: string[];
   /** TypeSafe Jev requests sent this cycle; `null` with Jev off, absent in slots recorded before it existed. */
   jevRequests?: number | null;
+  /** `true` when Jev is on but no meme agent read the memestock shortlist within {@link JEV_DEMAND_WINDOW_MS}: nothing asked or read. Absent otherwise. */
+  jevIdle?: true;
   topics: {
     /** Topic ids in list order. `rising` is `"same"` when it matched `latest`, `null` when unread. */
     lists: { latest: string[]; rising: string[] | "same" | null };
@@ -249,6 +252,8 @@ export interface RunMemeMeasureOptions {
   /** TypeSafe key, set only when Jev is enabled ({@link memeJevApiKey}); absent = no request, Jev columns `null`. */
   jevApiKey?: string | null | undefined;
   jevFetch?: FetchFn | undefined;
+  /** When the memestock shortlist was last served; defaults to {@link lastMemestockShortlistRead}. */
+  jevDemandAt?: (() => number | null) | undefined;
 }
 
 export type MemeMeasureResult =
@@ -418,7 +423,10 @@ export async function runMemeMeasure(
   // Jev answers, cached or asked now. A failure here is a note, never a failed cycle.
   // `requests` stays 0 when the step throws: it only throws on the store reads made before any request.
   let jev: JevAnswers = { stock: new Map(), about: new Map(), tone: new Map(), requests: 0 };
-  if (options.jevApiKey) {
+  // No meme agent read the memestock shortlist lately: nothing is asked or read, the columns stay `null`.
+  const demandAt = (options.jevDemandAt ?? lastMemestockShortlistRead)();
+  const jevIdle = Boolean(options.jevApiKey) && (demandAt === null || started - demandAt >= JEV_DEMAND_WINDOW_MS);
+  if (options.jevApiKey && !jevIdle) {
     try {
       jev = await memeJev(store, signal, fresh?.memeStocks ?? [], allTopics, {
         apiKey: options.jevApiKey,
@@ -473,6 +481,7 @@ export async function runMemeMeasure(
     durationMs: now() - started,
     failures,
     jevRequests: options.jevApiKey ? jev.requests : null,
+    ...(jevIdle ? { jevIdle: true as const } : {}),
     topics,
     inflow: {
       columns: INFLOW_COLUMNS,
@@ -538,6 +547,20 @@ const JEV_FOREVER_MS = 100 * 365 * 24 * 3_600_000;
  * worked off over a few cycles; a warm cycle asks only for new arrivals.
  */
 export const JEV_MAX_REQUESTS = 60;
+/**
+ * Jev is asked only while a meme agent reads `/memes/shortlist?segment=memestock`
+ * (the execution plane's paper agents read it every minute): its last read must
+ * lie within this window of the cycle start. A restart waits for the next read.
+ */
+export const JEV_DEMAND_WINDOW_MS = 600_000;
+let memestockShortlistReadAt: number | null = null;
+/** Set by the shortlist route when it serves `segment=memestock` (routes and jobs share one process); `null` clears it. */
+export function noteMemestockShortlistRead(at: number | null): void {
+  memestockShortlistReadAt = at;
+}
+export function lastMemestockShortlistRead(): number | null {
+  return memestockShortlistReadAt;
+}
 /** Requests in flight at once, far under TypeSafe's 80 requests/s. */
 export const JEV_CONCURRENCY = 6;
 /** Longest the Jev requests may take in one cycle. */
@@ -817,7 +840,9 @@ async function memeJev(
   const toneItems: Array<JevItem<JevChoice<JevTone>>> = [];
   const aboutItems: Array<JevItem<JevNoul>> = [];
   for (const topic of topics) {
-    if (topic.nameEn === null || topic.tokens.length === 0) continue;
+    // Only pairs whose token is a meme stock the Score covers; a topic without one gets no tone either.
+    const pairs = topic.tokens.filter((token) => token.symbol !== null && stockInputs.has(token.address));
+    if (topic.nameEn === null || pairs.length === 0) continue;
     // Tags sorted, so an upstream reorder does not change the digest and re-ask.
     const t = { name: topic.nameEn.slice(0, JEV_TEXT_MAX), type: topic.type, tags: [...topic.tags].sort() };
     toneItems.push({
@@ -828,7 +853,7 @@ async function memeJev(
       parse: (answer) => parseChoiceAnswer(answer, JEV_TONES),
       out: out.tone,
     });
-    for (const token of topic.tokens) {
+    for (const token of pairs) {
       if (token.symbol === null) continue;
       const key = jevAboutKey(topic.topicId, token.address);
       aboutItems.push({
@@ -927,6 +952,7 @@ export function expandCycle(cycle: MeasureCycle): Record<string, unknown> {
     durationMs: cycle.durationMs,
     failures: cycle.failures,
     jevRequests: cycle.jevRequests ?? null,
+    jevIdle: cycle.jevIdle === true,
     topics: cycle.topics === null
       ? null
       : {
