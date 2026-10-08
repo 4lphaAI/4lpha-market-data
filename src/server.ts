@@ -59,6 +59,7 @@ import {
   MEME_MEASURE_RETENTION_MS,
   MEME_MEASURE_SLOT_MS,
   expandCycle,
+  noteMemestockShortlistRead,
   readMeasurePage,
 } from "./jobs/memeMeasure.js";
 import { MEME_RULES, type MemeBoardRow } from "./query/memeClassify.js";
@@ -1143,6 +1144,8 @@ export function createServer(deps: ServerDeps): Hono {
     const [record, stocks] = await Promise.all([deps.store.get<unknown>(MEME_BOARD_KEY), loadStockInfo(deps.store)]);
     const rows = Array.isArray(record?.data) ? (record.data as MemeBoardRow[]) : [];
     const shortlist = buildShortlist(rows, query, Date.now(), stocks);
+    // A meme agent is reading: the measure job's Jev step runs while this is recent.
+    if (query.segment === "memestock") noteMemestockShortlistRead(Date.now());
     return c.json({
       data: shortlist.rows,
       meta: {
