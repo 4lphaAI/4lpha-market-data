@@ -304,3 +304,138 @@ a winner the evidence does not support, instead of relying on every consumer to 
 watch one cycle's log line (`ended`, `tickers`, `quotes`, `headroomWaits`, `ms`) and the live agents'
 Flash proxy for `rate_budget_exhausted` and `upstream_failure` across that window. With MEDIUM-1 open,
 also watch the first cycle after the deploy itself, which is when two processes can coexist.
+
+---
+
+# Re-check of fix round 1 (2026-10-08)
+
+Scope: `git diff 443d7b0..b1d50c5` and the "Fix round 1" section of the build report only. Head
+`b1d50c5`. No product file changed by me: the two mutated sources were restored and
+`git status --porcelain -- src/` is empty. Nothing was run against the real Binance API.
+
+## Verdict: SHIP WITH FIXES, one must-fix (HIGH-R1)
+
+The operator ruling is implemented exactly, and six of the seven items I raised are closed. One new
+fail-open was introduced by my own MEDIUM-4 request and should be closed before the flag goes on.
+
+## The ruling (review HIGH-1): implemented correctly
+
+I ran the real `computeVerdicts` against the three step-0 rows rather than reading it:
+
+| Case | Verdict produced |
+|---|---|
+| TSLA 500 | `best: "bstock"`, `edgeBps: 6.8`, `about_same: false`, `avoid: [{ondo, ["round_trip"]}]` |
+| NVDA 500 | `best: null`, `edgeBps: 10`, `about_same: true`, `avoid: []` |
+| SPY 500 | `best: "bstock"`, `edgeBps: 57884.2`, `avoid: [{ondo, ["buy_cost","round_trip"]}]` |
+
+All three match the ruling's own stated expectations, including the reason order. The clause the
+whole ruling exists for now works: a version with a 6 236 bps exit is named in `avoid` and
+`about_same` no longer cancels the only signal. I also probed the `no_exit` clause directly, with
+Ondo holding 50 % more shares but a failed sell-back: `avoid: [{ondo,["no_exit"]}]`, `best: "bstock"`.
+Clause by clause, `avoid` (`src/query/stockCompare.ts:229-236`), `about_same` (`:252-255`) and `best`
+(`:257-266`) read the same as the ruling text, and the `answered.length < 2` branch (`:240-242`)
+handles "none clear of avoid" and `only` correctly.
+
+## HIGH-R1. The headroom fix opened a fail-open at a small bucket
+
+`readStockCompareConfig` (`src/jobs/stockCompare.ts:131-139`) now derives the required free slots from
+a ratio, which is what I asked for and which does give 10 at a bucket of 18 (measured:
+`{minHeadroom: 10, headroomRatio: 0.5555555555555556, rps: 2}`). But it dropped the property that
+made the old absolute default safe. Measured at a bucket of 5: `{minHeadroom: 3, rps: 2}`.
+
+Before this round, `BINANCE_RWA_RPS` unset or below 10 made the config throw and the job send nothing.
+Now the job runs happily against a 5-slot bucket, requiring only 3 free and pacing at 2 rps, which is
+40 % of the entire key allowance, shared with the live agents' Flash proxy. Failure scenario: the
+Railway variable is deleted, renamed or mistyped during an unrelated change; the plane silently falls
+back to `BINANCE_RWA_DEFAULT_RPS` (5); the compare job keeps spending 2 of those 5 per second for
+about 5 minutes every 15 minutes, and a live agent's quote that waits more than its 1 s
+`BINANCE_FLASH_BUDGET_WAIT_MS` fails with `rate_budget_exhausted`. The build report presents the
+change as a convenience ("a local run no longer needs BINANCE_RWA_RPS >= 10") without noting that the
+same edit removed the production guard. Per the exec `CLAUDE.md`, weakening a fail-closed default is
+itself a full-chain trigger, which is why I keep this at HIGH even though it needs a misconfiguration
+to bite.
+
+Fix, one line: keep the ratio and add an absolute floor, either refusing to run when
+`BINANCE_RWA_RPS` is below the bucket the ruling was sized against, or capping `rps` at
+`max(1, floor(bucket x (1 - ratio)))` so the pace can never be a large share of a small bucket.
+
+## MEDIUM-R1. The buy got a plausibility floor, the sell-back did not, and the sell now picks `best`
+
+`quoteSize` refuses a buy whose `costBps` is below -2 000 (`src/jobs/stockCompare.ts:417-420`), which
+closes my MEDIUM-3. `roundTripBps` got no equivalent, and this round made it a tie-breaker for `best`
+(`src/query/stockCompare.ts:263-265`). A round trip is only screened by `> 200` for `avoid`, so an
+arbitrarily negative one passes everything.
+
+Measured probe: bStock 1.0 shares with `roundTripBps: 2`, Ondo 0.9999 shares with
+`roundTripBps: -5000`, i.e. an answer claiming the sell-back returns 50 % more USDT than was paid.
+Result: `best: "ondo"`, `avoid: []`, `about_same: false`. The impossible leg wins outright and nothing
+in the payload flags it. Fix: mirror the buy floor, treating a `roundTripBps` below about -200 as a
+failed sell-back (`no_exit`), which is already the shape the ruling defines for a sell that does not
+answer.
+
+## MEDIUM-R2. The ruling's exit-cost tie-break has no test
+
+My own mutation reversing the comparator at `src/query/stockCompare.ts:265`, so that the **higher**
+`roundTripBps` wins when the edge is under 20 bps, leaves all 71 stock-compare tests green. That is
+the one genuinely new decision the ruling adds, and the suite does not pin its direction. The branch
+is reachable: with two candidates, an edge under 20 bps and `about_same` false, both round trips must
+be known and at or below 200 bps while differing by more than 200, which a probe confirms
+(bStock -100, Ondo +150, edge 10 gives `best: "bstock"`, and the reversed comparator gives `"ondo"`).
+Worth one assertion, because without it the rule can be inverted by a later edit with no signal.
+
+## MEDIUM-R3. A bad sell-back decimals answer throws away a good buy quote
+
+`src/jobs/stockCompare.ts:424-426` returns `buildFailedSize(usdt, "decimals_mismatch")` when the
+sell-back answer reports decimals other than 18, discarding a buy that answered correctly. The ruling
+treats a sell-back that does not answer as `ok: true` with `no_exit`, which keeps the version visible
+and warned about. As written the version vanishes from `answered`, so it gets no `avoid` entry at all
+and `only` can then name the other issuer, publishing the false claim that the other version is the
+only one with a route at that size. Low reachability (it needs Binance to misreport USDT's decimals),
+wrong shape. Fix: keep the buy and record a sell code, as the buy-side path already does.
+
+## LOW
+
+- **LOW-R1.** `readHeadroomRatio` (`src/jobs/stockCompare.ts:118-126`) uses
+  `/^(?:0.[0-9]+|.[0-9]+)$/u` with an unescaped `.`, so it admits `0x5`, `95` and `0,5`. Every such
+  string is then caught by the `finite && > 0 && < 1` guard, so behaviour is correct today, but the
+  validation does not do what it reads as. Escape the dot.
+- **LOW-R2.** A systematic `decimals_mismatch` or `implausible` does not trip the brake (the quote
+  succeeded, so `consecutiveFailures` resets at `:383`) and is not counted in the log line. If a
+  field's semantics change upstream, the job spends about 290 quotes a cycle forever while reporting
+  `ended=complete`. Counting closed-by-check sizes in the log line would make it visible.
+- **LOW-R3.** The cross-process lease binds only on Postgres: `MemoryStore.acquireSchedulerLease`
+  (`src/core/store.ts:189-195`) is per-process, so the guard is absent whenever `DATABASE_URL` is
+  unset. Production has Postgres, and the 2 to 5 minute boot delay still staggers, so this is a note
+  rather than a defect. Also, `PROCESS_HOLDER` is new per process, so after a restart the new holder
+  waits out the old 15 min lease and one or two cycles are skipped. Both are fail-closed.
+- **LOW-R4.** The `- 1e-9` epsilon at `src/jobs/stockCompare.ts:137` is not needed at a bucket of 18
+  (`Math.ceil(18 x 10/18)` is already 10, measured) but is load-bearing for the report's own "20 at
+  36" example, where dropping it gives 21. Removing it leaves all 71 tests green. Nit.
+
+## Items closed by this round
+
+MEDIUM-1: lease `stock-compare:cycle` taken before any quote (`src/jobs/stockCompare.ts:329-333`),
+renewable by the same holder in both stores, plus a 2 to 5 minute boot delay that is abortable, counts
+elapsed time, and shrinks the cycle budget so 5 + 6 stays inside the 12 min timeout. MEDIUM-2: the
+brake counts in-band non-40465 codes, 5xx, transport and parse failures, and resets on a success or a
+clean no-route (`:380-398`). MEDIUM-3: buy decimals cross-checked against the store, `toTokenAmount`
+bounded to uint256 (`:214`), implausible buys closed before the sell-back is even quoted, so the check
+also saves a token. MEDIUM-4: ratio-derived headroom, 10 at 18 confirmed, subject to HIGH-R1. LOW-2:
+the write is gated on `!signal.aborted` and a lease renewal (`:462-464`). LOW-3: `stocks:compare` is
+in `STATUS_SNAPSHOT_KEYS` (`src/server.ts:219`). LOW-4 left as is, as stated.
+
+## Tests
+
+`npm test` 1092 / 1092 / 0 fail / 0 skipped, matching the expected figure; `npx tsc --noEmit` clean,
+exit 0. My four mutations of my own on the new rules: round-trip tie-break reversed **survived**
+(MEDIUM-R2), `about_same` gap boundary `<=` to `<` killed (1 of 71), `avoid` round-trip boundary `>`
+to `>=` killed (1), headroom epsilon removed **survived** (LOW-R4, benign at 18). The builder's own
+22 mutations are plausible and consistent with the lines I read; the two gaps above are the ones they
+did not think to try.
+
+## Final verdict
+
+**SHIP WITH FIXES.** HIGH-R1 before `STOCK_COMPARE_ENABLED=true`, because it is a fail-open on the one
+axis the operator named and it is a one-line change. MEDIUM-R1 and MEDIUM-R2 are small and I would
+take them in the same round, since both concern the new `best` rule. MEDIUM-R3 and the four LOWs are
+acceptable residuals. The ruling itself is correctly built and needs no further work.
