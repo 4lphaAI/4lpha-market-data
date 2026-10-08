@@ -203,3 +203,60 @@ All ten killed (re-run on the final commit); sources restored byte-for-byte afte
 
 Built 2026-10-07 (`STOCK-COMPARE-BUILD-2026-10-07.md`, plan in the exec repo `MD here/STOCK-COMPARE-B2-PLAN.md`). Flag `STOCK_COMPARE_ENABLED=true` (default off, then not registered). Every 15 min the job quotes each ticker that has both a bStock and an Ondo row in `universe:rwa` through Flash `quote-and-swap` (`enableRFQ=true`, unfunded taker) at 100/1 000/5 000 USDT: a buy, then a sell-back of exactly the quoted amount. Stored as one key `stocks:compare` (rows per ticker, own `quotedAt`, rows older than 2 h dropped, a ticker is replaced only when all its quotes were attempted): shares of the underlying, costBps against the reference share price, roundTripBps, route type (`rfq`/`amm`/`mixed` by the `Rfq ` leg prefix) and up to four venue names. The route is store-only; verdicts (`best`, `edgeBps`, `about_same` under 20 bps, `avoid` for costBps over 200, `only`) are computed at read time; `meta.staleness` is from the row's `quotedAt` (30 min / 2 h). It never reads `priceImpactPercent` (a fraction, PITFALL-35). Budget, live agents first: it sends only while the shared `BINANCE_RWA_LIMITER` holds at least `STOCK_COMPARE_MIN_HEADROOM` (10) free slots, at most `STOCK_COMPARE_RPS` (2) a second, gives up after 30 s without headroom, and ends the cycle on HTTP 429, a rate-budget error or 401/403. Both knobs must be <= `BINANCE_RWA_RPS` (18 in production) or the config throws. It uses `signedRequest` directly, not `fetchBinanceFlashQuote`, because it needs the route legs.
 ```
+
+## Fix round 1 (review SHIP WITH FIXES, plus operator ruling 2026-10-08 on HIGH-1)
+
+Review: `STOCK-COMPARE-REVIEW-2026-10-07.md`. Ruling: exec repo `MD here/STOCK-COMPARE-B2-PLAN.md` section 7 "Ruling 2026-10-08".
+This section supersedes the verdict rules, the route `meta` and the headroom env var described above.
+
+1. **One writer, late first cycle (MEDIUM-1).** `runStockCompare` takes the plane's `acquireSchedulerLease`
+   (`stock-compare:cycle`, TTL 15 min = one interval, per-process holder) before anything else; a held lease ends the
+   cycle `lease_held` with no quote sent. The first cycle after boot waits a random 2 to 5 minutes
+   (`STOCK_COMPARE_BOOT_DELAY_*`, time already elapsed counts; abortable) and its cycle budget shrinks by the wait so it
+   still ends inside the 12 min scheduler timeout.
+2. **Failure brake (MEDIUM-2).** 10 consecutive failed attempts (in-band `code != 0` other than 40465, HTTP 5xx,
+   transport errors, unparseable answers) end the cycle `failure_brake`, same handling as the 429 stop: finished tickers
+   are saved, the cut-off one keeps its previous row. A success or a clean no-route answer resets the count. Residual:
+   a ticker whose every buy failed (6 calls) counts as "finished" and replaces its previous row with honest
+   `quote_failed` sizes; this was already so before the brake.
+3. **Answer checks (MEDIUM-3, LOW-1).** The answer's `toToken.decimal` must equal the store's `decimals` for that token
+   (and a sell-back must report 18): otherwise the size is `ok: false, code: "decimals_mismatch"` and is not sold back.
+   `toTokenAmount` is bounded to uint256. A buy with shares not positive/finite, or `costBps < -2000` (more than 20 %
+   cheaper than the stock), is `ok: false, code: "implausible"` and is not sold back. Two new closed codes.
+4. **Headroom as a fraction (MEDIUM-4).** `STOCK_COMPARE_MIN_HEADROOM` is replaced by `STOCK_COMPARE_MIN_HEADROOM_RATIO`
+   (decimal, 0 < r < 1, default 10/18); required free slots = `ceil(BINANCE_RWA_RPS x ratio)` (10 at 18, 20 at 36, 3 on
+   an unset bucket of 5, so a local run no longer needs BINANCE_RWA_RPS >= 10). A malformed value throws. Pace cap
+   `STOCK_COMPARE_RPS` unchanged (integer <= bucket).
+5. **No late write, /status (LOW-2, LOW-3).** The write happens only if the run's signal is not aborted and the lease
+   can be renewed by this holder. `stocks:compare` is on `/status` snapshot keys. LOW-4 left as is.
+6. **Verdict rules (ruling).** Per size, over versions with `ok: true`:
+   `avoid` lists a version with `costBps > 200` (`buy_cost`), `roundTripBps > 200` (`round_trip`) or a failed sell-back
+   (`no_exit`); `about_same` only when edge < 20 bps AND both round trips known AND they differ by <= 200 bps;
+   `best` null when `about_same`, otherwise among versions not in `avoid`: none null, one it, two the one with more
+   shares when edge >= 20 bps else the lower `roundTripBps`; `only` unchanged. `meta` gains `avoidRoundTripBps: 200`
+   and `roundTripGapBps: 200`.
+
+New verdict element, verbatim (step-0 TSLA 500 USDT, asserted by a test):
+
+```json
+{ "usdt": 500, "best": "bstock", "edgeBps": 6.8, "about_same": false,
+  "avoid": [ { "issuer": "ondo", "reasons": ["round_trip"] } ], "only": null }
+```
+
+Types: `avoid: { issuer: "bstock"|"ondo", reasons: ("buy_cost"|"round_trip"|"no_exit")[] }[]` (reasons in that order);
+`best`, `only` issuer|null; `edgeBps` number|null. Step-0 NVDA 500 reads `best: null, about_same: true, avoid: []`;
+SPY 500 reads `best: "bstock"`, `avoid: [{issuer:"ondo", reasons:["buy_cost","round_trip"]}]`.
+Route `meta` (ticker form): `staleness, quotedAt, ageMs, sizesUsdt, aboutSameBps: 20, avoidCostBps: 200,
+avoidRoundTripBps: 200, roundTripGapBps: 200` (list form has the same limits plus `count, newestQuotedAt, retentionMs`).
+
+Env after this round: `STOCK_COMPARE_ENABLED`, `STOCK_COMPARE_MIN_HEADROOM_RATIO` (default 10/18), `STOCK_COMPARE_RPS` (default 2).
+
+Tests: `npm test` 1092 / 1092 / 0 fail / 0 skipped (was 1069 / 1069 / 0 / 0); `tsc --noEmit` clean; the stock-compare file has
+71 tests. Mutations (each confirmed applied, source restored byte-for-byte), all killed: lease at start removed (2 fail),
+lease re-check before write removed (1), abort check before write removed (1), boot delay removed (3), boot delay lower
+bound 0 (1), failure brake removed (3), no-route counted as failure (2), success does not reset the brake (1), buy
+decimals check removed (1), sell decimals check removed (1), implausible floor removed (1), uint256 bound removed (1),
+headroom ratio ignored (1), /status key removed (1), verdict buy_cost rule removed (4), round_trip rule removed (5),
+no_exit rule removed (1), about_same without known round trips (1), about_same round-trip gap ignored (2), best not
+nulled when about_same (3), best ignores avoid (3), best edge rule removed (4); the earlier ten budget/threshold
+mutations were re-run where still applicable (headroom, 429, give-up, pace, acquire, thresholds): all killed.

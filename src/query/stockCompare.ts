@@ -28,6 +28,12 @@ export const STOCK_COMPARE_STALE_MS = 2 * 60 * 60_000;
 export const STOCK_COMPARE_ABOUT_SAME_BPS = 20;
 /** A version whose buy costs more than this many bps over the reference price is listed under `avoid`. */
 export const STOCK_COMPARE_AVOID_COST_BPS = 200;
+/** A version whose sell-back loses more than this many bps is listed under `avoid` (exit cost). */
+export const STOCK_COMPARE_AVOID_ROUND_TRIP_BPS = 200;
+/** Two versions are only `about_same` when their round trips differ by at most this many bps. */
+export const STOCK_COMPARE_ROUND_TRIP_GAP_BPS = 200;
+/** A buy more than this many bps cheaper than the reference share price is not believed. */
+export const STOCK_COMPARE_IMPLAUSIBLE_COST_BPS = -2_000;
 
 /** Upper bound on stored tickers; far above the ~75 tickers measured with both issuers. */
 export const STOCK_COMPARE_MAX_TICKERS = 200;
@@ -46,10 +52,12 @@ export type StockCompareStaleness = "fresh" | "stale" | "dead";
  * Closed failure codes:
  * - `no_route`: the aggregator answered "Path not found" (40465) for the buy;
  * - `quote_failed`: any other buy failure (transport, other envelope code, bad answer);
+ * - `decimals_mismatch`: the answer's token decimals differ from the store's for that token;
+ * - `implausible`: the answer cannot be right (shares not positive, or more than 20 percent cheaper than the stock);
  * - `sell_no_route` / `sell_failed`: the buy answered but selling the quoted amount back did not
  *   (`ok` stays true, `roundTripBps` is null).
  */
-export const STOCK_COMPARE_CODES = ["no_route", "quote_failed", "sell_no_route", "sell_failed"] as const;
+export const STOCK_COMPARE_CODES = ["no_route", "quote_failed", "decimals_mismatch", "implausible", "sell_no_route", "sell_failed"] as const;
 export type StockCompareCode = (typeof STOCK_COMPARE_CODES)[number];
 
 export interface StockCompareSize {
@@ -94,16 +102,31 @@ export interface StockCompareSnapshot {
   rows: Record<string, StockCompareRow>;
 }
 
+export type StockCompareAvoidReason = "buy_cost" | "round_trip" | "no_exit";
+
+export interface StockCompareAvoidEntry {
+  issuer: StockCompareIssuer;
+  /** buy_cost: costBps over the limit; round_trip: roundTripBps over the limit; no_exit: the sell-back quote failed. */
+  reasons: StockCompareAvoidReason[];
+}
+
 export interface StockCompareSizeVerdict {
   usdt: number;
-  /** Issuer with the most shares among the versions whose buy answered; null when none answered. */
+  /**
+   * The version to prefer, or null: when `about_same`, when no answered version is clear of `avoid`, or when
+   * nothing answered. One clear version is chosen outright; two clear versions: more shares when the edge is
+   * 20 bps or more, otherwise the lower roundTripBps.
+   */
   best: StockCompareIssuer | null;
-  /** (sharesBest / sharesOther - 1) x 10 000 rounded to 0.1; null unless two versions answered. */
+  /** (sharesLeader / sharesOther - 1) x 10 000 rounded to 0.1; null unless two versions answered. */
   edgeBps: number | null;
-  /** True when two versions answered and edgeBps is under {@link STOCK_COMPARE_ABOUT_SAME_BPS}. */
+  /**
+   * True only when two versions answered, the share edge is under {@link STOCK_COMPARE_ABOUT_SAME_BPS},
+   * both round trips are known and they differ by at most {@link STOCK_COMPARE_ROUND_TRIP_GAP_BPS}.
+   */
   about_same: boolean;
-  /** Issuers whose answered buy costs more than {@link STOCK_COMPARE_AVOID_COST_BPS} bps over the reference price. */
-  avoid: StockCompareIssuer[];
+  /** Answered versions to avoid, each with why; empty when none. */
+  avoid: StockCompareAvoidEntry[];
   /** The issuer when exactly one version has a route at this size. */
   only: StockCompareIssuer | null;
 }
@@ -165,7 +188,7 @@ export function buildAnsweredSize(input: {
   return size;
 }
 
-export function buildFailedSize(usdt: number, code: "no_route" | "quote_failed"): StockCompareSize {
+export function buildFailedSize(usdt: number, code: "no_route" | "quote_failed" | "decimals_mismatch" | "implausible"): StockCompareSize {
   return { usdt, ok: false, code, tokensOut: null, shares: null, costBps: null, roundTripBps: null, route: null, venues: [] };
 }
 
@@ -197,26 +220,48 @@ export function venueNames(legs: readonly string[]): string[] {
 /** Pure: the verdict for each size present in the row, ascending. */
 export function computeVerdicts(row: StockCompareRow): StockCompareSizeVerdict[] {
   const sizes = [...new Set(row.versions.flatMap((v) => v.sizes.map((s) => s.usdt)))].sort((a, b) => a - b);
-  return sizes.map((usdt) => {
+  return sizes.map((usdt): StockCompareSizeVerdict => {
     const answered = row.versions
       .map((version) => ({ issuer: version.issuer, size: version.sizes.find((s) => s.usdt === usdt) }))
       .filter((x): x is { issuer: StockCompareIssuer; size: StockCompareSize } =>
         x.size !== undefined && x.size.ok && finite(x.size.shares) && x.size.shares > 0);
 
-    const avoid = answered
-      .filter((x) => finite(x.size.costBps) && x.size.costBps > STOCK_COMPARE_AVOID_COST_BPS)
-      .map((x) => x.issuer);
-
-    if (answered.length === 0) return { usdt, best: null, edgeBps: null, about_same: false, avoid, only: null };
-    if (answered.length === 1) {
-      return { usdt, best: answered[0]!.issuer, edgeBps: null, about_same: false, avoid, only: answered[0]!.issuer };
+    const avoid: StockCompareAvoidEntry[] = [];
+    for (const x of answered) {
+      const reasons: StockCompareAvoidReason[] = [];
+      if (finite(x.size.costBps) && x.size.costBps > STOCK_COMPARE_AVOID_COST_BPS) reasons.push("buy_cost");
+      if (finite(x.size.roundTripBps) && x.size.roundTripBps > STOCK_COMPARE_AVOID_ROUND_TRIP_BPS) reasons.push("round_trip");
+      if (x.size.roundTripBps === null) reasons.push("no_exit");
+      if (reasons.length > 0) avoid.push({ issuer: x.issuer, reasons });
     }
-    // More shares wins; an exact tie goes to the first listed version.
+    const avoided = new Set(avoid.map((entry) => entry.issuer));
+    const candidates = answered.filter((x) => !avoided.has(x.issuer));
+    const only = answered.length === 1 ? answered[0]!.issuer : null;
+
+    if (answered.length < 2) {
+      return { usdt, best: candidates[0]?.issuer ?? null, edgeBps: null, about_same: false, avoid, only };
+    }
+    // More shares first; an exact tie keeps the first listed version.
     const ordered = [...answered].sort((a, b) => (b.size.shares as number) - (a.size.shares as number));
     const leader = ordered[0]!;
     const runnerUp = ordered[1]!;
     const edgeBps = Math.round(((leader.size.shares as number) / (runnerUp.size.shares as number) - 1) * 10_000 * 10) / 10;
-    return { usdt, best: leader.issuer, edgeBps, about_same: edgeBps < STOCK_COMPARE_ABOUT_SAME_BPS, avoid, only: null };
+    const roundTrips = answered.map((x) => x.size.roundTripBps);
+    const known = roundTrips.every((v): v is number => finite(v));
+    const aboutSame = edgeBps < STOCK_COMPARE_ABOUT_SAME_BPS
+      && known
+      && Math.abs((roundTrips[0] as number) - (roundTrips[1] as number)) <= STOCK_COMPARE_ROUND_TRIP_GAP_BPS;
+
+    let best: StockCompareIssuer | null = null;
+    if (!aboutSame) {
+      if (candidates.length === 1) best = candidates[0]!.issuer;
+      else if (candidates.length === 2) {
+        best = edgeBps >= STOCK_COMPARE_ABOUT_SAME_BPS
+          ? leader.issuer
+          : [...candidates].sort((a, b) => (a.size.roundTripBps as number) - (b.size.roundTripBps as number))[0]!.issuer;
+      }
+    }
+    return { usdt, best, edgeBps, about_same: aboutSame, avoid, only: null };
   });
 }
 

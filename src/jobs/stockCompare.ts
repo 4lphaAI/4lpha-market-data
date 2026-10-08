@@ -21,6 +21,7 @@
  * quotes was attempted, so a cut-off cycle can never publish a one-sided comparison.
  */
 
+import { randomUUID } from "node:crypto";
 import type { RwaToken } from "../core/models.js";
 import type { SnapshotStore } from "../core/store.js";
 import type { JobSpec } from "../core/types.js";
@@ -41,6 +42,7 @@ import { RWA_UNIVERSE_KEY } from "../universe.js";
 import type { RwaUniverseSnapshot } from "./binanceRwa.js";
 import {
   STOCK_COMPARE_FRESH_MS,
+  STOCK_COMPARE_IMPLAUSIBLE_COST_BPS,
   STOCK_COMPARE_KEY,
   STOCK_COMPARE_SIZES_USDT,
   STOCK_COMPARE_SOURCE,
@@ -49,6 +51,8 @@ import {
   atomicToNumber,
   buildAnsweredSize,
   buildFailedSize,
+  costBpsFor,
+  sharesFor,
   cleanMarketStatus,
   isStockCompareAddress,
   isStockCompareSymbol,
@@ -68,7 +72,18 @@ export const STOCK_COMPARE_TIMEOUT_MS = 12 * 60_000;
 /** The cycle stops on its own a minute before the scheduler would abort it. */
 export const STOCK_COMPARE_CYCLE_BUDGET_MS = 11 * 60_000;
 
-export const STOCK_COMPARE_DEFAULT_MIN_HEADROOM = 10;
+/** Default headroom: 10 free slots of today's 18-slot bucket (operator ruling Q1), kept as a fraction. */
+export const STOCK_COMPARE_DEFAULT_HEADROOM_RATIO = 10 / 18;
+/** Consecutive failed attempts (other than a plain no-route) that end the cycle. */
+export const STOCK_COMPARE_MAX_CONSECUTIVE_FAILURES = 10;
+/** One cycle at a time across processes (a deploy overlap): lease name and TTL (one interval). */
+export const STOCK_COMPARE_LEASE = "stock-compare:cycle";
+export const STOCK_COMPARE_LEASE_TTL_MS = 15 * 60_000;
+/** The first cycle after boot waits a random time in this range (ms), so a deploy overlap never starts one at once. */
+export const STOCK_COMPARE_BOOT_DELAY_MIN_MS = 2 * 60_000;
+export const STOCK_COMPARE_BOOT_DELAY_MAX_MS = 5 * 60_000;
+const UINT256_MAX = (1n << 256n) - 1n;
+const PROCESS_HOLDER = randomUUID();
 export const STOCK_COMPARE_DEFAULT_RPS = 2;
 /** Re-check the shared bucket this often while it has too little headroom. */
 export const STOCK_COMPARE_HEADROOM_RECHECK_MS = 1_000;
@@ -82,8 +97,10 @@ const USDT_DECIMALS = 18;
 const DECIMAL_UINT = /^[1-9][0-9]*$/u;
 
 export interface StockCompareConfig {
-  /** Free slots the shared bucket must hold before a quote is sent. */
+  /** Free slots the shared bucket must hold before a quote is sent: ceil(bucket x headroomRatio). */
   readonly minHeadroom: number;
+  /** The fraction of the bucket that must be free. */
+  readonly headroomRatio: number;
   /** Own pace ceiling, quotes per second. */
   readonly rps: number;
 }
@@ -92,24 +109,38 @@ function readBoundedInt(env: NodeJS.ProcessEnv, name: string, fallback: number, 
   const raw = env[name];
   const text = raw === undefined ? String(fallback) : raw.trim();
   const value = /^[1-9][0-9]*$/u.test(text) ? Number(text) : Number.NaN;
-  // The default is held to the same ceiling: a headroom above the shared bucket never passes.
+  // The default is held to the same ceiling as an explicit value.
   if (!Number.isSafeInteger(value) || value > max) {
     throw new Error(`invalid ${name}: expected an integer from 1 to ${max} (the BINANCE_RWA_RPS bucket)`);
   }
   return value;
 }
 
+function readHeadroomRatio(env: NodeJS.ProcessEnv): number {
+  const raw = env["STOCK_COMPARE_MIN_HEADROOM_RATIO"];
+  if (raw === undefined) return STOCK_COMPARE_DEFAULT_HEADROOM_RATIO;
+  const text = raw.trim();
+  const ratio = /^(?:0.[0-9]+|.[0-9]+)$/u.test(text) ? Number(text) : Number.NaN;
+  if (!Number.isFinite(ratio) || !(ratio > 0) || !(ratio < 1)) {
+    throw new Error("invalid STOCK_COMPARE_MIN_HEADROOM_RATIO: expected a decimal strictly between 0 and 1");
+  }
+  return ratio;
+}
+
 /**
- * `STOCK_COMPARE_MIN_HEADROOM` (default 10) and `STOCK_COMPARE_RPS` (default 2): positive integers,
- * both capped by the shared bucket (`BINANCE_RWA_RPS`, 18 in production). A headroom above the bucket
- * could never be met and would idle every cycle, so it throws instead of clamping. A malformed value
- * throws rather than falling back, like `readBinanceRwaRps`.
+ * `STOCK_COMPARE_MIN_HEADROOM_RATIO` (default 10/18) is the fraction of the shared bucket
+ * (`BINANCE_RWA_RPS`, 18 in production) that must be free before a quote is sent; the required count is
+ * `ceil(bucket x ratio)`, so it follows the bucket (10 at 18). `STOCK_COMPARE_RPS` (default 2) is the
+ * own pace, an integer capped by the bucket. A malformed value throws rather than falling back, like
+ * `readBinanceRwaRps`.
  */
 export function readStockCompareConfig(env: NodeJS.ProcessEnv = process.env): StockCompareConfig {
   const bucket = readBinanceRwaRps(env);
-  const minHeadroom = readBoundedInt(env, "STOCK_COMPARE_MIN_HEADROOM", STOCK_COMPARE_DEFAULT_MIN_HEADROOM, bucket);
+  const headroomRatio = readHeadroomRatio(env);
+  // The epsilon keeps 18 x (10/18) at 10 instead of rounding a float artefact up to 11.
+  const minHeadroom = Math.min(bucket, Math.max(1, Math.ceil(bucket * headroomRatio - 1e-9)));
   const rps = readBoundedInt(env, "STOCK_COMPARE_RPS", STOCK_COMPARE_DEFAULT_RPS, bucket);
-  return { minHeadroom, rps };
+  return { minHeadroom, headroomRatio, rps };
 }
 
 // ----------------------------------------------------------------- planning ----
@@ -180,7 +211,7 @@ export function parseFlashRouterResult(data: unknown, request: StockCompareQuote
   if (!isRecord(data) || !isRecord(data["routerResult"])) throw new Error("unexpected quote shape");
   const result = data["routerResult"];
   const out = result["toTokenAmount"];
-  if (typeof out !== "string" || !DECIMAL_UINT.test(out)) throw new Error("unexpected quote amount");
+  if (typeof out !== "string" || !DECIMAL_UINT.test(out) || BigInt(out) > UINT256_MAX) throw new Error("unexpected quote amount");
   const from = result["fromTokenAmount"];
   if (from !== undefined && from !== request.amountAtomic) throw new Error("quote amount mismatch");
   const decimal = isRecord(result["toToken"]) ? Number(result["toToken"]["decimal"]) : Number.NaN;
@@ -238,6 +269,8 @@ export type StockCompareEnd =
   | "rate_limited"
   | "rate_budget"
   | "auth_rejected"
+  | "failure_brake"
+  | "lease_held"
   | "time_budget"
   | "aborted";
 
@@ -257,12 +290,16 @@ export interface RunStockCompareOptions {
   limiter?: RateLimiter | undefined;
   config?: StockCompareConfig | undefined;
   now?: (() => number) | undefined;
+  /** Holder id for the cross-process lease. */
+  holder?: string | undefined;
+  /** Shortens the cycle's own time budget (the job passes what is left after its boot delay). */
+  budgetMs?: number | undefined;
   /** Test hook. A fake must advance the injected `now`, or the give-up timer never fires. */
   sleep?: ((ms: number) => Promise<void>) | undefined;
 }
 
 class CycleStop extends Error {
-  constructor(readonly reason: Exclude<StockCompareEnd, "complete" | "universe_not_fresh">) {
+  constructor(readonly reason: Exclude<StockCompareEnd, "complete" | "universe_not_fresh" | "lease_held">) {
     super(`stock-compare cycle stopped: ${reason}`);
   }
 }
@@ -288,6 +325,13 @@ export async function runStockCompare(
     endedBy: "complete", tickersPlanned: 0, tickersQuoted: 0, quotesSent: 0, headroomWaits: 0, published: false,
   };
 
+  // One cycle at a time across processes (a deploy overlap). The same holder renews its own lease.
+  const holder = options.holder ?? PROCESS_HOLDER;
+  if (!await store.acquireSchedulerLease(STOCK_COMPARE_LEASE, holder, STOCK_COMPARE_LEASE_TTL_MS)) {
+    cycle.endedBy = "lease_held";
+    return cycle;
+  }
+
   const universe = await store.get<RwaUniverseSnapshot>(RWA_UNIVERSE_KEY);
   if (universe === null || universe.staleness !== "fresh" || !Array.isArray(universe.data?.rows)) {
     cycle.endedBy = "universe_not_fresh";
@@ -302,12 +346,14 @@ export async function runStockCompare(
   planned.sort((a, b) => (previous[a.ticker]?.quotedAt ?? 0) - (previous[b.ticker]?.quotedAt ?? 0) || (a.ticker < b.ticker ? -1 : 1));
 
   const startedAt = now();
+  const budgetMs = options.budgetMs ?? STOCK_COMPARE_CYCLE_BUDGET_MS;
   let lastSendAt: number | null = null;
+  let consecutiveFailures = 0;
 
   /** Waits for own pace and for headroom in the shared bucket, then takes a slot from it. */
   async function gate(): Promise<void> {
     if (signal.aborted) throw new CycleStop("aborted");
-    if (now() - startedAt > STOCK_COMPARE_CYCLE_BUDGET_MS) throw new CycleStop("time_budget");
+    if (now() - startedAt > budgetMs) throw new CycleStop("time_budget");
     if (lastSendAt !== null) {
       const wait = spacingMs - (now() - lastSendAt);
       if (wait > 0) await sleep(wait);
@@ -334,7 +380,9 @@ export async function runStockCompare(
   async function attempt(request: StockCompareQuoteRequest): Promise<Attempt> {
     await gate();
     try {
-      return { ok: true, raw: await quote(request, signal) };
+      const raw = await quote(request, signal);
+      consecutiveFailures = 0;
+      return { ok: true, raw };
     } catch (error) {
       if (signal.aborted) throw new CycleStop("aborted");
       if (error instanceof BinanceFlashRateBudgetError) throw new CycleStop("rate_budget");
@@ -342,8 +390,13 @@ export async function runStockCompare(
       if (error instanceof AdapterError) {
         if (error.status === 429) throw new CycleStop("rate_limited");
         if (error.status === 401 || error.status === 403) throw new CycleStop("auth_rejected");
-        return { ok: false, noRoute: error.upstreamCode === BINANCE_FLASH_NO_PATH_CODE };
+        if (error.upstreamCode === BINANCE_FLASH_NO_PATH_CODE) {
+          consecutiveFailures = 0; // a clean "no path" answer: the upstream is working
+          return { ok: false, noRoute: true };
+        }
       }
+      // In-band error codes and transport failures: a degraded upstream must not keep drawing from the bucket.
+      if (++consecutiveFailures >= STOCK_COMPARE_MAX_CONSECUTIVE_FAILURES) throw new CycleStop("failure_brake");
       return { ok: false, noRoute: false };
     }
   }
@@ -354,12 +407,25 @@ export async function runStockCompare(
     const buy = await attempt({ tokenIn: BINANCE_FLASH_USDT_ADDRESS, tokenOut: version.row.address, amountAtomic });
     if (!buy.ok) return buildFailedSize(usdt, buy.noRoute ? "no_route" : "quote_failed");
 
+    // The answer's decimals must agree with the store's before either is trusted.
+    if (buy.raw.decimals !== null && version.row.decimals !== null && buy.raw.decimals !== version.row.decimals) {
+      return buildFailedSize(usdt, "decimals_mismatch");
+    }
+    const tokensOut = atomicToNumber(buy.raw.toTokenAmount, buy.raw.decimals ?? tokenDecimals);
+    const shares = sharesFor(tokensOut, version.row.tokenToShareRatio as number);
+    if (!Number.isFinite(shares) || !(shares > 0) || costBpsFor(usdt, shares, planned.referencePriceUsd) < STOCK_COMPARE_IMPLAUSIBLE_COST_BPS) {
+      return buildFailedSize(usdt, "implausible");
+    }
+
     // Sell back exactly what was quoted, as the atomic string the answer carried.
     const sell = await attempt({ tokenIn: version.row.address, tokenOut: BINANCE_FLASH_USDT_ADDRESS, amountAtomic: buy.raw.toTokenAmount });
+    if (sell.ok && sell.raw.decimals !== null && sell.raw.decimals !== USDT_DECIMALS) {
+      return buildFailedSize(usdt, "decimals_mismatch");
+    }
     const sellCode: StockCompareCode | null = sell.ok ? null : sell.noRoute ? "sell_no_route" : "sell_failed";
     return buildAnsweredSize({
       usdt,
-      tokensOut: atomicToNumber(buy.raw.toTokenAmount, buy.raw.decimals ?? tokenDecimals),
+      tokensOut,
       ratio: version.row.tokenToShareRatio as number,
       referencePriceUsd: planned.referencePriceUsd,
       usdtBack: sell.ok ? atomicToNumber(sell.raw.toTokenAmount, sell.raw.decimals ?? USDT_DECIMALS) : null,
@@ -393,7 +459,10 @@ export async function runStockCompare(
     cycle.endedBy = error.reason;
   } finally {
     cycle.tickersQuoted = fresh.length;
-    if (fresh.length > 0) {
+    // A run the scheduler timed out must not write late, and neither may one that lost its lease.
+    const mayWrite = fresh.length > 0 && !signal.aborted
+      && await store.acquireSchedulerLease(STOCK_COMPARE_LEASE, holder, STOCK_COMPARE_LEASE_TTL_MS);
+    if (mayWrite) {
       await store.put(STOCK_COMPARE_KEY, { rows: mergeStockCompareRows(previous, fresh, now()) }, {
         source: STOCK_COMPARE_SOURCE,
         freshForMs: STOCK_COMPARE_FRESH_MS,
@@ -412,30 +481,65 @@ export function isStockCompareEnabled(env: NodeJS.ProcessEnv = process.env): boo
   return env["STOCK_COMPARE_ENABLED"] === "true";
 }
 
-export function stockCompareJob(store: SnapshotStore): JobSpec {
+export interface StockCompareJobOptions {
+  /** Test hook: the first cycle's wait. Default: random between 2 and 5 minutes. */
+  bootDelayMs?: number | undefined;
+  now?: (() => number) | undefined;
+  sleep?: ((ms: number, signal: AbortSignal) => Promise<void>) | undefined;
+}
+
+function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(() => { signal.removeEventListener("abort", done); resolve(); }, ms);
+    function done(): void { clearTimeout(timer); resolve(); }
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+export function stockCompareJob(store: SnapshotStore, options: StockCompareJobOptions = {}): JobSpec {
   try {
     readStockCompareConfig();
   } catch (error) {
     // Each run re-reads the config and fails visibly in /status; say it once at boot too.
     console.error(`[${STOCK_COMPARE_JOB}] ${error instanceof Error ? error.message : "invalid configuration"}`);
   }
+  const now = options.now ?? (() => Date.now());
+  const sleep = options.sleep ?? abortableSleep;
+  const bootDelayMs = options.bootDelayMs
+    ?? STOCK_COMPARE_BOOT_DELAY_MIN_MS + Math.floor(Math.random() * (STOCK_COMPARE_BOOT_DELAY_MAX_MS - STOCK_COMPARE_BOOT_DELAY_MIN_MS + 1));
+  const createdAt = now();
+  let first = true;
   return {
     name: STOCK_COMPARE_JOB,
     intervalMs: STOCK_COMPARE_INTERVAL_MS,
     jitterMs: STOCK_COMPARE_JITTER_MS,
     timeoutMs: STOCK_COMPARE_TIMEOUT_MS,
     run: async (signal) => {
-      const startedAt = Date.now();
-      const result = await runStockCompare(store, signal);
+      const startedAt = now();
+      // The very first cycle after boot waits, so a deploy overlap never starts a ~580-quote cycle at once.
+      // The wait counts against this run's scheduler timeout, so the cycle's own budget shrinks by it.
+      if (first) {
+        first = false;
+        const wait = bootDelayMs - (startedAt - createdAt);
+        if (wait > 0) await sleep(wait, signal);
+        if (signal.aborted) return;
+      }
+      const waited = now() - startedAt;
+      const result = await runStockCompare(store, signal, { budgetMs: Math.max(0, STOCK_COMPARE_CYCLE_BUDGET_MS - waited) });
       console.log(
         `[${STOCK_COMPARE_JOB}] ended=${result.endedBy} tickers=${result.tickersQuoted}/${result.tickersPlanned} ` +
-        `quotes=${result.quotesSent} headroomWaits=${result.headroomWaits} ms=${Date.now() - startedAt}`,
+        `quotes=${result.quotesSent} headroomWaits=${result.headroomWaits} ms=${now() - startedAt}`,
       );
     },
   };
 }
 
 /** The job when `STOCK_COMPARE_ENABLED=true`, else null: off means not registered. */
-export function stockCompareJobIfEnabled(store: SnapshotStore, env: NodeJS.ProcessEnv = process.env): JobSpec | null {
-  return isStockCompareEnabled(env) ? stockCompareJob(store) : null;
+export function stockCompareJobIfEnabled(
+  store: SnapshotStore,
+  env: NodeJS.ProcessEnv = process.env,
+  options: StockCompareJobOptions = {},
+): JobSpec | null {
+  return isStockCompareEnabled(env) ? stockCompareJob(store, options) : null;
 }

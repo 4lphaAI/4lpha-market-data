@@ -92,6 +92,8 @@ import {
 import {
   STOCK_COMPARE_ABOUT_SAME_BPS,
   STOCK_COMPARE_AVOID_COST_BPS,
+  STOCK_COMPARE_AVOID_ROUND_TRIP_BPS,
+  STOCK_COMPARE_ROUND_TRIP_GAP_BPS,
   STOCK_COMPARE_KEY,
   STOCK_COMPARE_SIZES_USDT,
   STOCK_COMPARE_STALE_MS,
@@ -214,6 +216,7 @@ const STATUS_SNAPSHOT_KEYS = [
   MEME_MEASURE_LATEST_KEY,
   MEME_BOARD_KEY,
   MEME_BARS_INDEX_KEY,
+  STOCK_COMPARE_KEY,
 ];
 
 const MEME_BARS_BATCH_MAX = 30;
@@ -1759,6 +1762,8 @@ export function createServer(deps: ServerDeps): Hono {
       sizesUsdt: STOCK_COMPARE_SIZES_USDT,
       aboutSameBps: STOCK_COMPARE_ABOUT_SAME_BPS,
       avoidCostBps: STOCK_COMPARE_AVOID_COST_BPS,
+      avoidRoundTripBps: STOCK_COMPARE_AVOID_ROUND_TRIP_BPS,
+      roundTripGapBps: STOCK_COMPARE_ROUND_TRIP_GAP_BPS,
     };
     if (ticker !== undefined) {
       const row = rows[ticker];

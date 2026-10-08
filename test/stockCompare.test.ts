@@ -114,6 +114,9 @@ interface QuoteCall { request: StockCompareQuoteRequest; at: number }
  * A scripted aggregator: a buy gets `amount / pricePerToken` tokens, a sell pays back `amount x price x 0.999`
  * (a 10 bps round trip), legs fixed. `override` answers or throws for a specific call.
  */
+/** USDT per token, near each stock's reference price so no scripted quote looks implausible. */
+const PRICE: Record<string, bigint> = { [NVDAB_A]: 237n, [NVDAON_A]: 237n, [SPYB_A]: 782n, [SPYON_A]: 782n };
+
 function scriptedQuote(
   now: () => number,
   override: (request: StockCompareQuoteRequest, index: number) => StockCompareRawQuote | Error | undefined = () => undefined,
@@ -127,9 +130,10 @@ function scriptedQuote(
     if (forced !== undefined) return forced;
     const amount = BigInt(request.amountAtomic);
     const isBuy = request.tokenIn === BINANCE_FLASH_USDT_ADDRESS;
+    const price = PRICE[isBuy ? request.tokenOut : request.tokenIn] ?? 100n;
     return isBuy
-      ? { toTokenAmount: (amount / 100n).toString(), decimals: 18, legs: ["Rfq Neptunex"] }
-      : { toTokenAmount: ((amount * 100n * 999n) / 1000n).toString(), decimals: 18, legs: ["Metric", "Elfomofi"] };
+      ? { toTokenAmount: (amount / price).toString(), decimals: 18, legs: ["Rfq Neptunex"] }
+      : { toTokenAmount: ((amount * price * 999n) / 1000n).toString(), decimals: 18, legs: ["Metric", "Elfomofi"] };
   };
   return { quote, calls };
 }
@@ -205,53 +209,104 @@ function row(versions: StockCompareVersion[], quotedAt = T0): StockCompareRow {
   return { ticker: "NVDA", quotedAt, referencePriceUsd: 100, versions };
 }
 
+/** A size with explicit shares, buy cost and round trip. */
+const sz = (usdt: number, shares: number, costBps: number, roundTripBps: number | null, over: Partial<StockCompareSize> = {}): StockCompareSize =>
+  size(usdt, shares, costBps, { roundTripBps, ...(roundTripBps === null ? { code: "sell_failed" as const } : {}), ...over });
+const verdictOf = (bstock: StockCompareSize, ondo: StockCompareSize) =>
+  computeVerdicts(row([version("bstock", [bstock]), version("ondo", [ondo])]))[0]!;
+
 describe("computeVerdicts", () => {
-  it("edge 19.0 bps is about_same, 21.0 is not", () => {
-    const a = computeVerdicts(row([version("bstock", [size(100, 1, 0)]), version("ondo", [size(100, 1.0019, 0)])]))[0]!;
-    assert.equal(a.edgeBps, 19);
-    assert.equal(a.about_same, true);
-    assert.equal(a.best, "ondo");
-    const b = computeVerdicts(row([version("bstock", [size(100, 1, 0)]), version("ondo", [size(100, 1.0021, 0)])]))[0]!;
-    assert.equal(b.edgeBps, 21);
-    assert.equal(b.about_same, false);
-    assert.equal(b.best, "ondo");
+  it("step 0 TSLA 500: Ondo exit -62 percent is avoided (round_trip), bStock is best, not about_same", () => {
+    const v = verdictOf(sz(500, 1.3331, 4, 3), sz(500, 1.3322, 11, 6236));
+    assert.deepEqual(v, { usdt: 500, best: "bstock", edgeBps: 6.8, about_same: false, avoid: [{ issuer: "ondo", reasons: ["round_trip"] }], only: null });
   });
 
-  it("exactly 20.0 bps is not about_same", () => {
-    const v = computeVerdicts(row([version("bstock", [size(100, 1.002, 0)]), version("ondo", [size(100, 1, 0)])]))[0]!;
-    assert.equal(v.edgeBps, 20);
-    assert.equal(v.about_same, false);
+  it("step 0 NVDA 500: 10 bps apart with matching exits is about_same, best null", () => {
+    const v = verdictOf(sz(500, 2.1085, -12, 2), sz(500, 2.1106, -21, 3));
+    assert.deepEqual(v, { usdt: 500, best: null, edgeBps: 10, about_same: true, avoid: [], only: null });
+  });
+
+  it("step 0 SPY 500: Ondo avoided for both buy_cost and round_trip, bStock best", () => {
+    const v = verdictOf(sz(500, 0.6449, -90, 0), sz(500, 0.095, 57286, 8537));
     assert.equal(v.best, "bstock");
+    assert.equal(v.about_same, false);
+    assert.deepEqual(v.avoid, [{ issuer: "ondo", reasons: ["buy_cost", "round_trip"] }]);
   });
 
-  it("avoid lists a version costing more than 200 bps: 199 and 200 pass, 201 does not", () => {
-    const at = (cost: number) => computeVerdicts(row([version("bstock", [size(100, 1, 0)]), version("ondo", [size(100, 0.9, cost)])]))[0]!.avoid;
+  it("a sell-back that failed is no_exit and avoided", () => {
+    const v = verdictOf(sz(100, 1, 0, 2), sz(100, 1.01, 0, null));
+    assert.deepEqual(v.avoid, [{ issuer: "ondo", reasons: ["no_exit"] }]);
+    assert.equal(v.best, "bstock");
+    assert.equal(v.about_same, false, "an unknown round trip can never be about_same");
+    const tie = verdictOf(sz(100, 1, 0, null), sz(100, 1.0001, 0, null));
+    assert.equal(tie.about_same, false);
+    assert.equal(tie.best, null, "both avoided");
+  });
+
+  it("both versions avoided leaves best null", () => {
+    const v = verdictOf(sz(100, 1, 450, 5), sz(100, 1.2, 300, 5));
+    assert.equal(v.best, null);
+    assert.deepEqual(v.avoid, [{ issuer: "bstock", reasons: ["buy_cost"] }, { issuer: "ondo", reasons: ["buy_cost"] }]);
+    const exits = verdictOf(sz(100, 1, 0, 900), sz(100, 1.5, 0, 400));
+    assert.equal(exits.best, null);
+    assert.deepEqual(exits.avoid.map((e) => e.reasons), [["round_trip"], ["round_trip"]]);
+  });
+
+  it("edge 19.0 bps is about_same, 21.0 is not (round trips equal)", () => {
+    const a = verdictOf(sz(100, 1, 0, 3), sz(100, 1.0019, 0, 3));
+    assert.deepEqual([a.edgeBps, a.about_same, a.best], [19, true, null]);
+    const b = verdictOf(sz(100, 1, 0, 3), sz(100, 1.0021, 0, 3));
+    assert.deepEqual([b.edgeBps, b.about_same, b.best], [21, false, "ondo"]);
+    const exact = verdictOf(sz(100, 1.002, 0, 3), sz(100, 1, 0, 3));
+    assert.deepEqual([exact.edgeBps, exact.about_same, exact.best], [20, false, "bstock"]);
+  });
+
+  it("round trips 200 bps apart still allow about_same, 201 do not", () => {
+    // 100 vs 300 is a 200 gap, but 300 is over the exit limit; keep both under it with a lower pair: 0 vs 200
+    assert.equal(verdictOf(sz(100, 1, 0, 0), sz(100, 1.0005, 0, 200)).about_same, true);
+    const wide = verdictOf(sz(100, 1, 0, 0), sz(100, 1.0005, 0, 201));
+    assert.equal(wide.about_same, false);
+    assert.deepEqual(wide.avoid, [{ issuer: "ondo", reasons: ["round_trip"] }]);
+    assert.equal(wide.best, "bstock");
+  });
+
+  it("avoid on buy cost: 199 and 200 pass, 201 does not", () => {
+    const at = (cost: number) => verdictOf(sz(100, 1, 0, 3), sz(100, 0.9, cost, 3)).avoid;
     assert.deepEqual(at(199), []);
     assert.deepEqual(at(200), []);
-    assert.deepEqual(at(201), ["ondo"]);
-    assert.deepEqual(computeVerdicts(row([version("bstock", [size(100, 1, 450)]), version("ondo", [size(100, 1, 300)])]))[0]!.avoid, ["bstock", "ondo"]);
+    assert.deepEqual(at(201), [{ issuer: "ondo", reasons: ["buy_cost"] }]);
   });
 
-  it("a single version with a route is `only`, with no edge", () => {
-    const v = computeVerdicts(row([version("bstock", [size(5000, null, null, { ok: false, code: "no_route", route: null, venues: [] })]), version("ondo", [size(5000, 26.1, -1)])]))[0]!;
-    assert.equal(v.only, "ondo");
-    assert.equal(v.best, "ondo");
-    assert.equal(v.edgeBps, null);
-    assert.equal(v.about_same, false);
+  it("avoid on round trip: 200 passes, 201 does not", () => {
+    const at = (rt: number) => verdictOf(sz(100, 1, 0, 3), sz(100, 0.9, 0, rt)).avoid;
+    assert.deepEqual(at(200), []);
+    assert.deepEqual(at(201), [{ issuer: "ondo", reasons: ["round_trip"] }]);
+  });
+
+  it("two clear versions apart by 20 bps or more: the one with more shares wins", () => {
+    const v = verdictOf(sz(100, 1, 0, 3), sz(100, 1.01, 0, 3));
+    assert.deepEqual([v.best, v.edgeBps, v.about_same], ["ondo", 100, false]);
+  });
+
+  it("a single version with a route is `only`; it is best unless avoided", () => {
+    const failed = size(5000, null, null, { ok: false, code: "no_route", route: null, venues: [] });
+    const v = verdictOf(failed, sz(5000, 26.1, -1, 5));
+    assert.deepEqual([v.only, v.best, v.edgeBps, v.about_same], ["ondo", "ondo", null, false]);
+    const bad = verdictOf(failed, sz(5000, 26.1, 500, 5));
+    assert.deepEqual([bad.only, bad.best], ["ondo", null]);
   });
 
   it("no version with a route leaves everything empty", () => {
     const failed = size(100, null, null, { ok: false, code: "quote_failed", route: null, venues: [] });
-    const v = computeVerdicts(row([version("bstock", [failed]), version("ondo", [failed])]))[0]!;
-    assert.deepEqual(v, { usdt: 100, best: null, edgeBps: null, about_same: false, avoid: [], only: null });
+    assert.deepEqual(verdictOf(failed, failed), { usdt: 100, best: null, edgeBps: null, about_same: false, avoid: [], only: null });
   });
 
   it("one verdict per size, ascending, each judged on its own size", () => {
     const verdicts = computeVerdicts(row([
-      version("bstock", [size(5000, 6, 4), size(100, 1, 4), size(1000, 3, 4)]),
-      version("ondo", [size(100, 2, 4), size(1000, 3, 4), size(5000, 6.5, 4)]),
+      version("bstock", [sz(5000, 6, 4, 3), sz(100, 1, 4, 3), sz(1000, 3, 4, 3)]),
+      version("ondo", [sz(100, 2, 4, 3), sz(1000, 3, 4, 3), sz(5000, 6.5, 4, 3)]),
     ]));
-    assert.deepEqual(verdicts.map((v) => [v.usdt, v.best]), [[100, "ondo"], [1000, "bstock"], [5000, "ondo"]]);
+    assert.deepEqual(verdicts.map((v) => [v.usdt, v.best]), [[100, "ondo"], [1000, null], [5000, "ondo"]]);
     assert.equal(verdicts[1]!.about_same, true);
   });
 });
@@ -330,7 +385,7 @@ describe("planStockCompareTickers", () => {
 
 // -------------------------------------------------------------------- cycle ----
 
-const OPTS = { config: { minHeadroom: 10, rps: 2 } };
+const OPTS = { config: { minHeadroom: 10, headroomRatio: 10 / 18, rps: 2 } };
 
 describe("runStockCompare", () => {
   it("quotes each version at three sizes, sells back the exact quoted amount, and stores the merged rows", async () => {
@@ -362,9 +417,9 @@ describe("runStockCompare", () => {
     assert.equal(nvda.referencePriceUsd, 237.40985268157382);
     assert.deepEqual(nvda.versions.map((v) => [v.issuer, v.symbol, v.marketStatus]), [["bstock", "NVDAB", null], ["ondo", "NVDAon", "regular"]]);
     const s = nvda.versions[0]!.sizes[0]!;
-    // 100 USDT at the scripted 100 USDT per token = 1 token = ratio shares
-    assert.equal(s.tokensOut, 1);
-    assert.ok(Math.abs((s.shares as number) - 1.00077822) < 1e-8);
+    // 100 USDT at the scripted 237 USDT per token
+    assert.ok(Math.abs((s.tokensOut as number) - 100 / 237) < 1e-8);
+    assert.ok(Math.abs((s.shares as number) - (100 / 237) * 1.0007782237528078) < 1e-8);
     assert.equal(s.roundTripBps, 10);
     assert.equal(s.route, "rfq");
     assert.equal(s.ok, true);
@@ -402,8 +457,8 @@ describe("runStockCompare", () => {
       if (buyingBstock && request.amountAtomic === (100n * 10n ** 18n).toString()) return noRoute();
       if (buyingBstock && request.amountAtomic === (1000n * 10n ** 18n).toString()) return new AdapterError("binance-rwa", "boom", 500);
       // Ondo sell-backs: no route at the first, a plain failure at the second
-      if (sellingOndo && request.amountAtomic === (100n * 10n ** 18n / 100n).toString()) return noRoute();
-      if (sellingOndo && request.amountAtomic === (1000n * 10n ** 18n / 100n).toString()) return new Error("timeout");
+      if (sellingOndo && request.amountAtomic === (100n * 10n ** 18n / 237n).toString()) return noRoute();
+      if (sellingOndo && request.amountAtomic === (1000n * 10n ** 18n / 237n).toString()) return new Error("timeout");
       return undefined;
     });
     await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter, quote, now: c.now, sleep: c.sleep });
@@ -482,7 +537,7 @@ describe("runStockCompare", () => {
       const c = clock();
       const { limiter } = fakeLimiter(() => 18);
       const { quote, calls } = scriptedQuote(c.now);
-      await runStockCompare(store, new AbortController().signal, { config: { minHeadroom: 10, rps: 2 }, limiter, quote, now: c.now, sleep: c.sleep });
+      await runStockCompare(store, new AbortController().signal, { config: { minHeadroom: 10, headroomRatio: 10 / 18, rps: 2 }, limiter, quote, now: c.now, sleep: c.sleep });
       const gaps = calls.slice(1).map((call, i) => call.at - calls[i]!.at);
       assert.ok(gaps.length > 5);
       assert.ok(gaps.every((g) => g >= 500), `gaps: ${gaps.join(",")}`);
@@ -611,6 +666,248 @@ describe("runStockCompare", () => {
   });
 });
 
+// ------------------------------------------------------------- safeguards ----
+
+describe("runStockCompare safeguards (fix round 1)", () => {
+  const run = (store: MemoryStore, c: ReturnType<typeof clock>, extra: Partial<Parameters<typeof runStockCompare>[2]> = {}, signal = new AbortController().signal) => {
+    const quotes = scriptedQuote(c.now);
+    return { quotes, promise: runStockCompare(store, signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: quotes.quote, now: c.now, sleep: c.sleep, ...extra }) };
+  };
+
+  it("a second process cannot run a cycle while the first holds the lease; the same holder renews its own", async () => {
+    let wall = Date.now();
+    const store = new MemoryStore(() => wall);
+    await seedUniverse(store, [NVDA_B, NVDA_O]);
+    const first = await run(store, clock(), { holder: "process-a" });
+    assert.equal((await first.promise).endedBy, "complete");
+
+    const blocked = await run(store, clock(), { holder: "process-b" });
+    const result = await blocked.promise;
+    assert.equal(result.endedBy, "lease_held");
+    assert.equal(blocked.quotes.calls.length, 0);
+    assert.equal(result.published, false);
+
+    assert.equal((await (await run(store, clock(), { holder: "process-a" })).promise).endedBy, "complete");
+    wall += 15 * MIN + 1;
+    await seedUniverse(store, [NVDA_B, NVDA_O]);
+    assert.equal((await (await run(store, clock(), { holder: "process-b" })).promise).endedBy, "complete", "the lease expires after one interval");
+  });
+
+  it("a run that lost its lease before the write publishes nothing", async () => {
+    const inner = new MemoryStore();
+    await seedUniverse(inner, [NVDA_B, NVDA_O]);
+    let acquires = 0;
+    const store = {
+      get: inner.get.bind(inner),
+      put: inner.put.bind(inner),
+      acquireSchedulerLease: async () => ++acquires === 1,
+    } as unknown as MemoryStore;
+    const c = clock();
+    const { quotes, promise } = run(store, c);
+    const result = await promise;
+    assert.equal(result.endedBy, "complete");
+    assert.equal(quotes.calls.length, 12);
+    assert.equal(result.published, false);
+    assert.equal(await inner.get(STOCK_COMPARE_KEY), null);
+  });
+
+  it("a run the scheduler aborted never writes late", async () => {
+    const store = new MemoryStore();
+    await seedUniverse(store, [NVDA_B, NVDA_O, SPY_B, SPY_O]);
+    const c = clock();
+    const controller = new AbortController();
+    const quotes = scriptedQuote(c.now, (_r, index) => { if (index === 14) controller.abort(); return undefined; });
+    const result = await runStockCompare(store, controller.signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: quotes.quote, now: c.now, sleep: c.sleep });
+    assert.equal(result.endedBy, "aborted");
+    assert.equal(result.tickersQuoted, 1, "one ticker had finished");
+    assert.equal(result.published, false);
+    assert.equal(await store.get(STOCK_COMPARE_KEY), null);
+  });
+
+  describe("consecutive-failure brake", () => {
+    const seeded = async () => {
+      const store = new MemoryStore();
+      await seedUniverse(store, [NVDA_B, NVDA_O, SPY_B, SPY_O]);
+      return store;
+    };
+
+    it("10 in-band failures in a row end the cycle; nothing is published", async () => {
+      const store = await seeded();
+      const c = clock();
+      const q = scriptedQuote(c.now, () => new AdapterError("binance-rwa", "internal error", undefined, "50001"));
+      const result = await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q.quote, now: c.now, sleep: c.sleep });
+      assert.equal(result.endedBy, "failure_brake");
+      assert.equal(q.calls.length, 10);
+    });
+
+    it("transport errors and 5xx count the same way", async () => {
+      for (const failure of [new Error("fetch failed"), new AdapterError("binance-rwa", "upstream responded 502", 502)]) {
+        const store = await seeded();
+        const c = clock();
+        const q = scriptedQuote(c.now, () => failure);
+        const result = await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q.quote, now: c.now, sleep: c.sleep });
+        assert.equal(result.endedBy, "failure_brake");
+        assert.equal(q.calls.length, 10);
+        // NVDA's six failed buys finished that ticker; SPY was cut off by the brake and is not written.
+        assert.equal(result.tickersQuoted, 1);
+        assert.deepEqual(Object.keys(await storedRows(store)), ["NVDA"]);
+      }
+    });
+
+    it("a ticker the brake cut off keeps its previous row", async () => {
+      const store = new MemoryStore();
+      const aapl = [
+        rwaRow({ address: "0x00000000000000000000000000000000000000c1", symbol: "AAPLB", platform: "bstock", underlyingTicker: "AAPL" }),
+        rwaRow({ address: "0x00000000000000000000000000000000000000c2", symbol: "AAPLon", platform: "ondo", underlyingTicker: "AAPL" }),
+      ];
+      await seedUniverse(store, [NVDA_B, NVDA_O, SPY_B, SPY_O, ...aapl]);
+      const c = clock();
+      const prev = row([version("bstock", [size(100, 1, 1)]), version("ondo", [size(100, 1, 1)])], T0 - 20 * MIN);
+      const previousAapl = { ...prev, ticker: "AAPL" };
+      await store.put(STOCK_COMPARE_KEY, { rows: { AAPL: previousAapl } }, TTL);
+      // Never-quoted NVDA and SPY go first. NVDA completes (12 calls); from then on every call fails:
+      // SPY's six failed buys finish SPY, then four more fail inside AAPL and the tenth trips the brake.
+      const q = scriptedQuote(c.now, (_r, index) => (index >= 12 ? new Error("fetch failed") : undefined));
+      const result = await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q.quote, now: c.now, sleep: c.sleep });
+      assert.equal(result.endedBy, "failure_brake");
+      assert.equal(q.calls.length, 12 + 10);
+      const rows = await storedRows(store);
+      assert.deepEqual(Object.keys(rows), ["AAPL", "NVDA", "SPY"]);
+      assert.deepEqual(rows["AAPL"], previousAapl);
+    });
+
+    it("a success resets the count, and plain no-route answers never count", async () => {
+      const store = await seeded();
+      const c = clock();
+      // every 10th call succeeds: never 10 in a row
+      const q1 = scriptedQuote(c.now, (_r, index) => (index % 10 === 9 ? undefined : new Error("fetch failed")));
+      const r1 = await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q1.quote, now: c.now, sleep: c.sleep });
+      assert.notEqual(r1.endedBy, "failure_brake");
+
+      const store2 = await seeded();
+      const q2 = scriptedQuote(c.now, () => noRoute());
+      const r2 = await runStockCompare(store2, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q2.quote, now: c.now, sleep: c.sleep });
+      assert.equal(r2.endedBy, "complete");
+      assert.equal(q2.calls.length, 12, "twelve no-route buys in a row, more than the brake limit");
+    });
+  });
+
+  describe("answer plausibility", () => {
+    const NVDA_REF = 237.40985268157382;
+    const NVDA_RATIO = 1.0007782237528078;
+    /** Atomic tokens that a 100 USDT buy of NVDAB would return at exactly `costBps` over the reference price. */
+    const atomicAtCost = (costBps: number): string => {
+      const shares = 100 / (NVDA_REF * (1 + costBps / 10_000));
+      return (BigInt(Math.round((shares / NVDA_RATIO) * 1e9)) * 10n ** 9n).toString();
+    };
+    const only100 = (store: MemoryStore) => storedRows(store).then((rows) => rows["NVDA"]!.versions[0]!.sizes[0]!);
+
+    it("a decimals mismatch with the store is recorded as decimals_mismatch and not sold back", async () => {
+      const store = new MemoryStore();
+      await seedUniverse(store, [NVDA_B, NVDA_O]);
+      const c = clock();
+      const q = scriptedQuote(c.now, (request) => (request.tokenOut === NVDAB_A ? { toTokenAmount: "421000000000000000", decimals: 0, legs: ["Metric"] } : undefined));
+      await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q.quote, now: c.now, sleep: c.sleep });
+      const bstock = (await storedRows(store))["NVDA"]!.versions[0]!;
+      assert.ok(bstock.sizes.every((s) => !s.ok && s.code === "decimals_mismatch" && s.shares === null && s.costBps === null));
+      assert.equal(q.calls.filter((x) => x.request.tokenIn === NVDAB_A).length, 0, "no sell-back for a doubtful buy");
+      // the other issuer is unaffected
+      assert.ok((await storedRows(store))["NVDA"]!.versions[1]!.sizes.every((s) => s.ok));
+    });
+
+    it("a sell-back that reports non-USDT decimals is a decimals_mismatch too; an answer without decimals falls back to the store", async () => {
+      const store = new MemoryStore();
+      await seedUniverse(store, [NVDA_B, NVDA_O]);
+      const c = clock();
+      const q = scriptedQuote(c.now, (request) => {
+        if (request.tokenIn === NVDAB_A) return { toTokenAmount: "99000000", decimals: 6, legs: ["Metric"] };
+        if (request.tokenOut === NVDAON_A) return { toTokenAmount: (BigInt(request.amountAtomic) / 237n).toString(), decimals: null, legs: ["Metric"] };
+        return undefined;
+      });
+      await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q.quote, now: c.now, sleep: c.sleep });
+      const versions = (await storedRows(store))["NVDA"]!.versions;
+      assert.ok(versions[0]!.sizes.every((s) => !s.ok && s.code === "decimals_mismatch"));
+      assert.ok(versions[1]!.sizes.every((s) => s.ok && typeof s.shares === "number"));
+    });
+
+    it("a buy more than 20 percent cheaper than the stock is implausible and not sold back", async () => {
+      for (const [cost, expectOk] of [[-2100, false], [-1900, true]] as const) {
+        const store = new MemoryStore();
+        await seedUniverse(store, [NVDA_B, NVDA_O]);
+        const c = clock();
+        const q = scriptedQuote(c.now, (request) => (request.tokenOut === NVDAB_A && request.amountAtomic === (100n * 10n ** 18n).toString()
+          ? { toTokenAmount: atomicAtCost(cost), decimals: 18, legs: ["Metric"] } : undefined));
+        await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q.quote, now: c.now, sleep: c.sleep });
+        const size100 = await only100(store);
+        assert.equal(size100.ok, expectOk, String(cost));
+        if (!expectOk) {
+          assert.equal(size100.code, "implausible");
+          assert.equal(size100.shares, null);
+          assert.equal(q.calls.filter((x) => x.request.tokenIn === NVDAB_A && x.request.amountAtomic === atomicAtCost(cost)).length, 0);
+        }
+      }
+    });
+  });
+
+  it("the job's cycle budget can be shortened (what is left after the boot delay)", async () => {
+    const store = new MemoryStore();
+    await seedUniverse(store, [NVDA_B, NVDA_O, SPY_B, SPY_O]);
+    const c = clock();
+    const q = scriptedQuote(c.now);
+    const result = await runStockCompare(store, new AbortController().signal, { ...OPTS, limiter: fakeLimiter(() => 18).limiter, quote: q.quote, now: c.now, sleep: c.sleep, budgetMs: 1_000 });
+    assert.equal(result.endedBy, "time_budget");
+    assert.ok(q.calls.length > 0 && q.calls.length < 12);
+  });
+});
+
+describe("first cycle after boot", () => {
+  const env = { STOCK_COMPARE_ENABLED: "true", BINANCE_RWA_RPS: "18" };
+
+  it("waits out the boot delay once (counting time already elapsed), then runs without waiting", async () => {
+    const store = new MemoryStore();
+    const c = clock();
+    const sleeps: number[] = [];
+    const job = stockCompareJobIfEnabled(store, env, { bootDelayMs: 200_000, now: c.now, sleep: async (ms) => { sleeps.push(ms); c.state.t += ms; } })!;
+    c.state.t += 50_000;
+    await job.run(new AbortController().signal);
+    assert.deepEqual(sleeps, [150_000]);
+    await job.run(new AbortController().signal);
+    assert.deepEqual(sleeps, [150_000]);
+  });
+
+  it("the default delay is a random 2 to 5 minutes", async () => {
+    const waits: number[] = [];
+    for (let i = 0; i < 40; i++) {
+      const c = clock();
+      const job = stockCompareJobIfEnabled(new MemoryStore(), env, { now: c.now, sleep: async (ms) => { waits.push(ms); } })!;
+      await job.run(new AbortController().signal);
+    }
+    assert.ok(waits.length === 40 && waits.every((w) => w >= 120_000 && w <= 300_000), waits.join(","));
+    assert.ok(new Set(waits).size > 1, "random, not constant");
+  });
+
+  it("an abort during the wait ends the run without a cycle", async () => {
+    const store = new MemoryStore();
+    await seedUniverse(store, [NVDA_B, NVDA_O]);
+    const controller = new AbortController();
+    const job = stockCompareJobIfEnabled(store, env, { bootDelayMs: 200_000, sleep: async () => { controller.abort(); } })!;
+    await job.run(controller.signal);
+    assert.equal(await store.get(STOCK_COMPARE_KEY), null);
+  });
+});
+
+describe("/status", () => {
+  it("lists stocks:compare like the other snapshot keys", async () => {
+    const store = new MemoryStore();
+    const app = createServer({ scheduler: createScheduler(store), store });
+    const missing = await (await app.request("/status")).json() as { data: { snapshots: Array<{ key: string; missing?: boolean; staleness?: string }> } };
+    assert.deepEqual(missing.data.snapshots.find((s) => s.key === "stocks:compare"), { key: "stocks:compare", missing: true });
+    await store.put(STOCK_COMPARE_KEY, { rows: {} }, TTL);
+    const present = await (await app.request("/status")).json() as { data: { snapshots: Array<{ key: string; staleness?: string }> } };
+    assert.equal(present.data.snapshots.find((s) => s.key === "stocks:compare")?.staleness, "fresh");
+  });
+});
+
 // ----------------------------------------------------- the real request path ----
 
 describe("createFlashQuote (default path, fake fetch)", () => {
@@ -657,6 +954,13 @@ describe("createFlashQuote (default path, fake fetch)", () => {
     assert.equal(limited.calls.length, 1, "no retry on 429");
   });
 
+  it("bounds toTokenAmount to uint256 like the adapter does", () => {
+    const max = ((1n << 256n) - 1n).toString();
+    assert.equal(parseFlashRouterResult({ routerResult: { toTokenAmount: max } }, request).toTokenAmount, max);
+    assert.throws(() => parseFlashRouterResult({ routerResult: { toTokenAmount: (1n << 256n).toString() } }, request));
+    assert.throws(() => parseFlashRouterResult({ routerResult: { toTokenAmount: "9".repeat(90) } }, request));
+  });
+
   it("refuses a malformed or mismatched answer", () => {
     assert.throws(() => parseFlashRouterResult({}, request));
     assert.throws(() => parseFlashRouterResult({ routerResult: { toTokenAmount: "0" } }, request));
@@ -677,18 +981,23 @@ describe("createFlashQuote (default path, fake fetch)", () => {
 // ------------------------------------------------------------ config / flag ----
 
 describe("configuration", () => {
-  it("defaults to 10 free slots and 2 rps when the bucket allows it", () => {
-    assert.deepEqual(readStockCompareConfig({ BINANCE_RWA_RPS: "18" }), { minHeadroom: 10, rps: 2 });
-    assert.deepEqual(readStockCompareConfig({ BINANCE_RWA_RPS: "18", STOCK_COMPARE_MIN_HEADROOM: "12", STOCK_COMPARE_RPS: "3" }), { minHeadroom: 12, rps: 3 });
+  it("headroom is a fraction of the bucket: 10 of 18 by default, following BINANCE_RWA_RPS", () => {
+    assert.deepEqual(readStockCompareConfig({ BINANCE_RWA_RPS: "18" }), { minHeadroom: 10, headroomRatio: 10 / 18, rps: 2 });
+    assert.equal(readStockCompareConfig({ BINANCE_RWA_RPS: "36" }).minHeadroom, 20);
+    assert.equal(readStockCompareConfig({ BINANCE_RWA_RPS: "10" }).minHeadroom, 6);
+    assert.equal(readStockCompareConfig({}).minHeadroom, 3, "the unset bucket of 5 no longer makes the default unreachable");
+    assert.equal(readStockCompareConfig({ BINANCE_RWA_RPS: "18", STOCK_COMPARE_MIN_HEADROOM_RATIO: "0.5" }).minHeadroom, 9);
+    assert.equal(readStockCompareConfig({ BINANCE_RWA_RPS: "18", STOCK_COMPARE_MIN_HEADROOM_RATIO: ".25" }).minHeadroom, 5);
+    assert.equal(readStockCompareConfig({ BINANCE_RWA_RPS: "18", STOCK_COMPARE_RPS: "3" }).rps, 3);
   });
 
-  it("rejects malformed values and a headroom or pace the shared bucket could never meet", () => {
-    for (const bad of ["0", "-1", "1.5", "abc", "", " 3x"]) {
-      assert.throws(() => readStockCompareConfig({ BINANCE_RWA_RPS: "18", STOCK_COMPARE_MIN_HEADROOM: bad }), /STOCK_COMPARE_MIN_HEADROOM/u, bad);
+  it("rejects a malformed ratio or pace instead of falling back", () => {
+    for (const bad of ["0", "1", "1.5", "-0.2", "abc", "", "0.", "5/9"]) {
+      assert.throws(() => readStockCompareConfig({ BINANCE_RWA_RPS: "18", STOCK_COMPARE_MIN_HEADROOM_RATIO: bad }), /STOCK_COMPARE_MIN_HEADROOM_RATIO/u, bad);
+    }
+    for (const bad of ["0", "-1", "1.5", "abc", "", " 3x", "19"]) {
       assert.throws(() => readStockCompareConfig({ BINANCE_RWA_RPS: "18", STOCK_COMPARE_RPS: bad }), /STOCK_COMPARE_RPS/u, bad);
     }
-    assert.throws(() => readStockCompareConfig({ BINANCE_RWA_RPS: "18", STOCK_COMPARE_MIN_HEADROOM: "19" }), /STOCK_COMPARE_MIN_HEADROOM/u);
-    assert.throws(() => readStockCompareConfig({ BINANCE_RWA_RPS: "5" }), /STOCK_COMPARE_MIN_HEADROOM/u, "default headroom 10 exceeds an unset/5 bucket");
   });
 
   it("is registered only when STOCK_COMPARE_ENABLED is exactly true", () => {
