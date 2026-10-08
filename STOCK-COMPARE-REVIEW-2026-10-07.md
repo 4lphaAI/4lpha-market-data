@@ -439,3 +439,106 @@ did not think to try.
 axis the operator named and it is a one-line change. MEDIUM-R1 and MEDIUM-R2 are small and I would
 take them in the same round, since both concern the new `best` rule. MEDIUM-R3 and the four LOWs are
 acceptable residuals. The ruling itself is correctly built and needs no further work.
+
+---
+
+# Re-check 2 of fix round 2 (2026-10-08)
+
+Scope: `git diff f38bcf5..15f42df` and the "Fix round 2" section of the build report only. Head
+`15f42df`. No product file changed by me: every mutated source was restored and
+`git status --porcelain -- src/` is empty. Nothing was run against the real Binance API.
+
+## Final verdict: SHIP
+
+Every item from re-check 1 is closed, and I verified the two most consequential ones by measurement
+rather than by reading. Four LOW residuals remain; none needs a code change before the flag goes on.
+
+## HIGH-R1: closed, and the ruling's numbers survive
+
+`readStockCompareConfig` (`src/jobs/stockCompare.ts:152-165`) now refuses both an unset and a small
+bucket, and `runStockCompare` turns that into `budget_unconfigured` with no lease, no store read and
+no quote (`:343-351`). Measured, by calling the real function:
+
+| `BINANCE_RWA_RPS` | Result |
+|---|---|
+| unset | `budget_unconfigured`: "BINANCE_RWA_RPS is not set explicitly" |
+| 5 | `budget_unconfigured`: "BINANCE_RWA_RPS=5 is below 10" |
+| 9 | `budget_unconfigured`: "below 10" |
+| 10 | `{minHeadroom: 8, rps: 2}` |
+| **18 (production)** | **`{minHeadroom: 10, rps: 2}`** |
+| 50, ratio 0.56 | `{minHeadroom: 28, rps: 2}` |
+
+So the operator's ruling Q1 pair (10 free of 18, pace 2) is exactly preserved, the fail-open I raised
+is gone, and the absolute floor of 8 keeps a bucket of 10 from being quietly weaker than the ruling.
+The failure is loud: one log line per cycle naming the variable and the minimum.
+
+## MEDIUM-R1 to R3 and the LOWs: closed
+
+- **MEDIUM-R1.** A sell-back above 2 % better than the USDT spent is rejected
+  (`src/jobs/stockCompare.ts:472-476`), the size stays `ok: true` with a null round trip. I checked the
+  resulting shape through the real `computeVerdicts`: `avoid: [{ondo, ["no_exit"]}]`, `best: "bstock"`.
+  The impossible leg that previously won `best` outright now cannot be `best` at all.
+- **MEDIUM-R2.** My round-1 survivor is dead: reversing the tie-break comparator at
+  `src/query/stockCompare.ts:265` now fails 1 of 78 tests (the builder counts it as two assertions,
+  which is consistent). The test uses the reachable band I described, round trips -100 against +150.
+- **MEDIUM-R3.** A sell-back with non-18 decimals keeps the buy and records a sell code
+  (`:466-470`), so the version stays visible, is listed with `no_exit`, and `only` can no longer make
+  the false claim that the other issuer is the only one with a route.
+- **LOWs.** The regex dot is escaped (`:137`). `decimals_mismatch` now counts toward the brake on both
+  legs, and the reset was correctly tightened to a clean no-route or a fully usable size, which is
+  what makes the counting effective: with the old "any success resets" rule an interleaved good buy
+  would have hidden a bad sell-back forever. The epsilon has a test and a correct example (50 x 0.56
+  asks for 28, measured). The lease's Postgres-only scope and the restart wait are documented.
+  LOW-R2 (counting closed-by-check sizes in the log line) is left as stated, which is fine.
+
+## The two surviving mutants: both genuinely equivalent
+
+I did not take these on trust.
+
+- **Unset `BINANCE_RWA_RPS` allowed.** True today: `readBinanceRwaRps` returns
+  `BINANCE_RWA_DEFAULT_RPS` = 5 for an unset variable, and 5 is below
+  `STOCK_COMPARE_MIN_BUCKET_RPS` = 10, so the second check refuses it anyway. Equivalent, and keeping
+  both is right rather than merely harmless: the explicit-set check is the only one that still holds
+  if `BINANCE_RWA_DEFAULT_RPS` is ever raised, and its own comment says the 5 predates the key being
+  raised, so that edit is plausible. The equivalence rests on a constant in another file with nothing
+  tying the two together (see LOW-2 below).
+- **Unescaped regex dot.** I brute-forced it rather than reasoning about it: for every printable
+  character substituted into the dot position across eight string shapes, **zero** strings are
+  admitted by the loose regex, rejected by the escaped one, and accepted by the `finite && > 0 && < 1`
+  guard. Truly equivalent. The escape is still the right change, because the equivalence depends on
+  the guard and would break if the guard were ever loosened.
+
+## Remaining, all LOW, all acceptable
+
+1. **No read-side plausibility guard.** The round-trip floor is applied where the row is written, not
+   where it is read; `computeVerdicts` still accepts any `roundTripBps`. Measured: a row carrying
+   `roundTripBps: -5000` still yields `best: "ondo"`, `avoid: []`. Only the job writes this key, so
+   the only exposure is a row produced by the pre-fix code and still inside the 2 h retention after
+   the deploy that ships this round, which also needs the implausible answer to have occurred in the
+   first place. Bounded and very unlikely; a one-line guard in `normalizeSize` would close it for good.
+2. **`implausible` is still counted nowhere by the brake.** The buy-side check returns without calling
+   `bad()` or `good()` (`src/jobs/stockCompare.ts:458-460`), and the sell-side one only sets the code,
+   so a systematic implausible answer, for example a plane-wide `tokenToShareRatio` or reference-price
+   error, spends about 150 buy quotes a cycle indefinitely while reporting `ended=complete`.
+   `decimals_mismatch` was fixed; this sibling was not. Bounded by the pace and headroom gate, so no
+   agent is harmed, and it is the same class as LOW-R2.
+3. **`STOCK_COMPARE_RPS` is still bounded only by the bucket.** Measured: bucket 18 with
+   `STOCK_COMPARE_RPS=18` yields a pace of 18, the whole bucket, leaving the headroom gate as the only
+   protection. It takes an explicit operator setting, and the default is untouched at 2, so this is a
+   note rather than a defect.
+4. **Nothing pins `BINANCE_RWA_DEFAULT_RPS < STOCK_COMPARE_MIN_BUCKET_RPS`.** The equivalence in the
+   first surviving mutant depends on it. One assertion would keep it honest.
+
+## Tests
+
+`npm test` 1099 / 1099 / 0 fail / 0 skipped, matching the expected figure; `npx tsc --noEmit` clean,
+exit 0. Four mutations of my own, three of them shapes the builder did not try, all killed: minimum
+bucket boundary `<` to `<=` so that exactly 10 is refused (2 of 78 fail), sell-back plausibility
+boundary `<` to `<=` so that exactly -200 is rejected (1), a rejected sell-back still resetting the
+brake (1), and the round-1 tie-break reversal re-run (1). Boundaries and the brake's reset condition
+are both pinned.
+
+Verdict: **SHIP.** The budget path is fail-closed and measured, the operator ruling is implemented and
+tested, and the four remaining items are LOW with no live-money or key-budget exposure. The live gate
+is unchanged: turn the flag on with `BINANCE_RWA_RPS=18` confirmed, watch one cycle's log line and the
+live agents' Flash proxy for `rate_budget_exhausted`.
