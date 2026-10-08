@@ -34,6 +34,8 @@ export const STOCK_COMPARE_AVOID_ROUND_TRIP_BPS = 200;
 export const STOCK_COMPARE_ROUND_TRIP_GAP_BPS = 200;
 /** A buy more than this many bps cheaper than the reference share price is not believed. */
 export const STOCK_COMPARE_IMPLAUSIBLE_COST_BPS = -2_000;
+/** A sell-back returning more than 2 percent above the USDT spent is not believed (roundTripBps below this). */
+export const STOCK_COMPARE_IMPLAUSIBLE_ROUND_TRIP_BPS = -200;
 
 /** Upper bound on stored tickers; far above the ~75 tickers measured with both issuers. */
 export const STOCK_COMPARE_MAX_TICKERS = 200;

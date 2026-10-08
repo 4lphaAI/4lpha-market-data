@@ -260,3 +260,39 @@ headroom ratio ignored (1), /status key removed (1), verdict buy_cost rule remov
 no_exit rule removed (1), about_same without known round trips (1), about_same round-trip gap ignored (2), best not
 nulled when about_same (3), best ignores avoid (3), best edge rule removed (4); the earlier ten budget/threshold
 mutations were re-run where still applicable (headroom, 429, give-up, pace, acquire, thresholds): all killed.
+
+## Fix round 2 (re-check of fix round 1: 1 HIGH, 3 MEDIUM, 4 LOW)
+
+1. **HIGH-R1, fail closed on the budget.** `readStockCompareConfig` throws `StockCompareBudgetUnconfiguredError` unless
+   `BINANCE_RWA_RPS` is set explicitly and is at least 10 (`STOCK_COMPARE_MIN_BUCKET_RPS`). `runStockCompare` catches it
+   and ends the cycle `budget_unconfigured`: nothing sent, no lease, no store read; the job logs one line
+   (`ended=budget_unconfigured (set BINANCE_RWA_RPS explicitly, at least 10; nothing was sent)`). Required free slots are
+   now `max(ceil(bucket x ratio), 8)` (`STOCK_COMPARE_MIN_HEADROOM_FLOOR`); own pace is `STOCK_COMPARE_RPS` when set,
+   otherwise 2 (a bigger bucket does not raise it). Production (`BINANCE_RWA_RPS=18`) is unchanged: 10 free slots, 2 rps.
+   Note: while the plane's default bucket is 5, the "explicitly set" test and the "at least 10" test overlap (an unset
+   variable reads as 5), so that one mutation is an equivalent mutant; both stay as defence in depth. An injected
+   `config` (tests, scripts) skips the environment check.
+2. **MEDIUM-R1.** A sell-back returning more than 2 % above the USDT spent (`roundTripBps < -200`,
+   `STOCK_COMPARE_IMPLAUSIBLE_ROUND_TRIP_BPS`) is treated as a failed sell: the size stays `ok: true`, `roundTripBps: null`,
+   `code: "implausible"`; verdicts then list the version under `avoid` with `no_exit`, and it cannot be `best`.
+   On an `ok: true` size a `code` always refers to the sell-back.
+3. **MEDIUM-R2.** Test for the tie-break (edge under 20 bps, round trips -100 vs +150, both within the limit, more than 200
+   apart): the lower round trip wins, in both orientations; reversing the comparator turns two assertions red.
+4. **MEDIUM-R3.** A sell-back whose decimals are not 18 keeps the buy: `ok: true`, `code: "decimals_mismatch"`,
+   `roundTripBps: null` (so `no_exit` in `avoid`); `only` no longer names the other issuer falsely (tested).
+5. **LOWs.** Ratio regex dot escaped (behaviour already correct through the range guard, so that mutant is equivalent;
+   `0x5`, `95`, `0,5` are tested as rejected). `decimals_mismatch` counts toward the 10-failure brake, on the buy and on the
+   sell-back; to make that effective the brake now resets only on a clean no-route answer or on a size whose buy and
+   sell-back were both usable (before, any successful quote reset it, so interleaved good buys hid a bad sell-back).
+   Epsilon test added (50 x 0.56 asks for 28, not 29). The cross-process lease binds only with the Postgres store:
+   `MemoryStore` leases are per process, so without `DATABASE_URL` there is no cross-process guard (production has
+   Postgres). A restart waits out the old holder's lease (up to one interval) before its first cycle runs: fail closed.
+   LOW-R2 (counting closed-by-check sizes in the log line) left as is.
+
+Tests: `npm test` 1099 / 1099 / 0 fail / 0 skipped (was 1092 / 1092 / 0 / 0); `tsc --noEmit` clean; the stock-compare file has
+78 tests. Mutations (each confirmed applied, sources restored byte for byte), killed: bucket below 10 allowed (2 fail),
+absolute headroom floor removed (2), headroom epsilon removed (1), runStockCompare ignoring the env (1), sell-back
+plausibility floor removed (1), sell-back plausibility check removed (1), tie-break comparator reversed (1), sell decimals
+mismatch discards the buy (1), sell decimals mismatch not counted by the brake (1), buy decimals mismatch not counted
+by the brake (1), clean size no longer resets the brake (1). Survivors, both equivalent: "unset BINANCE_RWA_RPS allowed"
+(the unset default 5 is below 10 anyway) and the unescaped regex dot (the range guard rejects the extra strings).
