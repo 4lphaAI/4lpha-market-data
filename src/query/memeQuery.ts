@@ -244,6 +244,7 @@ export const SEGMENT_GATES: Record<MemeSegment, SegmentGates> = {
     minPriceChange1hPct: undefined,
     maxPerQuote: undefined,
     requireQuoteOpen: false,
+    maxMarketCapUsd: undefined,
   },
   memestock: {
     minUniqueTraders1h: 20,
@@ -258,6 +259,13 @@ export const SEGMENT_GATES: Record<MemeSegment, SegmentGates> = {
      * its stock, and a halted or unread stock is not a route.
      */
     requireQuoteOpen: true,
+    /**
+     * Operator 2026-10-09: no meme above 1M USD market cap. Measured over 4 days of
+     * the measure job: above 1M a meme ran +20 % within the hour 2 % of the time
+     * (20-30 % at 10k-100k) with a median hour range of 3.6 %, below the 3-8 %
+     * round trip, and every cost-rule veto the execution plane logged was one.
+     */
+    maxMarketCapUsd: 1_000_000,
   },
 };
 
@@ -268,6 +276,8 @@ export interface SegmentGates {
   /** At most this many memes per quote token; `undefined` = no cap. */
   maxPerQuote: number | undefined;
   requireQuoteOpen: boolean;
+  /** Market cap ceiling in USD; a row with no market cap is excluded; `undefined` = no ceiling. */
+  maxMarketCapUsd: number | undefined;
 }
 
 /** What the shortlist knows about a quote stock (see `loadStockInfo`). */
@@ -359,6 +369,8 @@ function parseGates(get: (name: string) => string | undefined, segment: MemeSegm
   if (maxPerQuote !== undefined && (!Number.isInteger(maxPerQuote) || maxPerQuote < 1)) {
     throw new MemeQueryError("maxPerQuote must be a positive integer or none");
   }
+  const maxMarketCapUsd = optional("maxMarketCapUsd", base.maxMarketCapUsd);
+  if (maxMarketCapUsd !== undefined && !(maxMarketCapUsd > 0)) throw new MemeQueryError("maxMarketCapUsd must be a positive number or none");
   const openRaw = get("requireQuoteOpen");
   if (openRaw !== undefined && openRaw !== "" && openRaw !== "true" && openRaw !== "false") {
     throw new MemeQueryError("requireQuoteOpen must be true or false");
@@ -369,6 +381,7 @@ function parseGates(get: (name: string) => string | undefined, segment: MemeSegm
     minPriceChange1hPct: optional("minPriceChange1hPct", base.minPriceChange1hPct),
     maxPerQuote,
     requireQuoteOpen: openRaw === "true" ? true : openRaw === "false" ? false : base.requireQuoteOpen,
+    maxMarketCapUsd,
   };
 }
 
@@ -508,6 +521,7 @@ function passesGates(row: MemeBoardRow, gates: SegmentGates, stocks: ReadonlyMap
   ) {
     return false;
   }
+  if (gates.maxMarketCapUsd !== undefined && (row.market.marketCapUsd === null || row.market.marketCapUsd > gates.maxMarketCapUsd)) return false;
   if (gates.requireQuoteOpen && row.quote.kind === "bstock") {
     const stock = row.quote.address === null ? undefined : stocks.get(row.quote.address);
     if (stock?.openState !== true) return false;

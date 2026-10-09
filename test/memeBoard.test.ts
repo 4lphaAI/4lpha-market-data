@@ -821,11 +821,11 @@ describe("memestock segment gates", () => {
   type Flow = NonNullable<MemeBoardRow["flow1h"]>;
   const goodFlow: Flow = { buys: 120, sells: 80, uniqueTraders: 90, inflowUsd: 1_000 };
   /** A live meme quoted in `stock`, with an hour of flow unless told otherwise. */
-  const ms = (n: number, stock: string, symbol: string, o: { flow?: Flow | null; chg1h?: number; txs5m?: number; txs1h?: number } = {}): MemeBoardRow =>
+  const ms = (n: number, stock: string, symbol: string, o: { flow?: Flow | null; chg1h?: number; txs5m?: number; txs1h?: number; cap?: number } = {}): MemeBoardRow =>
     classifyMeme(
       input({
-        rush: rush({ address: addr(n), symbol: `M${n}`, quote: stock, createdAt: NOW - HOUR }),
-        activity: activity({ address: addr(n), txs5m: o.txs5m ?? 10, txs1h: o.txs1h ?? 60, priceChange1hPct: o.chg1h ?? 5 }),
+        rush: rush({ address: addr(n), symbol: `M${n}`, quote: stock, createdAt: NOW - HOUR, ...(o.cap === undefined ? {} : { marketCapUsd: o.cap }) }),
+        activity: activity({ address: addr(n), txs5m: o.txs5m ?? 10, txs1h: o.txs1h ?? 60, priceChange1hPct: o.chg1h ?? 5, ...(o.cap === undefined ? {} : { marketCapUsd: o.cap }) }),
         quote: { kind: "bstock", symbol },
         flow1h: o.flow === undefined ? goodFlow : o.flow,
       }),
@@ -868,12 +868,26 @@ describe("memestock segment gates", () => {
     assert.equal(parseShortlistQuery(() => undefined).size, 20);
   });
 
+  it("keeps out a meme above 1M USD market cap, and one with no market cap, unless the caller lifts it", () => {
+    const rows = [ms(1, NVDAB, "NVDAB", { cap: 1_000_000 }), ms(2, NVDAB, "NVDAB", { cap: 1_000_001 }), ms(3, NVDAB, "NVDAB", { cap: 25_000_000 })];
+    assert.equal(rows[1]!.market.marketCapUsd, 1_000_001);
+    assert.deepEqual(buildShortlist(rows, memestock, NOW, stocksOpen).rows.map((r) => r.address), [addr(1)]);
+    const unknown = { ...rows[0]!, market: { ...rows[0]!.market, marketCapUsd: null } };
+    assert.equal(buildShortlist([unknown], memestock, NOW, stocksOpen).rows.length, 0);
+    const lifted = buildShortlist(rows, parseShortlistQuery((n) => ({ segment: "memestock", maxMarketCapUsd: "none" })[n]), NOW, stocksOpen);
+    assert.equal(lifted.rows.length, 3);
+    const higher = buildShortlist(rows, parseShortlistQuery((n) => ({ segment: "memestock", maxMarketCapUsd: "5000000" })[n]), NOW, stocksOpen);
+    assert.equal(higher.rows.length, 2);
+    assert.equal(memestock.gates.maxMarketCapUsd, 1_000_000);
+    assert.throws(() => parseShortlistQuery((n) => (n === "maxMarketCapUsd" ? "0" : undefined)), /maxMarketCapUsd/);
+  });
+
   it("lets every gate be overridden, and leaves the default segment as it was", () => {
     const thin = ms(1, NVDAB, "NVDAB", { flow: { ...goodFlow, uniqueTraders: 12 } });
     const loose = parseShortlistQuery((n) => ({ segment: "memestock", minUniqueTraders1h: "none", requireQuoteOpen: "false" })[n]);
     assert.equal(buildShortlist([thin], loose, NOW).rows.length, 1);
     const defaults = parseShortlistQuery(() => undefined);
-    assert.deepEqual(defaults.gates, { minUniqueTraders1h: undefined, minBuySellRatio1h: undefined, minPriceChange1hPct: undefined, maxPerQuote: undefined, requireQuoteOpen: false });
+    assert.deepEqual(defaults.gates, { minUniqueTraders1h: undefined, minBuySellRatio1h: undefined, minPriceChange1hPct: undefined, maxPerQuote: undefined, requireQuoteOpen: false, maxMarketCapUsd: undefined });
     assert.equal(buildShortlist([ms(1, NVDAB, "NVDAB", { flow: null })], defaults, NOW).rows.length, 1);
     assert.throws(() => parseShortlistQuery((n) => (n === "maxPerQuote" ? "0" : undefined)), /maxPerQuote/);
   });
