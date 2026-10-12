@@ -33,8 +33,9 @@
  * `MEME_JEV_ENABLED` and `TYPESAFE_API_KEY`, both needed: a meme-stock row gets
  * a TypeSafe Jev Score of how strongly the meme is themed on its quote stock,
  * and a topic-token row a Noul (is the topic about the token) plus its topic's
- * tone (a Choice asked once per topic), only for tokens that are such meme
- * stocks and only while a meme agent reads the memestock shortlist. The inputs
+ * tone (a Choice asked once per topic), only for meme stocks inside the
+ * memestock shortlist's liquidity floor and market-cap ceiling (`jevTradable`,
+ * operator 2026-10-12) and only while a meme agent reads the memestock shortlist. The inputs
  * are symbols, names, the topic name, type and tags, never post text. Each answer is cached for good
  * under its own store key, written only after a valid answer and tied to a
  * digest of the exact inputs and wording, so a changed input or question is
@@ -532,17 +533,14 @@ export async function runMemeMeasure(
 // ─── Jev text features ───────────────────────────────────────────────────────
 
 /**
- * Store keys. An answer lives at `memes:jev:v1:<item>` and is written only after
- * a valid response; a key whose own answer keeps failing has a retry marker at
- * `memes:jev:v1:retry:<item>`. Items: `stock:<address>`, `tone:<topicId>`,
- * `about:<topicId>:<address>`.
- */
-/**
  * Operator 2026-10-12 (token cost): Jev scores only the meme stocks a meme agent could trade - the
  * memestock shortlist's own liquidity floor and market-cap ceiling met on the board row. Over the
  * three days before, 1 221 of the 9 620 meme stocks scored (13 %) ever met them and 271 ever reached
  * the shortlist. A topic is asked about only through such a meme stock (see `memeJev`), so its tone
- * and pairs follow. Every meme stock is still recorded; the others carry null Jev columns.
+ * and pairs follow. Every meme stock is still recorded; the others carry null Jev columns, so a
+ * token that later leaves the band reads null from then on: join the Score by address, not per slot
+ * (the Score's inputs never change for a token). A superset of the shortlist: it applies only these
+ * two of the shortlist's gates.
  */
 export function jevTradable(row: MemeBoardRow): boolean {
   const { liquidityUsd, marketCapUsd } = row.market;
@@ -551,6 +549,12 @@ export function jevTradable(row: MemeBoardRow): boolean {
   return maxCap === undefined || (marketCapUsd !== null && marketCapUsd <= maxCap);
 }
 
+/**
+ * Store keys. An answer lives at `memes:jev:v1:<item>` and is written only after
+ * a valid response; a key whose own answer keeps failing has a retry marker at
+ * `memes:jev:v1:retry:<item>`. Items: `stock:<address>`, `tone:<topicId>`,
+ * `about:<topicId>:<address>`.
+ */
 export const JEV_KEY_PREFIX = "memes:jev:v1:";
 export const JEV_RETRY_PREFIX = "memes:jev:v1:retry:";
 const JEV_SOURCE = "typesafe-jev";
@@ -817,7 +821,8 @@ async function memeJev(
   options: { apiKey: string; fetchFn: FetchFn | undefined; now: () => number; deadline: number; failures: string[] },
 ): Promise<JevAnswers> {
   const out: JevAnswers = { stock: new Map(), about: new Map(), tone: new Map(), requests: 0 };
-  if (memeStocks.length === 0 && !topics.some((topic) => topic.tokens.length > 0)) return out;
+  // Every item goes through a scored meme stock (pairs need one, a tone needs a pair): none, nothing to do.
+  if (memeStocks.length === 0) return out;
   const { apiKey, now } = options;
   const ctx: JevContext = {
     store,
