@@ -1378,6 +1378,48 @@ describe("Binance activity for meme stocks (operator 2026-10-12)", () => {
     assert.equal(asked, 1, "the board now says 40k");
   });
 
+  it("asks every live meme stock before any dead one under the cap (review R2-1)", async () => {
+    const store = new MemoryStore();
+    const deadOnes = [1, 2, 3].map((n) => listed(n));
+    const liveOnes = Array.from({ length: BINANCE_ACTIVITY_MAX }, (_, i) => listed(i + 10));
+    const all = upstreams([...deadOnes, ...liveOnes]);
+    const deadSet = new Set(deadOnes.map((r) => r.address));
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...all,
+      fetchActivity: async (addresses: string[]) =>
+        new Map(addresses.map((a) => [a, activity({ address: a, ...(deadSet.has(a) ? { txs1h: 0, txs5m: 0 } : {}) })])),
+      now: () => NOW + MIN,
+    });
+    const asked: string[] = [];
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...all,
+      fetchActivity: async () => new Map(),
+      fetchBinanceActivity: async (address: string) => {
+        asked.push(address);
+        return null;
+      },
+      now: () => NOW + BINANCE_DEAD_RECHECK_MS,
+    });
+    assert.equal(asked.length, BINANCE_ACTIVITY_MAX);
+    assert.ok(liveOnes.every((r) => asked.includes(r.address)), "no live meme stock is pushed out by a dead recheck");
+  });
+
+  it("serves no half OKX split either (review R2-3)", async () => {
+    const store = new MemoryStore();
+    const half: HotToken = {
+      address: addr(1), symbol: "T1", launchpad: "flap", timeframe: "5m", txs: 10, txsBuy: 7, txsSell: null, uniqueTraders: 5, volumeUsd: 100,
+      changePct: 1, inflowUsd: 1, liquidityUsd: 10_000, marketCapUsd: 50_000, holders: 10, firstTradeAt: NOW - HOUR, top10Pct: 20, devPct: 0, insiderPct: 0, bundlerPct: 0,
+    };
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...upstreams([listed(1)]),
+      fetchHot: async (launchpad: MemeLaunchpad) => (launchpad === "flap" ? [half] : []),
+      fetchActivity: async () => new Map([[addr(1), activity()]]),
+      now: () => NOW + MIN,
+    });
+    const row = (await board(store))[0]!;
+    assert.equal(row.flow5m, null);
+  });
+
   it("publishes on time when Binance hangs: the phase has its own budget", async () => {
     const store = new MemoryStore();
     const started = Date.now();

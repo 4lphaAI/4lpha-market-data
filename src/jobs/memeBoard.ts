@@ -515,23 +515,30 @@ export function binanceActivityTargets(
 ): string[] {
   const maxCap = SEGMENT_GATES.memestock.maxMarketCapUsd;
   const recheckDead = now % BINANCE_DEAD_RECHECK_MS < 60_000;
-  return tracked
-    .filter(({ rush }) => {
-      if (rush.quote === null || quotes.get(rush.quote)?.kind !== "bstock") return false;
-      // The latest board numbers when there are any: a Meme Rush row is frozen once the token scrolls off (review F7).
-      const last = previousBoard.get(rush.address);
-      const liquidity = last?.market.liquidityUsd ?? rush.liquidityUsd;
-      const cap = last?.market.marketCapUsd ?? rush.marketCapUsd;
-      if (liquidity === null || liquidity < SHORTLIST_DEFAULTS.minLiquidityUsd) return false;
-      if (maxCap !== undefined && (cap === null || cap > maxCap)) return false;
-      return last?.status !== "dead" || recheckDead;
-    })
-    .slice(0, BINANCE_ACTIVITY_MAX)
-    .map(({ rush }) => rush.address);
+  const live: string[] = [];
+  const dead: string[] = [];
+  for (const { rush } of tracked) {
+    if (!eligible(rush)) continue;
+    // Review R2-1: a dead token is re-asked only after every live one, inside the same cap.
+    if (previousBoard.get(rush.address)?.status !== "dead") live.push(rush.address);
+    else if (recheckDead) dead.push(rush.address);
+  }
+  return [...live, ...dead].slice(0, BINANCE_ACTIVITY_MAX);
+
+  function eligible(rush: MemeRushRow): boolean {
+    if (rush.quote === null || quotes.get(rush.quote)?.kind !== "bstock") return false;
+    // The latest board numbers when there are any: a Meme Rush row is frozen once the token scrolls off (review F7).
+    const last = previousBoard.get(rush.address);
+    const liquidity = last?.market.liquidityUsd ?? rush.liquidityUsd;
+    const cap = last?.market.marketCapUsd ?? rush.marketCapUsd;
+    if (liquidity === null || liquidity < SHORTLIST_DEFAULTS.minLiquidityUsd) return false;
+    return maxCap === undefined || (cap !== null && cap <= maxCap);
+  }
 }
 
 function flowOf(hot: HotToken | undefined): MemeBoardRow["flow1h"] {
-  if (hot === undefined) return null;
+  // Review R2-3: a half split is never served (the execution plane drops a row whose flow lacks buys or sells).
+  if (hot === undefined || hot.txsBuy === null || hot.txsSell === null) return null;
   return { buys: hot.txsBuy, sells: hot.txsSell, uniqueTraders: hot.uniqueTraders, inflowUsd: hot.inflowUsd };
 }
 
