@@ -120,6 +120,8 @@ export interface RunMemeBoardOptions {
   fetchActivity?: ((addresses: string[], signal: AbortSignal) => Promise<Map<string, TokenActivity>>) | undefined;
   /** Binance Web3 dynamic info for one token (meme stocks only; see {@link binanceActivityTargets}). */
   fetchBinanceActivity?: ((address: string, signal: AbortSignal) => Promise<BinanceTokenActivity | null>) | undefined;
+  /** Test seam: the Binance activity phase's own budget ({@link BINANCE_ACTIVITY_BUDGET_MS}). */
+  binanceBudgetMs?: number | undefined;
   fetchSignals?: ((signal: AbortSignal) => Promise<SmartSignal[]>) | undefined;
   fetchHot?:
     | ((launchpad: MemeLaunchpad, timeframe: HotTimeframe, signal: AbortSignal) => Promise<HotToken[]>)
@@ -275,7 +277,7 @@ export async function runMemeBoard(
   // is the primary source of activity and of the 5m/1h buy/sell split, OKX the fallback; both run
   // at once. An OKX failure falls back to each row's previous activity rather than turning the
   // whole board `unknown` — `observedAt` still dates it.
-  const targets = binanceActivityTargets(tracked, quotes, previousBoard);
+  const targets = binanceActivityTargets(tracked, quotes, previousBoard, now);
   const okxRun = (async () => {
     try {
       return await fetchActivity(addresses, signal);
@@ -288,10 +290,11 @@ export async function runMemeBoard(
       return kept;
     }
   })();
+  const binanceSignal = AbortSignal.any([signal, AbortSignal.timeout(options.binanceBudgetMs ?? BINANCE_ACTIVITY_BUDGET_MS)]);
   const binanceRun = Promise.all(
     targets.map(async (address) => {
       try {
-        return [address, await fetchBinanceActivity(address, signal)] as const;
+        return [address, await fetchBinanceActivity(address, binanceSignal)] as const;
       } catch {
         return [address, null] as const;
       }
@@ -301,7 +304,7 @@ export async function runMemeBoard(
   const binanceFlow = new Map<string, BinanceTokenActivity>();
   for (const [address, row] of binanceRows) {
     if (row === null) continue;
-    activity.set(address, row.activity);
+    activity.set(address, mergeActivity(row.activity, activity.get(address)));
     binanceFlow.set(address, row);
   }
   if (binanceFlow.size < targets.length) {
@@ -361,8 +364,8 @@ export async function runMemeBoard(
       quote: token.rush.quote === null ? null : (quotes.get(token.rush.quote) ?? null),
       cloneOf: clones.get(token.rush.address) ?? null,
       listedOn: listedOn.get(token.rush.address) ?? [],
-      flow1h: binanceFlow.get(token.rush.address)?.flow1h ?? flowOf(hot1h.get(token.rush.address)),
-      flow5m: binanceFlow.get(token.rush.address)?.flow5m ?? flowOf(hot5m.get(token.rush.address)),
+      flow1h: withTraders(binanceFlow.get(token.rush.address)?.flow1h, hot1h.get(token.rush.address)),
+      flow5m: withTraders(binanceFlow.get(token.rush.address)?.flow5m, hot5m.get(token.rush.address)),
       inflow5m: inflow["5m"].get(token.rush.address) ?? null,
       inflow1h: inflow["1h"].get(token.rush.address) ?? null,
       venue: venues.get(token.rush.address) ?? null,
@@ -477,24 +480,51 @@ export function seedFromHot(
 
 /** Most meme stocks asked from Binance per cycle (about 80 pass the cuts below today; one call each). */
 export const BINANCE_ACTIVITY_MAX = 150;
+/** The Binance activity phase's own budget: past it the board publishes with what came back (review F3). */
+export const BINANCE_ACTIVITY_BUDGET_MS = 8_000;
+/** A token dead on the previous board is re-asked once every this many ms, so it can come back (review F6). */
+export const BINANCE_DEAD_RECHECK_MS = 5 * 60_000;
+
+/** Binance's numbers where it has them, else the OKX (or previous-cycle) row's; dated by the Binance read (review F8). */
+function mergeActivity(binance: TokenActivity, base: TokenActivity | undefined): TokenActivity {
+  if (base === undefined) return binance;
+  const out: TokenActivity = { ...binance };
+  for (const key of Object.keys(binance) as (keyof TokenActivity)[]) {
+    if (out[key] === null && base[key] !== null) (out as unknown as Record<string, unknown>)[key] = base[key];
+  }
+  return out;
+}
+
+/** A Binance split (with OKX's unique-trader count when it has one), else the OKX split (review F5). */
+function withTraders(binance: MemeBoardRow["flow1h"] | undefined, hot: HotToken | undefined): MemeBoardRow["flow1h"] {
+  if (binance == null) return flowOf(hot);
+  return binance.uniqueTraders === null && hot?.uniqueTraders != null ? { ...binance, uniqueTraders: hot.uniqueTraders } : binance;
+}
 
 /**
- * Exported for tests: the tracked tokens whose activity is asked from Binance, in retention order —
+ * Exported for tests: the tracked tokens whose activity is asked from Binance, in retention order -
  * quoted in a bStock, with the shortlist's own liquidity floor and market-cap ceiling met on the
- * Meme Rush row, and not dead on the previous board. Everything else stays on OKX alone.
+ * latest board row (else the Meme Rush row), and not dead on the previous board except in the first
+ * minute of every {@link BINANCE_DEAD_RECHECK_MS}. Everything else stays on OKX alone.
  */
 export function binanceActivityTargets(
   tracked: readonly TrackedToken[],
   quotes: ReadonlyMap<string, { kind: string }>,
   previousBoard: ReadonlyMap<string, MemeBoardRow>,
+  now: number,
 ): string[] {
   const maxCap = SEGMENT_GATES.memestock.maxMarketCapUsd;
+  const recheckDead = now % BINANCE_DEAD_RECHECK_MS < 60_000;
   return tracked
     .filter(({ rush }) => {
       if (rush.quote === null || quotes.get(rush.quote)?.kind !== "bstock") return false;
-      if (rush.liquidityUsd === null || rush.liquidityUsd < SHORTLIST_DEFAULTS.minLiquidityUsd) return false;
-      if (maxCap !== undefined && (rush.marketCapUsd === null || rush.marketCapUsd > maxCap)) return false;
-      return previousBoard.get(rush.address)?.status !== "dead";
+      // The latest board numbers when there are any: a Meme Rush row is frozen once the token scrolls off (review F7).
+      const last = previousBoard.get(rush.address);
+      const liquidity = last?.market.liquidityUsd ?? rush.liquidityUsd;
+      const cap = last?.market.marketCapUsd ?? rush.marketCapUsd;
+      if (liquidity === null || liquidity < SHORTLIST_DEFAULTS.minLiquidityUsd) return false;
+      if (maxCap !== undefined && (cap === null || cap > maxCap)) return false;
+      return last?.status !== "dead" || recheckDead;
     })
     .slice(0, BINANCE_ACTIVITY_MAX)
     .map(({ rush }) => rush.address);

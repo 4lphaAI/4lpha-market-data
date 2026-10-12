@@ -27,6 +27,7 @@ import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
 import {
   BINANCE_ACTIVITY_MAX,
+  BINANCE_DEAD_RECHECK_MS,
   BOARD_HELD_WRITE_MS,
   BOARD_PHASE_MS,
   MEME_BOARD_KEY,
@@ -1203,7 +1204,11 @@ describe("Binance activity for meme stocks (operator 2026-10-12)", () => {
     assert.deepEqual(row.flow1h, { buys: 90, sells: 50, uniqueTraders: null, inflowUsd: 800 });
     assert.equal(normalizeTokenActivity(addr(1), { code: "000000", success: true, data: null }, NOW), null);
     assert.equal(normalizeTokenActivity(addr(1), payload({ count5m: "", count1h: "" }), NOW), null, "no trade counts: fall back");
-    assert.equal(normalizeTokenActivity(addr(1), payload({ volume5mSell: "" }), NOW)!.flow5m.inflowUsd, null);
+    assert.equal(normalizeTokenActivity(addr(1), payload({ volume5mSell: "" }), NOW)!.flow5m!.inflowUsd, null);
+    // Review F1: a window missing either count is no split at all, never a half one.
+    const half = normalizeTokenActivity(addr(1), payload({ count1hSell: "" }), NOW)!;
+    assert.equal(half.flow1h, null);
+    assert.deepEqual(half.flow5m, { buys: 9, sells: 3, uniqueTraders: null, inflowUsd: 186.5 });
   });
 
   const binanceRow = (address: string, buys: number, sells: number): BinanceTokenActivity => ({
@@ -1307,7 +1312,7 @@ describe("Binance activity for meme stocks (operator 2026-10-12)", () => {
     let askedDead = 0;
     await runMemeBoard(dead, AbortSignal.timeout(5_000), {
       ...one,
-      fetchActivity: async () => new Map(),
+      fetchActivity: async () => new Map([[addr(1), activity({ txs1h: 0, txs5m: 0 })]]),
       fetchBinanceActivity: async () => {
         askedDead += 1;
         return null;
@@ -1315,5 +1320,77 @@ describe("Binance activity for meme stocks (operator 2026-10-12)", () => {
       now: () => NOW + MIN,
     });
     assert.equal(askedDead, 0);
+    assert.equal((NOW + BINANCE_DEAD_RECHECK_MS) % BINANCE_DEAD_RECHECK_MS, 0);
+    await runMemeBoard(dead, AbortSignal.timeout(5_000), {
+      ...one,
+      fetchActivity: async () => new Map([[addr(1), activity({ txs1h: 0, txs5m: 0 })]]),
+      fetchBinanceActivity: async () => {
+        askedDead += 1;
+        return null;
+      },
+      now: () => NOW + BINANCE_DEAD_RECHECK_MS,
+    });
+    assert.equal(askedDead, 1, "a dead meme stock is re-asked every five minutes, so it can come back");
+  });
+
+  it("keeps OKX's split and numbers where Binance has none, and its unique-trader count beside Binance's split", async () => {
+    const store = new MemoryStore();
+    const hot = (timeframe: "5m" | "1h"): HotToken => ({
+      address: addr(1), symbol: "T1", launchpad: "flap", timeframe, txs: 120, txsBuy: 70, txsSell: 50, uniqueTraders: 44, volumeUsd: 3_000,
+      changePct: 5, inflowUsd: 10, liquidityUsd: 10_000, marketCapUsd: 50_000, holders: 300, firstTradeAt: NOW - HOUR, top10Pct: 20, devPct: 0, insiderPct: 0, bundlerPct: 0,
+    });
+    const sparse = normalizeTokenActivity(addr(1), payload({ count1hSell: "", liquidity: "" }), NOW + MIN)!;
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...upstreams([listed(1)]),
+      fetchHot: async (launchpad: MemeLaunchpad, timeframe: "5m" | "1h") => (launchpad === "flap" ? [hot(timeframe)] : []),
+      fetchActivity: async () => new Map([[addr(1), activity({ liquidityUsd: 12_345 })]]),
+      fetchBinanceActivity: async () => sparse,
+      now: () => NOW + MIN,
+    });
+    const row = (await board(store))[0]!;
+    assert.equal(row.activity?.txs5m, 12, "Binance's own numbers win");
+    assert.equal(row.activity?.liquidityUsd, 12_345, "a number Binance lacks keeps OKX's");
+    assert.equal(row.activity?.observedAt, NOW + MIN);
+    assert.deepEqual(row.flow5m, { buys: 9, sells: 3, uniqueTraders: 44, inflowUsd: 186.5 });
+    assert.deepEqual(row.flow1h, { buys: 70, sells: 50, uniqueTraders: 44, inflowUsd: 10 }, "no Binance 1h split: OKX's");
+    const shortlist = buildShortlist(await board(store), parseShortlistQuery((n) => (n === "segment" ? "memestock" : undefined)), NOW + MIN,
+      new Map([[NVDAB, { priceUsd: 180, openState: true }]]));
+    assert.equal(shortlist.rows.length, 1);
+  });
+
+  it("picks targets on the latest board numbers, not a frozen Meme Rush row", async () => {
+    const store = new MemoryStore();
+    const lowOnRush = listed(1, { liq: 2_400 });
+    let asked = 0;
+    const run = (now: number) =>
+      runMemeBoard(store, AbortSignal.timeout(5_000), {
+        ...upstreams([lowOnRush]),
+        fetchActivity: async () => new Map([[addr(1), activity({ liquidityUsd: 40_000 })]]),
+        fetchBinanceActivity: async () => {
+          asked += 1;
+          return null;
+        },
+        now: () => now,
+      });
+    await run(NOW + MIN);
+    assert.equal(asked, 0, "first cycle: only the Meme Rush row (2.4k) is known");
+    await run(NOW + 2 * MIN);
+    assert.equal(asked, 1, "the board now says 40k");
+  });
+
+  it("publishes on time when Binance hangs: the phase has its own budget", async () => {
+    const store = new MemoryStore();
+    const started = Date.now();
+    const result = await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...upstreams([listed(1)]),
+      fetchActivity: async () => new Map([[addr(1), activity({ txs5m: 7 })]]),
+      fetchBinanceActivity: (_address: string, signal: AbortSignal) =>
+        new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true })),
+      binanceBudgetMs: 50,
+      now: () => NOW + MIN,
+    });
+    assert.ok(Date.now() - started < 3_000);
+    assert.equal(result.rows, 1);
+    assert.equal((await board(store))[0]!.activity?.txs5m, 7, "OKX's activity, published");
   });
 });

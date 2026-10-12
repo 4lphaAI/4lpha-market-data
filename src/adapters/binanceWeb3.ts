@@ -199,8 +199,8 @@ export function normalizeTokenQuote(address: string, payload: unknown): TokenSna
 
 /** One window's buy/sell split, in the shape of the board's `MemeFlow` (Binance carries no unique-trader count). */
 export interface BinanceFlow {
-  buys: number | null;
-  sells: number | null;
+  buys: number;
+  sells: number;
   uniqueTraders: null;
   /** Buy volume minus sell volume in USD over the window. */
   inflowUsd: number | null;
@@ -228,8 +228,9 @@ export interface BinanceTokenActivity {
     priceChange4hPct: number | null;
     priceChange24hPct: number | null;
   };
-  flow5m: BinanceFlow;
-  flow1h: BinanceFlow;
+  /** `null` when either count of the window is missing (review F1: a half split is never served). */
+  flow5m: BinanceFlow | null;
+  flow1h: BinanceFlow | null;
 }
 
 /**
@@ -261,7 +262,10 @@ export function normalizeTokenActivity(address: string, payload: unknown, observ
     const buy = n(`volume${window}Buy`), sell = n(`volume${window}Sell`);
     return buy === null || sell === null ? null : buy - sell;
   };
-  const flow = (window: string): BinanceFlow => ({ buys: n(`count${window}Buy`), sells: n(`count${window}Sell`), uniqueTraders: null, inflowUsd: net(window) });
+  const flow = (window: string): BinanceFlow | null => {
+    const buys = n(`count${window}Buy`), sells = n(`count${window}Sell`);
+    return buys === null || sells === null ? null : { buys, sells, uniqueTraders: null, inflowUsd: net(window) };
+  };
   return {
     activity: {
       address: address.toLowerCase(),
