@@ -26,8 +26,10 @@
 import type { SnapshotStore } from "../core/store.js";
 import type { JobSpec } from "../core/types.js";
 import {
+  fetchBinanceTokenActivity,
   fetchMemeRush,
   fetchSmartMoneyInflow,
+  type BinanceTokenActivity,
   type MemeLaunchpad,
   type MemeRushRow,
   type MemeRushStage,
@@ -46,6 +48,7 @@ import {
 import { readLaunchpadStates, type LaunchpadState, type LaunchpadStateReader } from "../query/launchpadState.js";
 import { MEME_RULES, classifyMeme, findClones, type MemeBoardRow, type SmartInflow } from "../query/memeClassify.js";
 import { resolveQuotes, type IssuerReader } from "../query/quoteKind.js";
+import { SEGMENT_GATES, SHORTLIST_DEFAULTS } from "../query/memeQuery.js";
 import {
   fourMemeReadersOnchain,
   readDividendsOnchain,
@@ -104,6 +107,8 @@ export interface MemeBoardResult {
   listed: number;
   byStatus: Record<string, number>;
   activityCovered: number;
+  /** Rows whose activity and buy/sell split came from Binance this cycle. */
+  binanceActivity: number;
   signals: number;
   failures: string[];
 }
@@ -113,6 +118,8 @@ export interface RunMemeBoardOptions {
     | ((stage: MemeRushStage, launchpad: MemeLaunchpad, signal: AbortSignal) => Promise<MemeRushRow[]>)
     | undefined;
   fetchActivity?: ((addresses: string[], signal: AbortSignal) => Promise<Map<string, TokenActivity>>) | undefined;
+  /** Binance Web3 dynamic info for one token (meme stocks only; see {@link binanceActivityTargets}). */
+  fetchBinanceActivity?: ((address: string, signal: AbortSignal) => Promise<BinanceTokenActivity | null>) | undefined;
   fetchSignals?: ((signal: AbortSignal) => Promise<SmartSignal[]>) | undefined;
   fetchHot?:
     | ((launchpad: MemeLaunchpad, timeframe: HotTimeframe, signal: AbortSignal) => Promise<HotToken[]>)
@@ -139,6 +146,8 @@ export async function runMemeBoard(
   const fetchActivity =
     options.fetchActivity ?? ((addresses, s) => fetchOnchainosActivity({ addresses, signal: s }));
   const fetchSignals = options.fetchSignals ?? ((s) => fetchOnchainosSignals({ signal: s }));
+  const fetchBinanceActivity =
+    options.fetchBinanceActivity ?? ((address, s) => fetchBinanceTokenActivity({ address, signal: s, now: options.now }));
   const fetchHot =
     options.fetchHot ?? ((launchpad, timeframe, s) => fetchOnchainosHotTokens({ launchpad, timeframe, signal: s }));
   const fetchInflow = options.fetchInflow ?? ((window, s) => fetchSmartMoneyInflow({ period: window, signal: s }));
@@ -255,16 +264,48 @@ export async function runMemeBoard(
     }
   }
 
-  // 3. Liveness. An OKX failure falls back to each row's previous activity
-  // rather than turning the whole board `unknown` — `observedAt` still dates it.
-  let activity = new Map<string, TokenActivity>();
-  try {
-    activity = await fetchActivity(addresses, signal);
-  } catch (error) {
-    failures.push(`activity: ${sanitizeMessage(error)}`);
-    for (const row of previousBoard.values()) {
-      if (row.activity !== null) activity.set(row.address, { address: row.address, ...row.activity });
+  // Quote kinds first (cached forever): step 3 picks the meme stocks by them.
+  const quotes = await resolveQuotes(
+    store,
+    tracked.flatMap((token) => (token.rush.quote === null ? [] : [token.rush.quote])),
+    { signal, readIssuer: options.readIssuer },
+  );
+
+  // 3. Liveness. Operator 2026-10-12: for the meme stocks the shortlist can serve, Binance Web3
+  // is the primary source of activity and of the 5m/1h buy/sell split, OKX the fallback; both run
+  // at once. An OKX failure falls back to each row's previous activity rather than turning the
+  // whole board `unknown` — `observedAt` still dates it.
+  const targets = binanceActivityTargets(tracked, quotes, previousBoard);
+  const okxRun = (async () => {
+    try {
+      return await fetchActivity(addresses, signal);
+    } catch (error) {
+      failures.push(`activity: ${sanitizeMessage(error)}`);
+      const kept = new Map<string, TokenActivity>();
+      for (const row of previousBoard.values()) {
+        if (row.activity !== null) kept.set(row.address, { address: row.address, ...row.activity });
+      }
+      return kept;
     }
+  })();
+  const binanceRun = Promise.all(
+    targets.map(async (address) => {
+      try {
+        return [address, await fetchBinanceActivity(address, signal)] as const;
+      } catch {
+        return [address, null] as const;
+      }
+    }),
+  );
+  const [activity, binanceRows] = await Promise.all([okxRun, binanceRun]);
+  const binanceFlow = new Map<string, BinanceTokenActivity>();
+  for (const [address, row] of binanceRows) {
+    if (row === null) continue;
+    activity.set(address, row.activity);
+    binanceFlow.set(address, row);
+  }
+  if (binanceFlow.size < targets.length) {
+    failures.push(`binance-activity: ${targets.length - binanceFlow.size} of ${targets.length} unread`);
   }
 
   // 4. Signals accumulate across cycles: one call returns ~41h on BSC today,
@@ -308,12 +349,7 @@ export async function runMemeBoard(
     }
   }
 
-  // 5. Quote kinds (cached forever) and clones (relative to what is tracked).
-  const quotes = await resolveQuotes(
-    store,
-    tracked.flatMap((token) => (token.rush.quote === null ? [] : [token.rush.quote])),
-    { signal, readIssuer: options.readIssuer },
-  );
+  // 5. Clones (relative to what is tracked); quote kinds were resolved before step 3.
   const clones = findClones(tracked.map((token) => token.rush));
 
   // 6. Classify.
@@ -325,8 +361,8 @@ export async function runMemeBoard(
       quote: token.rush.quote === null ? null : (quotes.get(token.rush.quote) ?? null),
       cloneOf: clones.get(token.rush.address) ?? null,
       listedOn: listedOn.get(token.rush.address) ?? [],
-      flow1h: flowOf(hot1h.get(token.rush.address)),
-      flow5m: flowOf(hot5m.get(token.rush.address)),
+      flow1h: binanceFlow.get(token.rush.address)?.flow1h ?? flowOf(hot1h.get(token.rush.address)),
+      flow5m: binanceFlow.get(token.rush.address)?.flow5m ?? flowOf(hot5m.get(token.rush.address)),
       inflow5m: inflow["5m"].get(token.rush.address) ?? null,
       inflow1h: inflow["1h"].get(token.rush.address) ?? null,
       venue: venues.get(token.rush.address) ?? null,
@@ -354,7 +390,7 @@ export async function runMemeBoard(
     deadAfterMs: TRACK_FOR_MS,
   });
   await store.put(MEME_BOARD_KEY, rows, {
-    source: "binance-meme-rush+okx-hot+onchainos",
+    source: "binance-meme-rush+binance-dynamic+okx-hot+onchainos",
     freshForMs: BOARD_FRESH_MS,
     deadAfterMs: BOARD_DEAD_MS,
   });
@@ -368,6 +404,7 @@ export async function runMemeBoard(
     listed: listed.size,
     byStatus,
     activityCovered: rows.filter((row) => row.activity !== null).length,
+    binanceActivity: binanceFlow.size,
     signals: state.signals.length,
     failures,
   };
@@ -436,6 +473,31 @@ export function seedFromHot(
     insiderPct: hot.insiderPct ?? base.insiderPct,
     bundlerPct: hot.bundlerPct ?? base.bundlerPct,
   };
+}
+
+/** Most meme stocks asked from Binance per cycle (about 80 pass the cuts below today; one call each). */
+export const BINANCE_ACTIVITY_MAX = 150;
+
+/**
+ * Exported for tests: the tracked tokens whose activity is asked from Binance, in retention order —
+ * quoted in a bStock, with the shortlist's own liquidity floor and market-cap ceiling met on the
+ * Meme Rush row, and not dead on the previous board. Everything else stays on OKX alone.
+ */
+export function binanceActivityTargets(
+  tracked: readonly TrackedToken[],
+  quotes: ReadonlyMap<string, { kind: string }>,
+  previousBoard: ReadonlyMap<string, MemeBoardRow>,
+): string[] {
+  const maxCap = SEGMENT_GATES.memestock.maxMarketCapUsd;
+  return tracked
+    .filter(({ rush }) => {
+      if (rush.quote === null || quotes.get(rush.quote)?.kind !== "bstock") return false;
+      if (rush.liquidityUsd === null || rush.liquidityUsd < SHORTLIST_DEFAULTS.minLiquidityUsd) return false;
+      if (maxCap !== undefined && (rush.marketCapUsd === null || rush.marketCapUsd > maxCap)) return false;
+      return previousBoard.get(rush.address)?.status !== "dead";
+    })
+    .slice(0, BINANCE_ACTIVITY_MAX)
+    .map(({ rush }) => rush.address);
 }
 
 function flowOf(hot: HotToken | undefined): MemeBoardRow["flow1h"] {
@@ -592,7 +654,7 @@ export function memeBoardJob(store: SnapshotStore, options: RunMemeBoardOptions 
         },
       });
       // Every cycle, so the time a run needs (and how often it misses :19) is measured.
-      console.log(`[${MEME_BOARD_JOB}] rows=${result.rows} readyMs=${readyMs}${held ? " held_to=:26" : ""}`);
+      console.log(`[${MEME_BOARD_JOB}] rows=${result.rows} binance=${result.binanceActivity} readyMs=${readyMs}${held ? " held_to=:26" : ""}`);
     },
   };
 }

@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { describe, it, mock } from "node:test";
-import { normalizeMemeRush, type MemeLaunchpad, type MemeRushRow, type MemeRushStage, type SmartInflowRow } from "../src/adapters/binanceWeb3.js";
+import {
+  normalizeMemeRush,
+  normalizeTokenActivity,
+  type BinanceTokenActivity,
+  type MemeLaunchpad,
+  type MemeRushRow,
+  type MemeRushStage,
+  type SmartInflowRow,
+} from "../src/adapters/binanceWeb3.js";
 import {
   normalizeActivityRows,
   normalizeHotTokens,
@@ -17,7 +25,15 @@ import { QUOTE_STOCKS_KEY } from "../src/jobs/binanceRwa.js";
 import { RWA_UNIVERSE_KEY } from "../src/universe.js";
 import { createScheduler } from "../src/core/scheduler.js";
 import { MemoryStore } from "../src/core/store.js";
-import { BOARD_HELD_WRITE_MS, BOARD_PHASE_MS, MEME_BOARD_KEY, MEME_STATE_KEY, memeBoardJob, runMemeBoard } from "../src/jobs/memeBoard.js";
+import {
+  BINANCE_ACTIVITY_MAX,
+  BOARD_HELD_WRITE_MS,
+  BOARD_PHASE_MS,
+  MEME_BOARD_KEY,
+  MEME_STATE_KEY,
+  memeBoardJob,
+  runMemeBoard,
+} from "../src/jobs/memeBoard.js";
 import type { FourMemeCode, FourMemeTaxRead } from "../src/query/fourmemeTax.js";
 import { MEME_VENUES_KEY } from "../src/jobs/memeVenues.js";
 import {
@@ -359,6 +375,7 @@ function fakeUpstreams(lists: Partial<Record<MemeRushStage, MemeRushRow[] | Erro
     },
     fetchHot: async () => [] as HotToken[],
     fetchInflow: async () => [] as SmartInflowRow[],
+    fetchBinanceActivity: async () => null,
     readStates: async () => new Map<string, LaunchpadState>(),
     readIssuer: async () => new Map<string, QuoteInfo>(),
     readDividends: async () => new Map<string, FlapDividend>(),
@@ -1158,5 +1175,145 @@ describe("venue refresh failure (audit round)", () => {
     assert.equal(row.venue, "pancake-v2");
     assert.equal(row.pool, addr(77));
     assert.equal(row.venueCheckedAt, NOW, "dated by the read that answered");
+  });
+});
+
+describe("Binance activity for meme stocks (operator 2026-10-12)", () => {
+  /** The dynamic-info fields the adapter reads, as Binance sends them (strings). */
+  const payload = (o: Record<string, string> = {}) => ({
+    code: "000000",
+    success: true,
+    data: {
+      price: "0.0000246", marketCap: "24600", liquidity: "9100", holders: "812",
+      count5m: "12", count5mBuy: "9", count5mSell: "3", count1h: "140", count1hBuy: "90", count1hSell: "50", count4h: "400", count24h: "1110",
+      volume5m: "214.5", volume5mBuy: "200.5", volume5mSell: "14", volume1h: "3000", volume1hBuy: "1900", volume1hSell: "1100", volume4h: "9000", volume24h: "78489",
+      percentChange5m: "2.5", percentChange1h: "-4", percentChange4h: "10", percentChange24h: "30",
+      ...o,
+    },
+  });
+
+  it("maps dynamic info to board activity and the 5m/1h buy/sell split, dated by the read", () => {
+    const row = normalizeTokenActivity("0xABC0000000000000000000000000000000007777", payload(), NOW)!;
+    assert.deepEqual(row.activity, {
+      address: "0xabc0000000000000000000000000000000007777", observedAt: NOW, priceUsd: 0.0000246, marketCapUsd: 24_600, liquidityUsd: 9_100, holders: 812,
+      txs5m: 12, txs1h: 140, txs4h: 400, txs24h: 1_110, volume5mUsd: 214.5, volume1hUsd: 3_000, volume4hUsd: 9_000, volume24hUsd: 78_489,
+      priceChange5mPct: 2.5, priceChange1hPct: -4, priceChange4hPct: 10, priceChange24hPct: 30,
+    });
+    assert.deepEqual(row.flow5m, { buys: 9, sells: 3, uniqueTraders: null, inflowUsd: 186.5 });
+    assert.deepEqual(row.flow1h, { buys: 90, sells: 50, uniqueTraders: null, inflowUsd: 800 });
+    assert.equal(normalizeTokenActivity(addr(1), { code: "000000", success: true, data: null }, NOW), null);
+    assert.equal(normalizeTokenActivity(addr(1), payload({ count5m: "", count1h: "" }), NOW), null, "no trade counts: fall back");
+    assert.equal(normalizeTokenActivity(addr(1), payload({ volume5mSell: "" }), NOW)!.flow5m.inflowUsd, null);
+  });
+
+  const binanceRow = (address: string, buys: number, sells: number): BinanceTokenActivity => ({
+    activity: { ...activity({ address, txs5m: buys + sells }), observedAt: NOW + MIN },
+    flow5m: { buys, sells, uniqueTraders: null, inflowUsd: 50 },
+    flow1h: { buys: buys * 10, sells: sells * 10, uniqueTraders: null, inflowUsd: 500 },
+  });
+  /** Token n quoted in NVDAB (or BNB), with Meme Rush liquidity and market cap. */
+  const listed = (n: number, o: { bnb?: boolean; liq?: number | null; cap?: number | null } = {}) =>
+    rush({ address: addr(n), symbol: `T${n}`, quote: o.bnb === true ? BNB_QUOTE : NVDAB, liquidityUsd: o.liq === undefined ? 10_000 : o.liq, marketCapUsd: o.cap === undefined ? 50_000 : o.cap });
+  const BNB_QUOTE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+  const upstreams = (rows: MemeRushRow[]) => ({
+    ...fakeUpstreams({ finalizing: rows }),
+    readIssuer: async (ask: string[]) => new Map(ask.map((a) => [a, { kind: "bstock" as const, symbol: "NVDAB" }])),
+    fetchSignals: async () => [] as SmartSignal[],
+  });
+
+  it("asks Binance only for live meme stocks inside the shortlist's liquidity and cap, and prefers it over OKX", async () => {
+    const store = new MemoryStore();
+    const asked: string[] = [];
+    const rows = [listed(1), listed(2, { bnb: true }), listed(3, { liq: 2_999 }), listed(4, { cap: 1_000_001 }), listed(5, { cap: null }), listed(6)];
+    const result = await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...upstreams(rows),
+      fetchActivity: async () => new Map([1, 2, 6].map((n) => [addr(n), activity({ address: addr(n), txs5m: 99 })])),
+      fetchBinanceActivity: async (address: string) => {
+        asked.push(address);
+        return address === addr(1) ? binanceRow(address, 9, 3) : null;
+      },
+      now: () => NOW + MIN,
+    });
+    assert.deepEqual(asked.sort(), [addr(1), addr(6)]);
+    const byAddress = new Map((await board(store)).map((r) => [r.address, r]));
+    assert.equal(byAddress.get(addr(1))!.activity?.txs5m, 12, "Binance wins over OKX");
+    assert.equal(byAddress.get(addr(1))!.activity?.observedAt, NOW + MIN);
+    assert.deepEqual(byAddress.get(addr(1))!.flow5m, { buys: 9, sells: 3, uniqueTraders: null, inflowUsd: 50 });
+    assert.deepEqual(byAddress.get(addr(1))!.flow1h, { buys: 90, sells: 30, uniqueTraders: null, inflowUsd: 500 });
+    assert.equal(byAddress.get(addr(6))!.activity?.txs5m, 99, "Binance unread: OKX is the fallback");
+    assert.equal(byAddress.get(addr(6))!.flow5m, null);
+    assert.equal(byAddress.get(addr(2))!.activity?.txs5m, 99, "a BNB-quoted meme stays on OKX");
+    assert.equal(result.binanceActivity, 1);
+    assert.ok(result.failures.includes("binance-activity: 1 of 2 unread"));
+  });
+
+  it("serves a meme stock while OKX is down (402), and a thrown Binance read falls back to the previous cycle", async () => {
+    const store = new MemoryStore();
+    const okxDown = async () => {
+      throw new Error("onchainos: upstream responded 402");
+    };
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...upstreams([listed(1), listed(2)]),
+      fetchActivity: async () => new Map([[addr(2), activity({ address: addr(2), txs5m: 7 })]]),
+      fetchBinanceActivity: async () => null,
+      now: () => NOW,
+    });
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...upstreams([listed(1), listed(2)]),
+      fetchActivity: okxDown,
+      fetchBinanceActivity: async (address: string) => {
+        if (address === addr(2)) throw new Error("binance 429");
+        return binanceRow(address, 9, 3);
+      },
+      now: () => NOW + MIN,
+    });
+    const byAddress = new Map((await board(store)).map((r) => [r.address, r]));
+    assert.equal(byAddress.get(addr(1))!.activity?.observedAt, NOW + MIN);
+    assert.deepEqual(byAddress.get(addr(1))!.flow5m?.buys, 9);
+    assert.equal(byAddress.get(addr(2))!.activity?.txs5m, 7, "previous cycle, still dated by its own observedAt");
+    assert.equal(byAddress.get(addr(2))!.activity?.observedAt, NOW);
+
+    const shortlist = buildShortlist(await board(store), parseShortlistQuery((n) => (n === "segment" ? "memestock" : undefined)), NOW + MIN,
+      new Map([[NVDAB, { priceUsd: 180, openState: true }]]));
+    const served = shortlist.rows.find((r) => r.address === addr(1));
+    assert.ok(served !== undefined, "the meme stock reaches the memestock shortlist on Binance data alone");
+    assert.deepEqual(served.flow5m, { buys: 9, sells: 3, uniqueTraders: null, inflowUsd: 50 });
+    assert.equal(served.observedAt, NOW + MIN);
+  });
+
+  it("asks a dead token never, and at most BINANCE_ACTIVITY_MAX per cycle", async () => {
+    const store = new MemoryStore();
+    const many = Array.from({ length: BINANCE_ACTIVITY_MAX + 20 }, (_, i) => listed(i + 1));
+    let asked = 0;
+    await runMemeBoard(store, AbortSignal.timeout(5_000), {
+      ...upstreams(many),
+      fetchActivity: async () => new Map(),
+      fetchBinanceActivity: async () => {
+        asked += 1;
+        return null;
+      },
+      now: () => NOW,
+    });
+    assert.equal(asked, BINANCE_ACTIVITY_MAX);
+
+    const dead = new MemoryStore();
+    const one = upstreams([listed(1)]);
+    await runMemeBoard(dead, AbortSignal.timeout(5_000), {
+      ...one,
+      fetchActivity: async () => new Map([[addr(1), activity({ txs1h: 0, txs5m: 0 })]]),
+      now: () => NOW,
+    });
+    assert.equal((await board(dead))[0]!.status, "dead");
+    let askedDead = 0;
+    await runMemeBoard(dead, AbortSignal.timeout(5_000), {
+      ...one,
+      fetchActivity: async () => new Map(),
+      fetchBinanceActivity: async () => {
+        askedDead += 1;
+        return null;
+      },
+      now: () => NOW + MIN,
+    });
+    assert.equal(askedDead, 0);
   });
 });

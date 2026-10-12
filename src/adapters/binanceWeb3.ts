@@ -197,6 +197,97 @@ export function normalizeTokenQuote(address: string, payload: unknown): TokenSna
   };
 }
 
+/** One window's buy/sell split, in the shape of the board's `MemeFlow` (Binance carries no unique-trader count). */
+export interface BinanceFlow {
+  buys: number | null;
+  sells: number | null;
+  uniqueTraders: null;
+  /** Buy volume minus sell volume in USD over the window. */
+  inflowUsd: number | null;
+}
+
+/** Activity for one token from Binance Web3 dynamic info, in the board's `TokenActivity` shape, plus the 5m and 1h buy/sell split. */
+export interface BinanceTokenActivity {
+  activity: {
+    address: string;
+    observedAt: number;
+    priceUsd: number | null;
+    marketCapUsd: number | null;
+    liquidityUsd: number | null;
+    holders: number | null;
+    txs5m: number | null;
+    txs1h: number | null;
+    txs4h: number | null;
+    txs24h: number | null;
+    volume5mUsd: number | null;
+    volume1hUsd: number | null;
+    volume4hUsd: number | null;
+    volume24hUsd: number | null;
+    priceChange5mPct: number | null;
+    priceChange1hPct: number | null;
+    priceChange4hPct: number | null;
+    priceChange24hPct: number | null;
+  };
+  flow5m: BinanceFlow;
+  flow1h: BinanceFlow;
+}
+
+/**
+ * Operator 2026-10-12: the meme board's activity and buy/sell split for meme stocks, primary over
+ * OKX OnchainOS (which answered 402 from 2026-10-11). One call per token; `null` when Binance has
+ * no trade counts for it, so the caller falls back.
+ */
+export async function fetchBinanceTokenActivity(params: BinanceTokenParams & { now?: (() => number) | undefined }): Promise<BinanceTokenActivity | null> {
+  const address = params.address.toLowerCase();
+  const url = `${DYNAMIC_INFO_URL}?chainId=${BSC_CHAIN_ID}&contractAddress=${encodeURIComponent(address)}`;
+  const payload = await withBinanceLimit(() =>
+    fetchJson({
+      source: SOURCE,
+      url,
+      fetchFn: params.fetchFn ?? globalThis.fetch,
+      signal: params.signal,
+    }),
+  );
+  return normalizeTokenActivity(address, payload, (params.now ?? Date.now)());
+}
+
+/** Exported for tests: a dynamic-info payload as board activity; `null` without trade counts. */
+export function normalizeTokenActivity(address: string, payload: unknown, observedAt: number): BinanceTokenActivity | null {
+  const data = unwrapEnvelope(payload);
+  if (!isRecord(data)) return null;
+  const n = (key: string) => parseNum(data[key]);
+  if (n("count5m") === null && n("count1h") === null) return null;
+  const net = (window: string) => {
+    const buy = n(`volume${window}Buy`), sell = n(`volume${window}Sell`);
+    return buy === null || sell === null ? null : buy - sell;
+  };
+  const flow = (window: string): BinanceFlow => ({ buys: n(`count${window}Buy`), sells: n(`count${window}Sell`), uniqueTraders: null, inflowUsd: net(window) });
+  return {
+    activity: {
+      address: address.toLowerCase(),
+      observedAt,
+      priceUsd: n("price") ?? n("aggPrice"),
+      marketCapUsd: n("marketCap") ?? n("fdv"),
+      liquidityUsd: n("liquidity"),
+      holders: n("holders"),
+      txs5m: n("count5m"),
+      txs1h: n("count1h"),
+      txs4h: n("count4h"),
+      txs24h: n("count24h"),
+      volume5mUsd: n("volume5m"),
+      volume1hUsd: n("volume1h"),
+      volume4hUsd: n("volume4h"),
+      volume24hUsd: n("volume24h"),
+      priceChange5mPct: n("percentChange5m"),
+      priceChange1hPct: n("percentChange1h"),
+      priceChange4hPct: n("percentChange4h"),
+      priceChange24hPct: n("percentChange24h"),
+    },
+    flow5m: flow("5m"),
+    flow1h: flow("1h"),
+  };
+}
+
 export interface BinanceTokenMeta {
   address: string;
   symbol: string | null;
