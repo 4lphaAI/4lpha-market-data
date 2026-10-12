@@ -69,7 +69,7 @@ import {
   type JevScore,
 } from "../adapters/typesafe.js";
 import { MEME_FLAGS, type MemeBoardRow, type MemeFlag } from "../query/memeClassify.js";
-import { buildShortlist, parseShortlistQuery } from "../query/memeQuery.js";
+import { SEGMENT_GATES, SHORTLIST_DEFAULTS, buildShortlist, parseShortlistQuery } from "../query/memeQuery.js";
 import { loadStockInfo, rwaRowsByAddress } from "../query/memeStocks.js";
 import { RWA_UNIVERSE_KEY } from "../universe.js";
 import { MEME_BOARD_KEY } from "./memeBoard.js";
@@ -428,7 +428,7 @@ export async function runMemeMeasure(
   const jevIdle = Boolean(options.jevApiKey) && (demandAt === null || started - demandAt >= JEV_DEMAND_WINDOW_MS);
   if (options.jevApiKey && !jevIdle) {
     try {
-      jev = await memeJev(store, signal, fresh?.memeStocks ?? [], allTopics, {
+      jev = await memeJev(store, signal, (fresh?.memeStocks ?? []).filter(jevTradable), allTopics, {
         apiKey: options.jevApiKey,
         fetchFn: options.jevFetch,
         now,
@@ -537,6 +537,20 @@ export async function runMemeMeasure(
  * `memes:jev:v1:retry:<item>`. Items: `stock:<address>`, `tone:<topicId>`,
  * `about:<topicId>:<address>`.
  */
+/**
+ * Operator 2026-10-12 (token cost): Jev scores only the meme stocks a meme agent could trade - the
+ * memestock shortlist's own liquidity floor and market-cap ceiling met on the board row. Over the
+ * three days before, 1 221 of the 9 620 meme stocks scored (13 %) ever met them and 271 ever reached
+ * the shortlist. A topic is asked about only through such a meme stock (see `memeJev`), so its tone
+ * and pairs follow. Every meme stock is still recorded; the others carry null Jev columns.
+ */
+export function jevTradable(row: MemeBoardRow): boolean {
+  const { liquidityUsd, marketCapUsd } = row.market;
+  const maxCap = SEGMENT_GATES.memestock.maxMarketCapUsd;
+  if (liquidityUsd === null || liquidityUsd < SHORTLIST_DEFAULTS.minLiquidityUsd) return false;
+  return maxCap === undefined || (marketCapUsd !== null && marketCapUsd <= maxCap);
+}
+
 export const JEV_KEY_PREFIX = "memes:jev:v1:";
 export const JEV_RETRY_PREFIX = "memes:jev:v1:retry:";
 const JEV_SOURCE = "typesafe-jev";

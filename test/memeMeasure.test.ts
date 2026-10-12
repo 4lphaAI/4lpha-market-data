@@ -20,6 +20,7 @@ import {
   JEV_CONCURRENCY,
   JEV_DEMAND_WINDOW_MS,
   JEV_KEY_PREFIX,
+  jevTradable,
   JEV_MAX_REQUESTS,
   JEV_RETRY_PREFIX,
   JEV_STOCK_QUESTIONS,
@@ -1178,6 +1179,26 @@ describe("Jev demand gate and pair scope", () => {
         await assertIdle(h, h.clock.now);
       }
     }
+  });
+
+  it("asks Jev only about meme stocks inside the shortlist's liquidity floor and cap, still recording the rest (operator 2026-10-12)", async () => {
+    const h = await harness();
+    const thin = { ...memeStock(20), market: { ...memeStock(20).market, liquidityUsd: 2_999 } };
+    const big = { ...memeStock(21), market: { ...memeStock(21).market, marketCapUsd: 1_000_001 } };
+    const noCap = { ...memeStock(22), market: { ...memeStock(22).market, marketCapUsd: null } };
+    const edge = { ...memeStock(23), market: { ...memeStock(23).market, liquidityUsd: 3_000, marketCapUsd: 1_000_000 } };
+    assert.deepEqual([thin, big, noCap, edge].map(jevTradable), [false, false, false, true]);
+    await h.store.put(MEME_BOARD_KEY, [thin, big, noCap, edge], TTL);
+    h.options.fetchTopics = async () => normalizeSocialRush({ code: "000000", data: [topic(1, [addr(20), addr(21)]), topic(2, [addr(23)])] });
+    const fake = fakeFetch(jevAnswer);
+    await runMemeMeasure(h.store, signal(), { ...h.options, jevApiKey: JEV_KEY, jevFetch: fake.fetch });
+    assert.deepEqual(fake.calls.map(asked), ["relevance", "tone", "about"]);
+    assert.ok(await h.store.get(`${JEV_KEY_PREFIX}stock:${addr(23)}`));
+    for (const n of [20, 21, 22]) assert.equal(await h.store.get(`${JEV_KEY_PREFIX}stock:${addr(n)}`), null);
+    assert.equal(await h.store.get(`${JEV_KEY_PREFIX}tone:topic-1`), null, "a topic with only untradable meme stocks gets no tone");
+    const { board } = expandedRows((await storedCycle(h.store, NOW))!);
+    assert.equal(board.length, 4, "every meme stock is still recorded");
+    assert.deepEqual(board.filter((r) => r["jevStockScore"] !== null).map((r) => r["address"]), [addr(23)]);
   });
 
   it("asks about a pair only when its token is a meme stock, and a tone only for a topic with such a pair", async () => {
